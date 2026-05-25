@@ -1,33 +1,63 @@
 import { useState } from 'react'
+import axios from 'axios'
 import PdfUploader from './components/PdfUploader'
 import PdfViewer from './components/PdfViewer'
 import Sidebar from './components/Sidebar'
 
 function App() {
   const [pdfFile, setPdfFile] = useState(null)
-  const [result, setResult] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState(null)
+  const [globalMap, setGlobalMap] = useState(null)
+  const [explanation, setExplanation] = useState(null)
+  const [loadingGlobal, setLoadingGlobal] = useState(false)
+  const [loadingExplain, setLoadingExplain] = useState(false)
+  const [errorGlobal, setErrorGlobal] = useState(null)
+  const [errorExplain, setErrorExplain] = useState(null)
 
   async function handleUpload(file) {
     setPdfFile(file)
-    setLoading(true)
-    setError(null)
+    setLoadingGlobal(true)
+    setErrorGlobal(null)
+    setGlobalMap(null)
+    setExplanation(null)
+
     const formData = new FormData()
     formData.append('file', file)
 
     try {
-      const res = await fetch('/api/upload-pdf/', { method: 'POST', body: formData })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Error desconocido')
-      }
-      setResult(await res.json())
+      const { data } = await axios.post('/api/upload-pdf/', formData)
+      setGlobalMap(data)
     } catch (e) {
-      setError(e.message)
+      setErrorGlobal(e.response?.data?.detail || e.message)
     } finally {
-      setLoading(false)
+      setLoadingGlobal(false)
     }
+  }
+
+  async function handleExplain(paragraphText) {
+    if (!globalMap) return
+    setLoadingExplain(true)
+    setErrorExplain(null)
+    setExplanation(null)
+
+    try {
+      const { data } = await axios.post('/api/explain-paragraph/', {
+        paragraph_text: paragraphText,
+        global_map: globalMap,
+      })
+      setExplanation(data)
+    } catch (e) {
+      setErrorExplain(e.response?.data?.detail || e.message)
+    } finally {
+      setLoadingExplain(false)
+    }
+  }
+
+  function handleReset() {
+    setPdfFile(null)
+    setGlobalMap(null)
+    setExplanation(null)
+    setErrorGlobal(null)
+    setErrorExplain(null)
   }
 
   if (!pdfFile) {
@@ -35,7 +65,7 @@ function App() {
       <div className="min-h-screen bg-slate-50 flex flex-col">
         <Header />
         <main className="flex-1 flex items-center justify-center px-4">
-          <PdfUploader onUpload={handleUpload} loading={loading} error={error} />
+          <PdfUploader onUpload={handleUpload} loading={loadingGlobal} error={errorGlobal} />
         </main>
       </div>
     )
@@ -43,13 +73,20 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
-      <Header onReset={() => { setPdfFile(null); setResult(null) }} filename={pdfFile.name} />
+      <Header onReset={handleReset} filename={pdfFile.name} />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-[70%] overflow-y-auto bg-gray-100">
-          <PdfViewer file={pdfFile} />
+          <PdfViewer file={pdfFile} onExplain={handleExplain} canExplain={!!globalMap} />
         </div>
         <div className="w-[30%] overflow-y-auto border-l border-slate-200 bg-white">
-          <Sidebar data={result} loading={loading} error={error} />
+          <Sidebar
+            globalMap={globalMap}
+            explanation={explanation}
+            loadingGlobal={loadingGlobal}
+            loadingExplain={loadingExplain}
+            errorGlobal={errorGlobal}
+            errorExplain={errorExplain}
+          />
         </div>
       </div>
     </div>

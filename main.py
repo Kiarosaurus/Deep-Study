@@ -16,13 +16,21 @@ if not _api_key:
 
 genai.configure(api_key=_api_key)
 
-GLOBAL_MAPPING_PROMPT = """Rol: Eres un asistente de investigación académica experto.
-Tarea: Vas a recibir el texto completo de un paper científico. Tu objetivo es realizar un "Mapeo Global" del documento y extraer únicamente la información fundamental que un estudiante necesitaría como contexto previo antes de leer el texto línea por línea.
+GLOBAL_MAPPING_PROMPT = """Rol: Eres un asistente de investigación académica experto integrado en una interfaz de lectura inmersiva.
 
-Instrucciones Estrictas: Debes devolver tu respuesta ÚNICAMENTE como un objeto JSON válido, sin texto de relleno antes o después. El JSON debe tener exactamente esta estructura:
-{ "acronyms": [{"term": "Acrónimo", "definition": "Definición exacta según el texto"}], "core_methodology": "Un párrafo conciso resumiendo el núcleo de la metodología del paper.", "assumed_concepts": ["Concepto 1", "Concepto 2"] }
+Contexto Global del Documento: {AQUÍ_INYECTARAS_EL_GLOBAL_MAP}
+Texto a analizar: {AQUÍ_INYECTARAS_EL_PARAGRAPH_TEXT}
 
-Notas: Extrae absolutamente todos los acrónimos utilizados en el documento y su significado. El núcleo de la metodología debe ser un párrafo resumido. Los assumed_concepts son los conceptos clave que el paper asume como sabidos por el lector."""
+Tarea: Analiza el texto proporcionado. Tu objetivo es explicar ÚNICAMENTE los conceptos complejos, jerga técnica o acrónimos presentes en este párrafo específico que NO estén ya definidos de forma clara en el propio texto. Usa el "Contexto Global" como base para tus explicaciones.
+
+Instrucciones Estrictas:
+
+NO uses lenguaje conversacional. NO digas "En esta línea se intenta decir..." ni uses frases introductorias.
+
+Devuelve tu respuesta ÚNICAMENTE como un objeto JSON válido con esta estructura:
+{ "explanations": [{"term": "Concepto o Acrónimo extraído del párrafo", "explanation": "Explicación directa, técnica y concisa de máximo 3 oraciones."}] }
+
+Si el párrafo es simple y no requiere explicaciones adicionales, devuelve una lista vacía en "explanations"."""
 
 
 class Acronym(BaseModel):
