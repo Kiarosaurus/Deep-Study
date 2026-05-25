@@ -5,3 +5,8 @@
   50%  { width: 55%; }
   100% { transform: translateX(280%); width: 35%; }
 }
+
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

@@ -135,9 +135,11 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
 
   if (total === 0) {
     return (
-      <p className="text-xs text-slate-400 text-center mt-10 leading-relaxed">
-        Este párrafo no contiene<br />conceptos complejos.
-      </p>
+      <div className="mt-10 px-4 py-5 rounded-2xl border border-slate-100 bg-slate-50 text-center">
+        <p className="text-xs text-slate-400 leading-relaxed italic">
+          Este párrafo es claro y no contiene estructuras complejas.
+        </p>
+      </div>
     )
   }
 
@@ -146,12 +148,21 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
   const canNext = currentIndex < total - 1
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="rounded-2xl border border-indigo-100 bg-indigo-50 p-5">
-        <p className="font-mono text-sm font-bold text-indigo-600 mb-3 break-words">
-          {current.term}
-        </p>
-        <p className="text-xs text-slate-700 leading-relaxed">{current.explanation}</p>
+    <div className="flex flex-col gap-5">
+      {/* Card animates on index change via key-based re-mount */}
+      <div
+        key={currentIndex}
+        className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+        style={{ animation: 'cardIn 0.18s ease-out' }}
+      >
+        {/* Term as blockquote-style phrase */}
+        <blockquote className="border-l-[3px] border-indigo-400 pl-3 py-0.5">
+          <p className="text-sm italic text-slate-700 leading-snug">
+            {current.term}
+          </p>
+        </blockquote>
+
+        <p className="text-[13px] text-slate-600 leading-relaxed">{current.explanation}</p>
       </div>
 
       <div className="flex items-center gap-2">
