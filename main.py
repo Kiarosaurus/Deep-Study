@@ -36,6 +36,28 @@ class GlobalMapping(BaseModel):
     assumed_concepts: list[str]
 
 
+# ── Pasada 2: Explicación Local ──────────────────────────────────────────────
+
+class ExplainRequest(BaseModel):
+    paragraph_text: str
+    global_map: dict
+
+
+class TermExplanation(BaseModel):
+    term: str
+    explanation: str
+
+
+class ExplainResponse(BaseModel):
+    explanations: list[TermExplanation]
+
+
+EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de un paper científico y el Mapa Global del documento (acrónimos y metodología).
+
+Tu tarea: identifica TODOS los términos técnicos, acrónimos y conceptos difíciles presentes en el párrafo y explica cada uno de forma clara y concisa en español, usando el contexto del paper para ser preciso.
+
+Devuelve ÚNICAMENTE un JSON válido. Sin texto adicional."""
+
 _gemini_model = genai.GenerativeModel(
     model_name="gemini-2.5-flash",
     generation_config=genai.GenerationConfig(
@@ -43,6 +65,15 @@ _gemini_model = genai.GenerativeModel(
         response_schema=GlobalMapping,
     ),
     system_instruction=GLOBAL_MAPPING_PROMPT,
+)
+
+_explain_model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash-lite",
+    generation_config=genai.GenerationConfig(
+        response_mime_type="application/json",
+        response_schema=ExplainResponse,
+    ),
+    system_instruction=EXPLAIN_PROMPT,
 )
 
 app = FastAPI(title="DeepStudy API", version="0.1.0")
@@ -88,3 +119,16 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
     return JSONResponse(content=global_mapping)
+
+
+@app.post("/explain-paragraph/")
+async def explain_paragraph(req: ExplainRequest):
+    prompt = (
+        f"Mapa Global del paper:\n{json.dumps(req.global_map, ensure_ascii=False)}"
+        f"\n\nPárrafo a explicar:\n{req.paragraph_text}"
+    )
+    try:
+        response = _explain_model.generate_content(prompt)
+        return json.loads(response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
