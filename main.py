@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 import fitz
@@ -135,6 +136,31 @@ _explain_model = genai.GenerativeModel(
     system_instruction=EXPLAIN_PROMPT,
 )
 
+# ── Extraction helpers ────────────────────────────────────────────────────────
+
+_CLOSING_PUNCT = frozenset('.!?…')
+_HEADER_FOOTER_MARGIN = 0.08
+_MIN_WORDS = 5
+
+
+def _looks_like_section_title(text: str) -> bool:
+    words = text.split()
+    if not words or len(words) > 8:
+        return False
+    # Numbered heading: "1.", "1.2", "A.", etc.
+    if re.match(r'^(?:\d+\.?[\d.]*|[A-Z]{1,5}\.?)\s+\S', text):
+        return True
+    # All-caps heading e.g. "INTRODUCTION", "RELATED WORK"
+    alpha = [w for w in words if w.isalpha()]
+    if alpha and all(w.isupper() for w in alpha):
+        return True
+    return False
+
+
+def _ends_sentence(text: str) -> bool:
+    return bool(text) and text[-1] in _CLOSING_PUNCT
+
+
 app = FastAPI(title="DeepStudy API", version="0.1.0")
 
 
@@ -219,23 +245,51 @@ async def upload_pdf(
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail="PDF has no pages.")
 
-    MIN_BLOCK_CHARS = 30
     pages_data: list[PageBlocks] = []
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
+        page_h = page.rect.height
+        top_limit = page_h * _HEADER_FOOTER_MARGIN
+        bot_limit = page_h * (1.0 - _HEADER_FOOTER_MARGIN)
         raw_blocks = page.get_text("blocks")
-        blocks: list[ParagraphBlock] = []
+
+        # Pass 1: filter noise (headers, footers, short non-title fragments)
+        candidates: list[tuple] = []
         for x0, y0, x1, y1, text, _block_no, block_type in raw_blocks:
             if block_type != 0:
                 continue
             clean = text.strip()
-            if len(clean) < MIN_BLOCK_CHARS:
+            if not clean:
                 continue
+            if y0 < top_limit or y1 > bot_limit:
+                continue
+            if len(clean.split()) < _MIN_WORDS and not _looks_like_section_title(clean):
+                continue
+            candidates.append((x0, y0, x1, y1, clean))
+
+        # Pass 2: merge broken paragraphs (double-column splits)
+        blocks: list[ParagraphBlock] = []
+        i = 0
+        while i < len(candidates):
+            x0, y0, x1, y1, text = candidates[i]
+            if not _looks_like_section_title(text):
+                while not _ends_sentence(text) and i + 1 < len(candidates):
+                    if _looks_like_section_title(candidates[i + 1][4]):
+                        break
+                    i += 1
+                    nx0, ny0, nx1, ny1, ntext = candidates[i]
+                    text = f"{text} {ntext}"
+                    x0 = min(x0, nx0)
+                    y0 = min(y0, ny0)
+                    x1 = max(x1, nx1)
+                    y1 = max(y1, ny1)
             blocks.append(ParagraphBlock(
-                text=clean,
+                text=text,
                 bbox=BBox(x0=round(x0, 2), y0=round(y0, 2),
                           x1=round(x1, 2), y1=round(y1, 2)),
             ))
+            i += 1
+
         pages_data.append(PageBlocks(page=page_num + 1, blocks=blocks))
 
     doc.close()
