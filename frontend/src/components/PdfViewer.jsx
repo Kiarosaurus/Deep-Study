@@ -3,17 +3,18 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 
+// Configuración del worker de PDF.js
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString()
 
 const STOP_WORDS = new Set([
-  // Spanish
+  // Español
   'de','del','la','el','los','las','en','a','y','o','u','e','un','una','unos','unas',
   'que','se','con','por','para','su','sus','al','es','son','lo','le','les','si',
   'como','más','pero','este','esta','estos','estas','ese','esa','esos','esas',
-  // English
+  // Inglés
   'the','an','of','in','to','and','or','for','with','is','are','at','by','on',
   'its','be','has','was','were','it','this','that','from','as','an',
 ])
@@ -28,67 +29,43 @@ function significantWords(text) {
   )]
 }
 
-// Three-pass strategy:
-//   1. Exact substring match → precise line range
-//   2. Fuzzy window  → find cluster of ≥60% significant words within ~5 lines
-//   3. Fallback      → first found significant word position
-function computeTermHighlight(blockText, term, bbox, scale) {
-  const { x0, y0, x1, y1 } = bbox
-  const blockW = (x1 - x0) * scale
-  const blockH = (y1 - y0) * scale
-  const CHARS_PER_LINE = 60
-  const totalLines = Math.max(1, Math.round(blockText.length / CHARS_PER_LINE))
-  const lineH = blockH / totalLines
+// ✨ NUEVA ESTRATEGIA: Extracción basada en las líneas NATIVAS de PyMuPDF
+function getHighlightLineBoxes(block, term, scale) {
+  if (!term || !block.lines || block.lines.length === 0) return [];
 
-  const lower = blockText.toLowerCase()
+  const sigWords = significantWords(term);
+  if (sigWords.length === 0) return [];
 
-  function toRect(charStart, charEnd) {
-    const sl = Math.floor(charStart / CHARS_PER_LINE)
-    const el = Math.ceil(charEnd / CHARS_PER_LINE)
+  // 1. Puntuamos cada línea nativa dependiendo de cuántas palabras clave contiene
+  const lineScores = block.lines.map(line => {
+    const lowerLine = line.text.toLowerCase();
+    return sigWords.filter(w => lowerLine.includes(w)).length;
+  });
+
+  // 2. Encontramos la ventana continua (desde la primera línea coincidente hasta la última)
+  let startIndex = -1;
+  let endIndex = -1;
+
+  for (let i = 0; i < lineScores.length; i++) {
+    if (lineScores[i] > 0) {
+      if (startIndex === -1) startIndex = i;
+      endIndex = i;
+    }
+  }
+
+  // Fallback si la búsqueda fuzzy no encuentra coincidencias
+  if (startIndex === -1) return [];
+
+  // 3. Devolvemos únicamente los Bounding Boxes exactos de esas líneas en formato de CSS
+  return block.lines.slice(startIndex, endIndex + 1).map(line => {
+    const { x0, y0, x1, y1 } = line.bbox;
     return {
-      left:   x0 * scale,
-      top:    y0 * scale + sl * lineH,
-      width:  blockW,
-      height: Math.max((el - sl) * lineH, lineH, 14),
-    }
-  }
-
-  // Pass 1: exact
-  const exactIdx = lower.indexOf(term.toLowerCase())
-  if (exactIdx !== -1) return toRect(exactIdx, exactIdx + term.length)
-
-  // Pass 2: fuzzy window
-  const sigWords = significantWords(term)
-  if (sigWords.length === 0) return toRect(0, CHARS_PER_LINE)
-
-  const found = sigWords
-    .map(w => ({ w, pos: lower.indexOf(w) }))
-    .filter(({ pos }) => pos !== -1)
-
-  if (found.length === 0) {
-    // No words match at all — highlight full block
-    return { left: x0 * scale, top: y0 * scale, width: blockW, height: blockH }
-  }
-
-  const WINDOW = CHARS_PER_LINE * 5
-  const threshold = Math.ceil(sigWords.length * 0.6)
-  let bestStart = found[0].pos
-  let bestEnd   = found[0].pos + found[0].w.length
-  let bestCount = 0
-
-  for (const { pos: anchor } of found) {
-    const inWindow = found.filter(({ pos }) => pos >= anchor && pos <= anchor + WINDOW)
-    if (inWindow.length > bestCount) {
-      bestCount = inWindow.length
-      bestStart = anchor
-      bestEnd   = Math.max(...inWindow.map(({ pos, w }) => pos + w.length))
-    }
-  }
-
-  if (bestCount >= threshold) return toRect(bestStart, bestEnd)
-
-  // Pass 3: fallback — region around first found word
-  return toRect(found[0].pos, found[0].pos + found[0].w.length + CHARS_PER_LINE)
+      left: x0 * scale,
+      top: y0 * scale,
+      width: (x1 - x0) * scale,
+      height: (y1 - y0) * scale,
+    };
+  });
 }
 
 function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, highlightTerm }) {
@@ -104,16 +81,18 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, highlight
         const sy0 = y0 * scale
         const sx1 = x1 * scale
         const sy1 = y1 * scale
+        
         const isHovered = hoveredIdx === i
         const isActive  = activeParagraph?.text === block.text
 
-        const termHL = isActive && highlightTerm
-          ? computeTermHighlight(block.text, highlightTerm, block.bbox, scale)
-          : null
+        // Generamos el array de recuadros precisos por línea
+        const highlightBoxes = isActive && highlightTerm
+          ? getHighlightLineBoxes(block, highlightTerm, scale)
+          : []
 
         return (
           <div key={i}>
-            {/* Hover highlight rect */}
+            {/* Hover highlight general del párrafo */}
             <div
               className="absolute rounded-sm transition-opacity duration-150"
               style={{
@@ -126,23 +105,23 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, highlight
               }}
             />
 
-            {/* Term highlight (yellow marker) — animates position on index change */}
-            {termHL && (
+            {/* ✨ Resaltado línea por línea preciso y múltiple */}
+            {highlightBoxes.map((box, idx) => (
               <div
-                className="absolute pointer-events-none rounded-sm"
+                key={`hl-${i}-${idx}`}
+                className="absolute pointer-events-none rounded-sm transition-all duration-300 ease-out"
                 style={{
-                  left:   termHL.left,
-                  top:    termHL.top,
-                  width:  termHL.width,
-                  height: termHL.height,
-                  background: 'rgba(253, 224, 71, 0.55)',
+                  left: box.left,
+                  top: box.top,
+                  width: box.width,
+                  height: box.height,
+                  background: 'rgba(253, 224, 71, 0.45)', // Amarillo semitransparente limpio
                   mixBlendMode: 'multiply',
-                  transition: 'top 0.2s ease-out, height 0.2s ease-out',
                 }}
               />
-            )}
+            ))}
 
-            {/* ✦ viñeta button */}
+            {/* ✦ viñeta button para solicitar la explicación */}
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
@@ -181,7 +160,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, highli
   }
 
   return (
-    <div className="relative shadow-xl mb-5">
+    <div className="relative shadow-xl mb-5 bg-white">
       <Page
         pageNumber={pageNumber}
         width={width}
@@ -208,8 +187,10 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, hig
     if (node) setContainerWidth(node.getBoundingClientRect().width)
   }, [])
 
+  // Restamos padding para los márgenes laterales
   const pageWidth = containerWidth ? containerWidth - 48 : undefined
 
+  // Mapeamos los bloques por página para pasárselos fácilmente a <PdfPage>
   const blocksMap = pages
     ? Object.fromEntries(pages.map((p) => [p.page, p.blocks]))
     : {}
@@ -217,7 +198,7 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, hig
   return (
     <div
       ref={containerRef}
-      className="flex flex-col items-center py-8 px-6 bg-gray-100 min-h-full"
+      className="flex flex-col items-center py-8 px-6 bg-gray-100 min-h-full overflow-y-auto"
     >
       <Document
         file={file}
