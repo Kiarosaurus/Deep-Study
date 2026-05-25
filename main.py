@@ -101,7 +101,11 @@ EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de 
 
 Tu tarea: identifica TODOS los términos técnicos, acrónimos y conceptos difíciles presentes en el párrafo y explica cada uno de forma clara y concisa en español, usando el contexto del paper para ser preciso.
 
-Devuelve ÚNICAMENTE un JSON válido. Sin texto adicional."""
+Reglas estrictas de formato JSON:
+- Los valores de "term" y "explanation" deben contener texto limpio y legible.
+- NO uses puntuación extraña como "))", "((", ni símbolos LaTeX sin contexto.
+- NO añadas dos puntos ":" al final del campo "term". El frontend gestiona el formato visual.
+- Devuelve ÚNICAMENTE un JSON válido. Sin ningún texto adicional fuera del JSON."""
 
 _GLOBAL_GEN_CONFIG = genai.GenerationConfig(
     response_mime_type="application/json",
@@ -138,19 +142,26 @@ _explain_model = genai.GenerativeModel(
 
 # ── Extraction helpers ────────────────────────────────────────────────────────
 
-_CLOSING_PUNCT = frozenset('.!?…')
+_CLOSING_PUNCT       = frozenset('.!?…')
 _HEADER_FOOTER_MARGIN = 0.08
-_MIN_WORDS = 5
+_TITLE_PAGE_MARGIN   = 0.22     # top exclusion on page 1 to skip title/authors
+_MIN_WORDS           = 5
+_INDENT_THRESHOLD    = 15.0     # pt: x0 delta that signals a new indented paragraph
+_TITLE_FONT_RATIO    = 1.5      # block avg font > page median × this → skip on page 1
+
+_JUNK_PREFIXES = (
+    'keywords', 'keywords:', 'index terms', 'index terms:',
+    'reference format', 'reference format:', 'acm reference format',
+    'ccs concepts',
+)
 
 
 def _looks_like_section_title(text: str) -> bool:
     words = text.split()
     if not words or len(words) > 8:
         return False
-    # Numbered heading: "1.", "1.2", "A.", etc.
     if re.match(r'^(?:\d+\.?[\d.]*|[A-Z]{1,5}\.?)\s+\S', text):
         return True
-    # All-caps heading e.g. "INTRODUCTION", "RELATED WORK"
     alpha = [w for w in words if w.isalpha()]
     if alpha and all(w.isupper() for w in alpha):
         return True
@@ -159,6 +170,61 @@ def _looks_like_section_title(text: str) -> bool:
 
 def _ends_sentence(text: str) -> bool:
     return bool(text) and text[-1] in _CLOSING_PUNCT
+
+
+def _is_junk_section(text: str) -> bool:
+    lower = text.lower().lstrip()
+    return any(lower.startswith(kw) for kw in _JUNK_PREFIXES)
+
+
+def _page_median_font_size(dict_blocks: list) -> float:
+    sizes = [
+        span["size"]
+        for b in dict_blocks if b.get("type") == 0
+        for line in b.get("lines", [])
+        for span in line.get("spans", [])
+        if span.get("text", "").strip()
+    ]
+    if not sizes:
+        return 10.0
+    sizes.sort()
+    return sizes[len(sizes) // 2]
+
+
+def _block_avg_font_size(block: dict) -> float:
+    sizes = [
+        span["size"]
+        for line in block.get("lines", [])
+        for span in line.get("spans", [])
+        if span.get("text", "").strip()
+    ]
+    return sum(sizes) / len(sizes) if sizes else 0.0
+
+
+def _split_by_indent(block: dict) -> list[tuple]:
+    """Split a get_text('dict') block into (x0,y0,x1,y1,text) by line indentation."""
+    lines = block.get("lines", [])
+    if not lines:
+        return []
+    std_x0 = min(ln["bbox"][0] for ln in lines)
+    result, cur_texts, cur_bbox = [], [], None
+    for ln in lines:
+        lx0, ly0, lx1, ly1 = ln["bbox"]
+        line_text = " ".join(s.get("text", "") for s in ln.get("spans", [])).strip()
+        if not line_text:
+            continue
+        if cur_texts and (lx0 - std_x0) > _INDENT_THRESHOLD:
+            result.append((*cur_bbox, " ".join(cur_texts)))
+            cur_texts, cur_bbox = [], None
+        cur_texts.append(line_text)
+        if cur_bbox is None:
+            cur_bbox = (lx0, ly0, lx1, ly1)
+        else:
+            cur_bbox = (min(cur_bbox[0], lx0), min(cur_bbox[1], ly0),
+                        max(cur_bbox[2], lx1), max(cur_bbox[3], ly1))
+    if cur_texts:
+        result.append((*cur_bbox, " ".join(cur_texts)))
+    return result
 
 
 app = FastAPI(title="DeepStudy API", version="0.1.0")
@@ -249,23 +315,30 @@ async def upload_pdf(
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
         page_h = page.rect.height
-        top_limit = page_h * _HEADER_FOOTER_MARGIN
+        top_limit = page_h * (_TITLE_PAGE_MARGIN if page_num == 0 else _HEADER_FOOTER_MARGIN)
         bot_limit = page_h * (1.0 - _HEADER_FOOTER_MARGIN)
-        raw_blocks = page.get_text("blocks")
 
-        # Pass 1: filter noise (headers, footers, short non-title fragments)
+        raw = page.get_text("dict")
+        dict_blocks = raw.get("blocks", [])
+        median_size = _page_median_font_size(dict_blocks)
+
+        # Pass 1: filter noise + split by indentation
         candidates: list[tuple] = []
-        for x0, y0, x1, y1, text, _block_no, block_type in raw_blocks:
-            if block_type != 0:
+        for block in dict_blocks:
+            if block.get("type") != 0:
                 continue
-            clean = text.strip()
-            if not clean:
+            _, by0, _, by1 = block["bbox"]
+            if by0 < top_limit or by1 > bot_limit:
                 continue
-            if y0 < top_limit or y1 > bot_limit:
+            if page_num == 0 and _block_avg_font_size(block) > median_size * _TITLE_FONT_RATIO:
                 continue
-            if len(clean.split()) < _MIN_WORDS and not _looks_like_section_title(clean):
-                continue
-            candidates.append((x0, y0, x1, y1, clean))
+            for sx0, sy0, sx1, sy1, text in _split_by_indent(block):
+                clean = text.strip()
+                if not clean or _is_junk_section(clean):
+                    continue
+                if len(clean.split()) < _MIN_WORDS and not _looks_like_section_title(clean):
+                    continue
+                candidates.append((sx0, sy0, sx1, sy1, clean))
 
         # Pass 2: merge broken paragraphs (double-column splits)
         blocks: list[ParagraphBlock] = []
@@ -279,10 +352,8 @@ async def upload_pdf(
                     i += 1
                     nx0, ny0, nx1, ny1, ntext = candidates[i]
                     text = f"{text} {ntext}"
-                    x0 = min(x0, nx0)
-                    y0 = min(y0, ny0)
-                    x1 = max(x1, nx1)
-                    y1 = max(y1, ny1)
+                    x0, y0 = min(x0, nx0), min(y0, ny0)
+                    x1, y1 = max(x1, nx1), max(y1, ny1)
             blocks.append(ParagraphBlock(
                 text=text,
                 bbox=BBox(x0=round(x0, 2), y0=round(y0, 2),
