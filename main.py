@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+from dataclasses import dataclass
 
 import fitz
 import google.generativeai as genai
@@ -95,16 +96,34 @@ class ExplainResponse(BaseModel):
     explanations: list[TermExplanation]
 
 
+# ── Estructura Temporal para Heurística ───────────────────────────────────────
+@dataclass
+class TextCandidate:
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    text: str
+    is_indented: bool
+    font_size: float
+
+
 # ── AI models ─────────────────────────────────────────────────────────────────
 
-EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de un paper científico y el Mapa Global del documento (acrónimos y metodología).
+# PROMPT MEJORADO: Orientado a IDEAS COMPLEJAS en lugar de solo conceptos
+EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de un paper científico y el Mapa Global del documento.
 
-Tu tarea: identifica TODOS los términos técnicos, acrónimos y conceptos difíciles presentes en el párrafo y explica cada uno de forma clara y concisa en español, usando el contexto del paper para ser preciso.
+Tu tarea: identifica TODAS las IDEAS COMPLEJAS, implicaciones profundas, contexto subyacente y términos técnicos en el párrafo. 
+Explica cada elemento de forma analítica y concisa en español.
+
+Reglas de extracción:
+- NO te limites a acrónimos. Si una oración describe un "approach" o una tecnología (ej. avances en diseños MEMS), extrae esa frase clave y explica qué significa, por qué es relevante o su contexto.
+- Si para una sola oración existen múltiples ideas complejas o conceptos técnicos iterativos, DIVÍDELOS en varios objetos independientes dentro de la lista (un globo de explicación por cada idea).
 
 Reglas estrictas de formato JSON:
-- Los valores de "term" y "explanation" deben contener texto limpio y legible.
+- "term": La frase, idea o concepto clave exacto extraído del texto. NO incluyas dos puntos finales.
+- "explanation": Tu explicación profunda, técnica y concisa (máximo 3 oraciones).
 - NO uses puntuación extraña como "))", "((", ni símbolos LaTeX sin contexto.
-- NO añadas dos puntos ":" al final del campo "term". El frontend gestiona el formato visual.
 - Devuelve ÚNICAMENTE un JSON válido. Sin ningún texto adicional fuera del JSON."""
 
 _GLOBAL_GEN_CONFIG = genai.GenerationConfig(
@@ -144,10 +163,10 @@ _explain_model = genai.GenerativeModel(
 
 _CLOSING_PUNCT       = frozenset('.!?…')
 _HEADER_FOOTER_MARGIN = 0.08
-_TITLE_PAGE_MARGIN   = 0.22     # top exclusion on page 1 to skip title/authors
+_TITLE_PAGE_MARGIN   = 0.22
 _MIN_WORDS           = 5
-_INDENT_THRESHOLD    = 15.0     # pt: x0 delta that signals a new indented paragraph
-_TITLE_FONT_RATIO    = 1.5      # block avg font > page median × this → skip on page 1
+_INDENT_THRESHOLD    = 15.0     # pts: diferencia x0 para considerar sangría
+_TITLE_FONT_RATIO    = 1.5
 
 _JUNK_PREFIXES = (
     'keywords', 'keywords:', 'index terms', 'index terms:',
@@ -185,8 +204,7 @@ def _page_median_font_size(dict_blocks: list) -> float:
         for span in line.get("spans", [])
         if span.get("text", "").strip()
     ]
-    if not sizes:
-        return 10.0
+    if not sizes: return 10.0
     sizes.sort()
     return sizes[len(sizes) // 2]
 
@@ -200,30 +218,43 @@ def _block_avg_font_size(block: dict) -> float:
     ]
     return sum(sizes) / len(sizes) if sizes else 0.0
 
-
-def _split_by_indent(block: dict) -> list[tuple]:
-    """Split a get_text('dict') block into (x0,y0,x1,y1,text) by line indentation."""
+def _split_by_indent(block: dict) -> list[TextCandidate]:
+    """Calcula matemáticamente la sangría y extrae sub-bloques."""
     lines = block.get("lines", [])
     if not lines:
         return []
     std_x0 = min(ln["bbox"][0] for ln in lines)
-    result, cur_texts, cur_bbox = [], [], None
+    block_font = _block_avg_font_size(block)
+    
+    result = []
+    cur_texts, cur_bbox = [], None
+    
     for ln in lines:
         lx0, ly0, lx1, ly1 = ln["bbox"]
         line_text = " ".join(s.get("text", "") for s in ln.get("spans", [])).strip()
         if not line_text:
             continue
-        if cur_texts and (lx0 - std_x0) > _INDENT_THRESHOLD:
-            result.append((*cur_bbox, " ".join(cur_texts)))
+        
+        # Matemáticas de sangría: si el inicio de esta línea se separa del borde general
+        line_is_indented = (lx0 - std_x0) > _INDENT_THRESHOLD
+        
+        if cur_texts and line_is_indented:
+            # Nuevo párrafo detectado por sangría
+            is_indented = (cur_bbox[0] - std_x0) > _INDENT_THRESHOLD if cur_bbox else False
+            result.append(TextCandidate(*cur_bbox, " ".join(cur_texts), is_indented, block_font))
             cur_texts, cur_bbox = [], None
+        
         cur_texts.append(line_text)
         if cur_bbox is None:
             cur_bbox = (lx0, ly0, lx1, ly1)
         else:
             cur_bbox = (min(cur_bbox[0], lx0), min(cur_bbox[1], ly0),
                         max(cur_bbox[2], lx1), max(cur_bbox[3], ly1))
+        
     if cur_texts:
-        result.append((*cur_bbox, " ".join(cur_texts)))
+        is_indented = (cur_bbox[0] - std_x0) > _INDENT_THRESHOLD if cur_bbox else False
+        result.append(TextCandidate(*cur_bbox, " ".join(cur_texts), is_indented, block_font))
+        
     return result
 
 
@@ -287,18 +318,13 @@ async def upload_pdf(
     overwrite: bool = Form(False),
 ):
     if file.content_type != "application/pdf":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type '{file.content_type}'. Only PDF files accepted.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDF accepted.")
 
     dest = UPLOADS_DIR / file.filename
     if dest.exists() and not overwrite:
         raise HTTPException(status_code=409, detail=f"'{file.filename}' already exists.")
 
     contents = await file.read()
-
-    # Save PDF to disk
     dest.write_bytes(contents)
 
     try:
@@ -306,10 +332,6 @@ async def upload_pdf(
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
-
-    if doc.page_count == 0:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail="PDF has no pages.")
 
     pages_data: list[PageBlocks] = []
     for page_num in range(doc.page_count):
@@ -322,38 +344,59 @@ async def upload_pdf(
         dict_blocks = raw.get("blocks", [])
         median_size = _page_median_font_size(dict_blocks)
 
-        # Pass 1: filter noise + split by indentation
-        candidates: list[tuple] = []
+        # PASADA 1: Filtro de Ruido
+        candidates: list[TextCandidate] = []
         for block in dict_blocks:
-            if block.get("type") != 0:
-                continue
+            if block.get("type") != 0: continue
             _, by0, _, by1 = block["bbox"]
-            if by0 < top_limit or by1 > bot_limit:
-                continue
+            if by0 < top_limit or by1 > bot_limit: continue
             if page_num == 0 and _block_avg_font_size(block) > median_size * _TITLE_FONT_RATIO:
                 continue
-            for sx0, sy0, sx1, sy1, text in _split_by_indent(block):
-                clean = text.strip()
-                if not clean or _is_junk_section(clean):
+            
+            for cand in _split_by_indent(block):
+                if not cand.text or _is_junk_section(cand.text): continue
+                if len(cand.text.split()) < _MIN_WORDS and not _looks_like_section_title(cand.text):
                     continue
-                if len(clean.split()) < _MIN_WORDS and not _looks_like_section_title(clean):
-                    continue
-                candidates.append((sx0, sy0, sx1, sy1, clean))
+                candidates.append(cand)
 
-        # Pass 2: merge broken paragraphs (double-column splits)
+        # PASADA 2: Heurística avanzada de Subtítulos y Mergeo por Sangría
         blocks: list[ParagraphBlock] = []
         i = 0
         while i < len(candidates):
-            x0, y0, x1, y1, text = candidates[i]
-            if not _looks_like_section_title(text):
-                while not _ends_sentence(text) and i + 1 < len(candidates):
-                    if _looks_like_section_title(candidates[i + 1][4]):
-                        break
+            curr = candidates[i]
+            
+            # 1. Filtro estricto de Subtítulos
+            # Si la fuente es un 20% más grande, es corto (<6 palabras) y no tiene sangría.
+            if i + 1 < len(candidates):
+                nxt = candidates[i+1]
+                if curr.font_size > nxt.font_size * 1.2 and len(curr.text.split()) < 6 and not curr.is_indented:
                     i += 1
-                    nx0, ny0, nx1, ny1, ntext = candidates[i]
-                    text = f"{text} {ntext}"
-                    x0, y0 = min(x0, nx0), min(y0, ny0)
-                    x1, y1 = max(x1, nx1), max(y1, ny1)
+                    continue # Es un subtítulo, lo saltamos
+            
+            text = curr.text
+            x0, y0, x1, y1 = curr.x0, curr.y0, curr.x1, curr.y1
+            
+            # 2. Mergeo inteligente por Sangría (Columnas rotas)
+            while i + 1 < len(candidates):
+                nxt = candidates[i+1]
+                
+                # Prevenir que se fusione un subtítulo futuro
+                if i + 2 < len(candidates):
+                    n_nxt = candidates[i+2]
+                    if nxt.font_size > n_nxt.font_size * 1.2 and len(nxt.text.split()) < 6 and not nxt.is_indented:
+                        break # El siguiente es subtítulo
+                elif len(nxt.text.split()) < 6 and not nxt.is_indented and nxt.font_size > curr.font_size * 1.2:
+                    break
+                
+                # REGLA MAESTRA DE MERGEO: Si NO tiene sangría, es continuación
+                if not nxt.is_indented:
+                    i += 1
+                    text = f"{text} {nxt.text}"
+                    x0, y0 = min(x0, nxt.x0), min(y0, nxt.y0)
+                    x1, y1 = max(x1, nxt.x1), max(y1, nxt.y1)
+                else:
+                    break # Tiene sangría, es un párrafo nuevo real
+            
             blocks.append(ParagraphBlock(
                 text=text,
                 bbox=BBox(x0=round(x0, 2), y0=round(y0, 2),
@@ -380,16 +423,10 @@ async def upload_pdf(
         global_map=global_map,
         pages=pages_data,
     )
-
-    # Persist analysis alongside PDF
     analysis_path = UPLOADS_DIR / f"{file.filename}.analysis.json"
-    analysis_path.write_text(
-        json.dumps(result.model_dump(), ensure_ascii=False),
-        encoding="utf-8",
-    )
+    analysis_path.write_text(json.dumps(result.model_dump(), ensure_ascii=False), encoding="utf-8")
 
     return JSONResponse(content=result.model_dump())
-
 
 @app.post("/explain-paragraph/")
 async def explain_paragraph(req: ExplainRequest):
