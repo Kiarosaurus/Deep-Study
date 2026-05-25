@@ -8,30 +8,87 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
-// Estimates which region of the block bbox contains the term, using
-// character-offset fraction mapped to the block's pixel height.
+const STOP_WORDS = new Set([
+  // Spanish
+  'de','del','la','el','los','las','en','a','y','o','u','e','un','una','unos','unas',
+  'que','se','con','por','para','su','sus','al','es','son','lo','le','les','si',
+  'como','más','pero','este','esta','estos','estas','ese','esa','esos','esas',
+  // English
+  'the','an','of','in','to','and','or','for','with','is','are','at','by','on',
+  'its','be','has','was','were','it','this','that','from','as','an',
+])
+
+function significantWords(text) {
+  return [...new Set(
+    text
+      .toLowerCase()
+      .replace(/[^\wáéíóúüñ\s]/gi, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !STOP_WORDS.has(w))
+  )]
+}
+
+// Three-pass strategy:
+//   1. Exact substring match → precise line range
+//   2. Fuzzy window  → find cluster of ≥60% significant words within ~5 lines
+//   3. Fallback      → first found significant word position
 function computeTermHighlight(blockText, term, bbox, scale) {
   const { x0, y0, x1, y1 } = bbox
   const blockW = (x1 - x0) * scale
   const blockH = (y1 - y0) * scale
-
   const CHARS_PER_LINE = 60
   const totalLines = Math.max(1, Math.round(blockText.length / CHARS_PER_LINE))
   const lineH = blockH / totalLines
 
-  const idx = blockText.toLowerCase().indexOf(term.toLowerCase())
-  if (idx === -1) {
-    return { left: x0 * scale, top: y0 * scale, width: blockW, height: Math.max(lineH, 14) }
+  const lower = blockText.toLowerCase()
+
+  function toRect(charStart, charEnd) {
+    const sl = Math.floor(charStart / CHARS_PER_LINE)
+    const el = Math.ceil(charEnd / CHARS_PER_LINE)
+    return {
+      left:   x0 * scale,
+      top:    y0 * scale + sl * lineH,
+      width:  blockW,
+      height: Math.max((el - sl) * lineH, lineH, 14),
+    }
   }
 
-  const startLine = Math.floor(idx / CHARS_PER_LINE)
-  const endLine   = Math.ceil((idx + term.length) / CHARS_PER_LINE)
-  return {
-    left:   x0 * scale,
-    top:    y0 * scale + startLine * lineH,
-    width:  blockW,
-    height: Math.max((endLine - startLine) * lineH, lineH, 14),
+  // Pass 1: exact
+  const exactIdx = lower.indexOf(term.toLowerCase())
+  if (exactIdx !== -1) return toRect(exactIdx, exactIdx + term.length)
+
+  // Pass 2: fuzzy window
+  const sigWords = significantWords(term)
+  if (sigWords.length === 0) return toRect(0, CHARS_PER_LINE)
+
+  const found = sigWords
+    .map(w => ({ w, pos: lower.indexOf(w) }))
+    .filter(({ pos }) => pos !== -1)
+
+  if (found.length === 0) {
+    // No words match at all — highlight full block
+    return { left: x0 * scale, top: y0 * scale, width: blockW, height: blockH }
   }
+
+  const WINDOW = CHARS_PER_LINE * 5
+  const threshold = Math.ceil(sigWords.length * 0.6)
+  let bestStart = found[0].pos
+  let bestEnd   = found[0].pos + found[0].w.length
+  let bestCount = 0
+
+  for (const { pos: anchor } of found) {
+    const inWindow = found.filter(({ pos }) => pos >= anchor && pos <= anchor + WINDOW)
+    if (inWindow.length > bestCount) {
+      bestCount = inWindow.length
+      bestStart = anchor
+      bestEnd   = Math.max(...inWindow.map(({ pos, w }) => pos + w.length))
+    }
+  }
+
+  if (bestCount >= threshold) return toRect(bestStart, bestEnd)
+
+  // Pass 3: fallback — region around first found word
+  return toRect(found[0].pos, found[0].pos + found[0].w.length + CHARS_PER_LINE)
 }
 
 function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, highlightTerm }) {
