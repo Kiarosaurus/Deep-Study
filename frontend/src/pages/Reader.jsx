@@ -100,7 +100,7 @@ export default function Reader() {
         ← Inicio
       </button>
 
-      <div className="overflow-y-auto min-w-0" style={{ flex: 7 }}>
+      <div className="relative min-w-0 overflow-hidden" style={{ flex: 7 }}>
         <PdfViewer
           file={pdfUrl}
           onExplain={handleExplain}

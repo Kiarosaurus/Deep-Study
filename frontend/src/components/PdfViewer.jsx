@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
@@ -7,6 +7,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
 ).toString()
+
+const ZOOM_MIN  = 0.5
+const ZOOM_MAX  = 3.0
+const ZOOM_STEP = 0.2
 
 const STOP_WORDS = new Set([
   'de','del','la','el','los','las','en','a','y','o','u','e','un','una','unos','unas',
@@ -26,7 +30,6 @@ function significantWords(text) {
   )]
 }
 
-// Map [charStart, charEnd) over concatenated sentence texts (space-joined) → sentence indices.
 function charRangeToSentenceIndices(sentences, charStart, charEnd) {
   const indices = []
   let cursor = 0
@@ -39,7 +42,6 @@ function charRangeToSentenceIndices(sentences, charStart, charEnd) {
   return indices
 }
 
-// Validate Gemini's sentence indices against the quote: exact substring OR ≥70% sig-word overlap.
 function indicesAgreeWithQuote(sentences, indices, quote) {
   if (!indices.length || !quote) return false
   const indexedLower = indices.map(i => sentences[i].text).join(' ').toLowerCase()
@@ -50,13 +52,6 @@ function indicesAgreeWithQuote(sentences, indices, quote) {
   return hits / words.length >= 0.7
 }
 
-// 4-tier resolution pipeline. Returns ordered sentence indices to highlight.
-//
-//   Tier 1 — Gemini's sentence_indices validated against `quote`.
-//   Tier 2 — `quote` found verbatim across concatenated sentences → derive indices.
-//   Tier 3 — Fuzzy contiguous window over sig-words of `quote || term`.
-//   Tier 4 — Soft fallback: in-range raw indices.
-//
 function resolveSentenceIndices(sentences, item) {
   if (!sentences?.length || !item) return []
   const { quote, sentence_indices: raw, concepts } = item
@@ -110,6 +105,23 @@ function resolveSentenceIndices(sentences, item) {
   return cleanIndices
 }
 
+function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
+  const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors text-base font-semibold"
+  return (
+    <div className="absolute top-4 right-4 z-30 flex items-center gap-0.5 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1 select-none">
+      <button onClick={onZoomOut} disabled={zoom <= ZOOM_MIN + 1e-3} title="Disminuir zoom (−)" className={btn}>−</button>
+      <button
+        onClick={onFit}
+        title="Ajustar a pantalla"
+        className="px-2.5 h-8 flex items-center justify-center rounded-lg text-[11px] font-bold tabular-nums text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors min-w-[3.25rem]"
+      >
+        {Math.round(zoom * 100)}%
+      </button>
+      <button onClick={onZoomIn} disabled={zoom >= ZOOM_MAX - 1e-3} title="Aumentar zoom (+)" className={btn}>+</button>
+    </div>
+  )
+}
+
 function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentExplanation }) {
   const [hoveredIdx, setHoveredIdx] = useState(null)
 
@@ -124,7 +136,6 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
         const isHovered = hoveredIdx === i
         const isActive  = activeParagraph?.text === block.text
 
-        // Anchor del ✦ button: esquina inferior-derecha del ÚLTIMO rect (fin natural del párrafo).
         const lastBox    = paragraphBoxes[paragraphBoxes.length - 1]
         const anchorLeft = lastBox.x1 * scale
         const anchorTop  = lastBox.y1 * scale
@@ -178,7 +189,7 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
               />
             ))}
 
-            {/* ✦ viñeta button — anclado al final del último rect */}
+            {/* ✦ viñeta button */}
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
@@ -209,11 +220,13 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
 }
 
 function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation }) {
-  const [scale, setScale] = useState(null)
+  // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
+  // automáticamente cuando `width` cambia por zoom o resize.
+  const [originalWidth, setOriginalWidth] = useState(null)
+  const scale = originalWidth ? width / originalWidth : null
 
   function handlePageLoad(page) {
-    const originalWidth = page.getViewport({ scale: 1 }).width
-    setScale(width / originalWidth)
+    setOriginalWidth(page.getViewport({ scale: 1 }).width)
   }
 
   return (
@@ -237,43 +250,119 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
 }
 
 export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation }) {
-  const [numPages, setNumPages] = useState(null)
-  const [containerWidth, setContainerWidth] = useState(null)
+  const [numPages, setNumPages]               = useState(null)
+  const [containerWidth, setContainerWidth]   = useState(null)
+  const [userZoom, setUserZoom]               = useState(1.0)
 
-  const containerRef = useCallback((node) => {
-    if (node) setContainerWidth(node.getBoundingClientRect().width)
+  const containerRef = useRef(null)
+  const userZoomRef  = useRef(1.0)
+
+  useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
+
+  // Container width tracking + touch gestures (pinch-to-zoom). Pan = scroll nativo.
+  useEffect(() => {
+    const node = containerRef.current
+    if (!node) return
+
+    // Initial measure
+    setContainerWidth(node.getBoundingClientRect().width)
+
+    // Re-measure on resize
+    const ro = new ResizeObserver(entries => {
+      const w = entries[0]?.contentRect?.width
+      if (w) setContainerWidth(w)
+    })
+    ro.observe(node)
+
+    // Pinch state — ref-like via closure
+    let pinchActive    = false
+    let pinchStartDist = 0
+    let pinchStartZoom = 1.0
+
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+
+    function onTouchStart(e) {
+      if (e.touches.length === 2) {
+        pinchActive    = true
+        pinchStartDist = dist(e.touches[0], e.touches[1])
+        pinchStartZoom = userZoomRef.current
+      }
+    }
+
+    function onTouchMove(e) {
+      if (!pinchActive || e.touches.length < 2) return
+      e.preventDefault() // bloquea zoom nativo del browser durante pinch custom
+      const d = dist(e.touches[0], e.touches[1])
+      if (pinchStartDist > 0) {
+        const ratio = d / pinchStartDist
+        const next  = pinchStartZoom * ratio
+        setUserZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next)))
+      }
+    }
+
+    function onTouchEnd(e) {
+      if (e.touches.length < 2) pinchActive = false
+    }
+
+    // passive:false necesario para que preventDefault sea efectivo durante pinch
+    node.addEventListener('touchstart',  onTouchStart, { passive: false })
+    node.addEventListener('touchmove',   onTouchMove,  { passive: false })
+    node.addEventListener('touchend',    onTouchEnd)
+    node.addEventListener('touchcancel', onTouchEnd)
+
+    return () => {
+      ro.disconnect()
+      node.removeEventListener('touchstart',  onTouchStart)
+      node.removeEventListener('touchmove',   onTouchMove)
+      node.removeEventListener('touchend',    onTouchEnd)
+      node.removeEventListener('touchcancel', onTouchEnd)
+    }
   }, [])
 
-  const pageWidth = containerWidth ? containerWidth - 48 : undefined
+  function zoomIn()  { setUserZoom(z => Math.min(z + ZOOM_STEP, ZOOM_MAX)) }
+  function zoomOut() { setUserZoom(z => Math.max(z - ZOOM_STEP, ZOOM_MIN)) }
+  function zoomFit() { setUserZoom(1.0) }
+
+  // pageWidth = ancho base ajustado a contenedor * factor de zoom del usuario.
+  // PdfPage usa `scale = width / originalWidth` → overlays se reescalan automáticamente.
+  const basePageWidth = containerWidth ? containerWidth - 48 : undefined
+  const pageWidth     = basePageWidth ? basePageWidth * userZoom : undefined
 
   const blocksMap = pages
-    ? Object.fromEntries(pages.map((p) => [p.page, p.blocks]))
+    ? Object.fromEntries(pages.map(p => [p.page, p.blocks]))
     : {}
 
   return (
-    <div
-      ref={containerRef}
-      className="flex flex-col items-center py-8 px-6 bg-gray-100 min-h-full overflow-y-auto"
-    >
-      <Document
-        file={file}
-        onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-        loading={<p className="text-slate-400 text-sm mt-16">Cargando PDF...</p>}
-        error={<p className="text-red-500 text-sm mt-16">No se pudo cargar el PDF.</p>}
+    <div className="relative h-full bg-gray-100">
+      <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
+
+      <div
+        ref={containerRef}
+        className="h-full overflow-auto"
+        style={{ touchAction: 'pan-x pan-y' }}
       >
-        {numPages && pageWidth &&
-          Array.from({ length: numPages }, (_, i) => (
-            <PdfPage
-              key={i}
-              pageNumber={i + 1}
-              width={pageWidth}
-              blocks={blocksMap[i + 1]}
-              onExplain={onExplain}
-              activeParagraph={activeParagraph}
-              currentExplanation={currentExplanation}
-            />
-          ))}
-      </Document>
+        <div className="flex flex-col items-center py-8 px-6 min-h-full">
+          <Document
+            file={file}
+            onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+            loading={<p className="text-slate-400 text-sm mt-16">Cargando PDF...</p>}
+            error={<p className="text-red-500 text-sm mt-16">No se pudo cargar el PDF.</p>}
+          >
+            {numPages && pageWidth &&
+              Array.from({ length: numPages }, (_, i) => (
+                <PdfPage
+                  key={i}
+                  pageNumber={i + 1}
+                  width={pageWidth}
+                  blocks={blocksMap[i + 1]}
+                  onExplain={onExplain}
+                  activeParagraph={activeParagraph}
+                  currentExplanation={currentExplanation}
+                />
+              ))}
+          </Document>
+        </div>
+      </div>
     </div>
   )
 }
