@@ -44,12 +44,15 @@ function ParagraphOverlay({ blocks, scale, onExplain }) {
                 left: sx1,
                 top: sy1,
                 transform: 'translate(-100%, -100%)',
-                background: isHovered ? 'rgb(99,102,241)' : 'rgba(255,255,255,0.85)',
-                border: isHovered ? 'none' : '1px solid rgba(99,102,241,0.35)',
-                color: isHovered ? 'white' : 'rgb(99,102,241)',
+                background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
+                border: '1.5px solid rgba(99,102,241,0.6)',
+                color: isHovered ? 'white' : 'rgb(79,70,229)',
                 fontSize: '8px',
                 fontWeight: 700,
-                boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.4)' : 'none',
+                boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                transform: isHovered
+                  ? 'translate(-100%, -100%) scale(1.15)'
+                  : 'translate(-100%, -100%)',
               }}
               onClick={() => onExplain(block.text)}
               onMouseEnter={() => setHoveredIdx(i)}
@@ -69,8 +72,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain }) {
   const [scale, setScale] = useState(null)
 
   function handlePageLoad(page) {
-    // page.view = [x0, y0, x1, y1] in PDF user-space points (72 DPI)
-    const originalWidth = page.view[2] - page.view[0]
+    const originalWidth = page.getViewport({ scale: 1 }).width
     setScale(width / originalWidth)
   }
 

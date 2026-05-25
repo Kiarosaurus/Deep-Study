@@ -1,6 +1,49 @@
 import { useState, useRef } from 'react'
 
-export default function PdfUploader({ onUpload, loading, error }) {
+function ProgressView({ uploadProgress, filename }) {
+  const uploading = uploadProgress < 100
+
+  return (
+    <div className="w-full max-w-md flex flex-col items-center gap-5">
+      <div className="text-center">
+        {uploading ? (
+          <>
+            <p className="font-semibold text-slate-700 text-lg">Subiendo archivo...</p>
+            <p className="text-3xl font-bold text-indigo-600 mt-1 tabular-nums">
+              {uploadProgress}%
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="font-semibold text-slate-700 text-lg">Analizando con IA...</p>
+            <p className="text-xs text-slate-400 mt-1">Esto puede tardar unos segundos</p>
+          </>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+        {uploading ? (
+          <div
+            className="h-full bg-indigo-600 rounded-full transition-all duration-300 ease-out"
+            style={{ width: `${uploadProgress}%` }}
+          />
+        ) : (
+          <div
+            className="h-full bg-indigo-500 rounded-full"
+            style={{ animation: 'slide-indeterminate 1.5s ease-in-out infinite' }}
+          />
+        )}
+      </div>
+
+      {filename && (
+        <p className="text-xs text-slate-400 truncate w-full text-center px-4">{filename}</p>
+      )}
+    </div>
+  )
+}
+
+export default function PdfUploader({ onUpload, loading, uploadProgress, error }) {
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [language, setLanguage] = useState('es')
@@ -15,6 +58,14 @@ export default function PdfUploader({ onUpload, loading, error }) {
     e.preventDefault()
     setDragging(false)
     handleFile(e.dataTransfer.files[0])
+  }
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center w-full">
+        <ProgressView uploadProgress={uploadProgress} filename={file?.name} />
+      </div>
+    )
   }
 
   return (
@@ -91,27 +142,18 @@ export default function PdfUploader({ onUpload, loading, error }) {
       </div>
 
       {error && (
-        <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-lg px-4 py-2 w-full max-w-md">
-          {error}
-        </p>
+        <div className="w-full max-w-md bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+          <p className="text-sm font-semibold text-red-600 mb-0.5">Error</p>
+          <p className="text-xs text-red-500">{error}</p>
+        </div>
       )}
 
       <button
-        disabled={!file || loading}
+        disabled={!file}
         onClick={() => onUpload(file, { language, keepTermsInEnglish })}
         className="px-8 py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors min-w-40"
       >
-        {loading ? (
-          <span className="flex items-center justify-center gap-2">
-            <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-            </svg>
-            Analizando...
-          </span>
-        ) : (
-          'Analizar paper'
-        )}
+        Analizar paper
       </button>
     </div>
   )

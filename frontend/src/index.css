@@ -1,1 +1,7 @@
 @import "tailwindcss";
+
+@keyframes slide-indeterminate {
+  0%   { transform: translateX(-100%); width: 45%; }
+  50%  { width: 55%; }
+  100% { transform: translateX(280%); width: 35%; }
+}

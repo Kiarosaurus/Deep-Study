@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { flushSync } from 'react-dom'
 import axios from 'axios'
 import PdfUploader from './components/PdfUploader'
 import PdfViewer from './components/PdfViewer'
@@ -10,16 +11,21 @@ function App() {
   const [pagesData, setPagesData] = useState(null)
   const [explanation, setExplanation] = useState(null)
   const [loadingGlobal, setLoadingGlobal] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [loadingExplain, setLoadingExplain] = useState(false)
   const [errorGlobal, setErrorGlobal] = useState(null)
   const [errorExplain, setErrorExplain] = useState(null)
 
   async function handleUpload(file, config = {}) {
-    setPdfFile(file)
-    setLoadingGlobal(true)
-    setErrorGlobal(null)
-    setGlobalMap(null)
-    setExplanation(null)
+    // flushSync forces React to commit loading=true to DOM before the async op starts.
+    // Without it, React 18 batching can delay the render until after Axios returns on localhost.
+    flushSync(() => {
+      setLoadingGlobal(true)
+      setUploadProgress(0)
+      setErrorGlobal(null)
+      setGlobalMap(null)
+      setExplanation(null)
+    })
 
     const formData = new FormData()
     formData.append('file', file)
@@ -27,11 +33,18 @@ function App() {
     formData.append('keep_terms_in_english', String(config.keepTermsInEnglish ?? false))
 
     try {
-      const { data } = await axios.post('/api/upload-pdf/', formData)
+      const { data } = await axios.post('/api/upload-pdf/', formData, {
+        onUploadProgress: (e) => {
+          const pct = e.total ? Math.round((e.loaded * 100) / e.total) : 0
+          setUploadProgress(pct)
+        },
+      })
+      setPdfFile(file)          // transition to split view only after full response
       setGlobalMap(data.global_map)
       setPagesData(data.pages)
     } catch (e) {
       setErrorGlobal(e.response?.data?.detail || e.message)
+      setUploadProgress(0)
     } finally {
       setLoadingGlobal(false)
     }
@@ -63,6 +76,7 @@ function App() {
     setExplanation(null)
     setErrorGlobal(null)
     setErrorExplain(null)
+    setUploadProgress(0)
   }
 
   if (!pdfFile) {
@@ -70,7 +84,12 @@ function App() {
       <div className="min-h-screen bg-slate-50 flex flex-col">
         <Header />
         <main className="flex-1 flex items-center justify-center px-4">
-          <PdfUploader onUpload={handleUpload} loading={loadingGlobal} error={errorGlobal} />
+          <PdfUploader
+            onUpload={handleUpload}
+            loading={loadingGlobal}
+            uploadProgress={uploadProgress}
+            error={errorGlobal}
+          />
         </main>
       </div>
     )

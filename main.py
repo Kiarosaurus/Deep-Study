@@ -103,10 +103,11 @@ def _build_global_model(language: str, keep_terms_in_english: bool) -> genai.Gen
     extra = f"\n\nLANGUAGE RULE: Generate ALL text values in {lang_name}."
     if keep_terms_in_english:
         extra += (
-            "\nTERMS RULE: The 'term' field in each acronym object, every item in "
-            "'assumed_concepts', and all technical labels MUST stay in English (original paper "
-            "language). Only the 'definition', 'core_methodology', and explanatory text are "
-            f"translated to {lang_name}."
+            f"\nTERMS RULE (strict): Translate to {lang_name}: "
+            "the 'definition' field of every acronym, the 'core_methodology' string, "
+            "and all descriptive text. "
+            "Keep in English ONLY: (1) the 'term' field of each acronym object, "
+            "(2) every string inside 'assumed_concepts'. No exceptions."
         )
     return genai.GenerativeModel(
         model_name="gemini-2.5-flash",
