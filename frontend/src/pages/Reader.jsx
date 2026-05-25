@@ -35,9 +35,9 @@ export default function Reader() {
     setCurrentIndex(0)
   }, [explanation])
 
-  async function handleExplain(text, bbox) {
+  async function handleExplain(text, sentences) {
     if (!analysis) return
-    setActiveParagraph({ text, bbox })
+    setActiveParagraph({ text })
     setCurrentIndex(0)
 
     if (explanationsCache.current.has(text)) {
@@ -50,7 +50,7 @@ export default function Reader() {
     setErrorExplain(null)
     try {
       const res = await axios.post('/api/explain-paragraph/', {
-        paragraph_text: text,
+        paragraph_sentences: (sentences ?? []).map(s => s.text),
         global_map: analysis.global_map,
       })
       explanationsCache.current.set(text, res.data)
@@ -62,7 +62,7 @@ export default function Reader() {
     }
   }
 
-  const highlightTerm = explanation?.explanations?.[currentIndex]?.term ?? null
+  const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
   if (loadingAnalysis) {
     return (
@@ -106,7 +106,7 @@ export default function Reader() {
           onExplain={handleExplain}
           pages={analysis?.pages}
           activeParagraph={activeParagraph}
-          highlightTerm={highlightTerm}
+          currentExplanation={currentExplanation}
         />
       </div>
 

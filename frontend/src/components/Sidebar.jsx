@@ -101,7 +101,7 @@ function GlobalMapView({ globalMap }) {
 
 function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
   useEffect(() => {
-    const items = explanation?.explanations
+    const items = explanation?.sentence_explanations
     if (!items?.length) return
     const total = items.length
 
@@ -130,7 +130,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
     )
   }
 
-  const items = explanation.explanations
+  const items = explanation.sentence_explanations ?? []
   const total = items.length
 
   if (total === 0) {
@@ -143,7 +143,8 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
     )
   }
 
-  const current = items[currentIndex] ?? items[0]
+  const current  = items[currentIndex] ?? items[0]
+  const concepts = current?.concepts ?? []
   const canPrev = currentIndex > 0
   const canNext = currentIndex < total - 1
 
@@ -155,14 +156,26 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
         className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
         style={{ animation: 'cardIn 0.18s ease-out' }}
       >
-        {/* Term as blockquote-style phrase */}
+        {/* Quote: oración (o fragmento) bajo análisis */}
         <blockquote className="border-l-[3px] border-indigo-400 pl-3 py-0.5">
           <p className="text-sm italic text-slate-700 leading-snug">
-            {current.term}
+            {current.quote}
           </p>
         </blockquote>
 
-        <p className="text-[13px] text-slate-600 leading-relaxed">{current.explanation}</p>
+        {/* Lista de conceptos extraídos de esta oración */}
+        <div className="flex flex-col gap-4">
+          {concepts.map((c, idx) => (
+            <div key={idx} className="flex flex-col gap-1.5">
+              <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
+                {c.term}
+              </p>
+              <p className="text-[13px] text-slate-600 leading-relaxed">
+                {c.explanation}
+              </p>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="flex items-center gap-2">
@@ -176,7 +189,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
         </button>
 
         <span className="flex-1 text-center text-[11px] text-slate-400 font-medium tabular-nums select-none">
-          {currentIndex + 1} de {total} {total === 1 ? 'concepto' : 'conceptos'}
+          {currentIndex + 1} de {total} {total === 1 ? 'oración' : 'oraciones'}
         </span>
 
         <button
