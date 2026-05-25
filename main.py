@@ -1,11 +1,12 @@
 import json
 import os
+from pathlib import Path
 
 import fitz
 import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 load_dotenv()
@@ -15,6 +16,9 @@ if not _api_key:
     raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
 genai.configure(api_key=_api_key)
+
+UPLOADS_DIR = Path("uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
 
 GLOBAL_MAPPING_PROMPT = """Rol: Eres un asistente de investigación académica experto integrado en una interfaz de lectura inmersiva.
 
@@ -33,6 +37,8 @@ Devuelve tu respuesta ÚNICAMENTE como un objeto JSON válido con esta estructur
 Si el párrafo es simple y no requiere explicaciones adicionales, devuelve una lista vacía en "explanations"."""
 
 
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
 class Acronym(BaseModel):
     term: str
     definition: str
@@ -43,8 +49,6 @@ class GlobalMapping(BaseModel):
     core_methodology: str
     assumed_concepts: list[str]
 
-
-# ── Spatial extraction ───────────────────────────────────────────────────────
 
 class BBox(BaseModel):
     x0: float
@@ -70,7 +74,11 @@ class UploadResponse(BaseModel):
     pages: list[PageBlocks]
 
 
-# ── Pasada 2: Explicación Local ──────────────────────────────────────────────
+class DocumentInfo(BaseModel):
+    filename: str
+    size_bytes: int
+    has_analysis: bool
+
 
 class ExplainRequest(BaseModel):
     paragraph_text: str
@@ -85,6 +93,8 @@ class TermExplanation(BaseModel):
 class ExplainResponse(BaseModel):
     explanations: list[TermExplanation]
 
+
+# ── AI models ─────────────────────────────────────────────────────────────────
 
 EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de un paper científico y el Mapa Global del documento (acrónimos y metodología).
 
@@ -115,6 +125,7 @@ def _build_global_model(language: str, keep_terms_in_english: bool) -> genai.Gen
         system_instruction=GLOBAL_MAPPING_PROMPT + extra,
     )
 
+
 _explain_model = genai.GenerativeModel(
     model_name="gemini-2.5-flash-lite",
     generation_config=genai.GenerationConfig(
@@ -127,16 +138,61 @@ _explain_model = genai.GenerativeModel(
 app = FastAPI(title="DeepStudy API", version="0.1.0")
 
 
+# ── Document management endpoints ─────────────────────────────────────────────
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "DeepStudy API running"}
 
+
+@app.get("/documents/", response_model=list[DocumentInfo])
+def list_documents():
+    docs = []
+    for f in sorted(UPLOADS_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True):
+        docs.append(DocumentInfo(
+            filename=f.name,
+            size_bytes=f.stat().st_size,
+            has_analysis=(UPLOADS_DIR / f"{f.name}.analysis.json").exists(),
+        ))
+    return docs
+
+
+@app.get("/documents/{filename}")
+def get_document(filename: str):
+    path = UPLOADS_DIR / filename
+    if not path.exists() or path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return FileResponse(path, media_type="application/pdf", filename=filename)
+
+
+@app.get("/documents/{filename}/analysis")
+def get_analysis(filename: str):
+    path = UPLOADS_DIR / f"{filename}.analysis.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    return JSONResponse(content=json.loads(path.read_text(encoding="utf-8")))
+
+
+@app.delete("/documents/{filename}")
+def delete_document(filename: str):
+    path = UPLOADS_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Document not found.")
+    path.unlink()
+    analysis = UPLOADS_DIR / f"{filename}.analysis.json"
+    if analysis.exists():
+        analysis.unlink()
+    return {"deleted": filename}
+
+
+# ── Upload & analysis endpoints ───────────────────────────────────────────────
 
 @app.post("/upload-pdf/")
 async def upload_pdf(
     file: UploadFile = File(...),
     language: str = Form("es"),
     keep_terms_in_english: bool = Form(False),
+    overwrite: bool = Form(False),
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(
@@ -144,29 +200,36 @@ async def upload_pdf(
             detail=f"Invalid file type '{file.content_type}'. Only PDF files accepted.",
         )
 
+    dest = UPLOADS_DIR / file.filename
+    if dest.exists() and not overwrite:
+        raise HTTPException(status_code=409, detail=f"'{file.filename}' already exists.")
+
     contents = await file.read()
+
+    # Save PDF to disk
+    dest.write_bytes(contents)
 
     try:
         doc = fitz.open(stream=contents, filetype="pdf")
     except Exception as e:
+        dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
 
     if doc.page_count == 0:
+        dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail="PDF has no pages.")
 
-    # Minimum chars to discard page numbers, headers, isolated labels
     MIN_BLOCK_CHARS = 30
-
     pages_data: list[PageBlocks] = []
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
-        raw_blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text,block_no,block_type)
+        raw_blocks = page.get_text("blocks")
         blocks: list[ParagraphBlock] = []
         for x0, y0, x1, y1, text, _block_no, block_type in raw_blocks:
-            if block_type != 0:          # skip image blocks
+            if block_type != 0:
                 continue
             clean = text.strip()
-            if len(clean) < MIN_BLOCK_CHARS:  # skip noise
+            if len(clean) < MIN_BLOCK_CHARS:
                 continue
             blocks.append(ParagraphBlock(
                 text=clean,
@@ -177,9 +240,7 @@ async def upload_pdf(
 
     doc.close()
 
-    full_text = "\n\n".join(
-        b.text for p in pages_data for b in p.blocks
-    )
+    full_text = "\n\n".join(b.text for p in pages_data for b in p.blocks)
 
     try:
         model = _build_global_model(language, keep_terms_in_english)
@@ -194,6 +255,14 @@ async def upload_pdf(
         global_map=global_map,
         pages=pages_data,
     )
+
+    # Persist analysis alongside PDF
+    analysis_path = UPLOADS_DIR / f"{file.filename}.analysis.json"
+    analysis_path.write_text(
+        json.dumps(result.model_dump(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
     return JSONResponse(content=result.model_dump())
 
 
