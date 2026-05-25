@@ -25,7 +25,7 @@ function App() {
 
     try {
       const { data } = await axios.post('/api/upload-pdf/', formData)
-      setGlobalMap(data)
+      setGlobalMap(data.global_map)
     } catch (e) {
       setErrorGlobal(e.response?.data?.detail || e.message)
     } finally {

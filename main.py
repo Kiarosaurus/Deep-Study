@@ -44,6 +44,32 @@ class GlobalMapping(BaseModel):
     assumed_concepts: list[str]
 
 
+# ── Spatial extraction ───────────────────────────────────────────────────────
+
+class BBox(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class ParagraphBlock(BaseModel):
+    text: str
+    bbox: BBox
+
+
+class PageBlocks(BaseModel):
+    page: int
+    blocks: list[ParagraphBlock]
+
+
+class UploadResponse(BaseModel):
+    filename: str
+    page_count: int
+    global_map: GlobalMapping
+    pages: list[PageBlocks]
+
+
 # ── Pasada 2: Explicación Local ──────────────────────────────────────────────
 
 class ExplainRequest(BaseModel):
@@ -110,23 +136,46 @@ async def upload_pdf(file: UploadFile = File(...)):
     if doc.page_count == 0:
         raise HTTPException(status_code=422, detail="PDF has no pages.")
 
-    pages = []
+    # Minimum chars to discard page numbers, headers, isolated labels
+    MIN_BLOCK_CHARS = 30
+
+    pages_data: list[PageBlocks] = []
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
-        text = page.get_text("text")
-        pages.append({"page": page_num + 1, "text": text.strip()})
+        raw_blocks = page.get_text("blocks")  # (x0,y0,x1,y1,text,block_no,block_type)
+        blocks: list[ParagraphBlock] = []
+        for x0, y0, x1, y1, text, _block_no, block_type in raw_blocks:
+            if block_type != 0:          # skip image blocks
+                continue
+            clean = text.strip()
+            if len(clean) < MIN_BLOCK_CHARS:  # skip noise
+                continue
+            blocks.append(ParagraphBlock(
+                text=clean,
+                bbox=BBox(x0=round(x0, 2), y0=round(y0, 2),
+                          x1=round(x1, 2), y1=round(y1, 2)),
+            ))
+        pages_data.append(PageBlocks(page=page_num + 1, blocks=blocks))
 
     doc.close()
 
-    full_text = "\n\n".join(p["text"] for p in pages if p["text"])
+    full_text = "\n\n".join(
+        b.text for p in pages_data for b in p.blocks
+    )
 
     try:
         response = _gemini_model.generate_content(full_text)
-        global_mapping = json.loads(response.text)
+        global_map = GlobalMapping(**json.loads(response.text))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
-    return JSONResponse(content=global_mapping)
+    result = UploadResponse(
+        filename=file.filename,
+        page_count=len(pages_data),
+        global_map=global_map,
+        pages=pages_data,
+    )
+    return JSONResponse(content=result.model_dump())
 
 
 @app.post("/explain-paragraph/")
