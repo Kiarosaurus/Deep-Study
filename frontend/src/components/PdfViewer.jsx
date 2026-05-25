@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
@@ -103,6 +103,43 @@ function resolveSentenceIndices(sentences, item) {
 
   // Tier 4
   return cleanIndices
+}
+
+// ── Reading sequence (tracking mode) ──────────────────────────────────────────
+// Construye cola global ordenada de "stops" intercalando párrafos e imágenes
+// según reading_index del backend. Párrafos multi-box (paragraph wrapping
+// columnas) se expanden en sub-stops, sub-ordenados por x0 luego y0.
+function buildReadingSequence(pages) {
+  if (!pages) return []
+  const seq = []
+  for (const p of pages) {
+    const items = []
+    for (const block of (p.blocks || [])) {
+      for (const box of (block.boxes || [])) {
+        items.push({
+          kind: 'p',
+          page: p.page,
+          reading_index: block.reading_index ?? 0,
+          bbox: box,
+        })
+      }
+    }
+    for (const im of (p.images || [])) {
+      items.push({
+        kind: 'i',
+        page: p.page,
+        reading_index: im.reading_index ?? 0,
+        bbox: im.bbox,
+      })
+    }
+    items.sort((a, b) => {
+      if (a.reading_index !== b.reading_index) return a.reading_index - b.reading_index
+      if (a.bbox.x0 !== b.bbox.x0)             return a.bbox.x0 - b.bbox.x0
+      return a.bbox.y0 - b.bbox.y0
+    })
+    seq.push(...items)
+  }
+  return seq
 }
 
 function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
@@ -219,7 +256,7 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation }) {
+function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation, trackedBox }) {
   // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
   // automáticamente cuando `width` cambia por zoom o resize.
   const [originalWidth, setOriginalWidth] = useState(null)
@@ -230,7 +267,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
   }
 
   return (
-    <div className="relative shadow-xl mb-5 bg-white">
+    <div className="relative shadow-xl mb-5 bg-white" data-page={pageNumber}>
       <Page
         pageNumber={pageNumber}
         width={width}
@@ -245,6 +282,19 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
         activeParagraph={activeParagraph}
         currentExplanation={currentExplanation}
       />
+      {trackedBox && scale && (
+        <div
+          className="absolute pointer-events-none rounded-md transition-all duration-500 ease-out z-20"
+          style={{
+            left:   trackedBox.x0 * scale - 6,
+            top:    trackedBox.y0 * scale - 6,
+            width:  (trackedBox.x1 - trackedBox.x0) * scale + 12,
+            height: (trackedBox.y1 - trackedBox.y0) * scale + 12,
+            border: '3px solid rgb(99,102,241)',
+            boxShadow: '0 0 0 9999px rgba(15,23,42,0.45), 0 0 24px rgba(99,102,241,0.55)',
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -253,11 +303,97 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
   const [numPages, setNumPages]               = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
+  const [tracking, setTracking]               = useState(false)
+  const [currentStop, setCurrentStop]         = useState(0)
 
   const containerRef = useRef(null)
   const userZoomRef  = useRef(1.0)
 
   useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
+
+  // ── Tracking mode ───────────────────────────────────────────────────────────
+  const readingSequence = useMemo(() => buildReadingSequence(pages), [pages])
+  const pageDims = useMemo(
+    () => pages
+      ? Object.fromEntries(pages.map(p => [p.page, { width: p.width, height: p.height }]))
+      : {},
+    [pages],
+  )
+
+  // pageWidth recomputado abajo; capturamos vía ref para usar en scrollToStop
+  const pageWidthRef = useRef(0)
+
+  function scrollToStop(stop) {
+    const container = containerRef.current
+    if (!container || !stop) return
+    const el = container.querySelector(`[data-page="${stop.page}"]`)
+    if (!el) return
+    const dim = pageDims[stop.page]
+    const pw  = pageWidthRef.current
+    if (!dim?.width || !pw) return
+    const scale = pw / dim.width
+    const containerRect = container.getBoundingClientRect()
+    const pageRect      = el.getBoundingClientRect()
+    const viewportH     = container.clientHeight
+    const targetY = container.scrollTop
+                  + (pageRect.top - containerRect.top)
+                  + stop.bbox.y0 * scale
+                  - viewportH * 0.25
+    container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
+  }
+
+  // Toggle ON → reset al primer stop
+  useEffect(() => {
+    if (tracking) setCurrentStop(0)
+  }, [tracking])
+
+  // Auto-scroll al cambiar stop / activar tracking / re-zoom
+  useEffect(() => {
+    if (!tracking) return
+    const stop = readingSequence[currentStop]
+    if (!stop) return
+    const id = requestAnimationFrame(() => scrollToStop(stop))
+    return () => cancelAnimationFrame(id)
+  }, [tracking, currentStop, readingSequence, userZoom, containerWidth])
+
+  // Hijack wheel + teclado en tracking mode
+  useEffect(() => {
+    if (!tracking) return
+    const node = containerRef.current
+    if (!node) return
+
+    let cooldown = false
+    function step(delta) {
+      if (cooldown) return
+      cooldown = true
+      setTimeout(() => { cooldown = false }, 450)
+      setCurrentStop(s => Math.max(0, Math.min(readingSequence.length - 1, s + delta)))
+    }
+
+    function onWheel(e) {
+      e.preventDefault()
+      if (e.deltaY > 0) step(1)
+      else if (e.deltaY < 0) step(-1)
+    }
+    function onKey(e) {
+      const tag = (e.target?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') {
+        e.preventDefault(); step(1)
+      } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+        e.preventDefault(); step(-1)
+      } else if (e.key === 'Escape') {
+        setTracking(false)
+      }
+    }
+
+    node.addEventListener('wheel', onWheel, { passive: false })
+    window.addEventListener('keydown', onKey)
+    return () => {
+      node.removeEventListener('wheel', onWheel)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [tracking, readingSequence.length])
 
   // Container width tracking + touch gestures (pinch-to-zoom). Pan = scroll nativo.
   useEffect(() => {
@@ -327,21 +463,62 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
   // PdfPage usa `scale = width / originalWidth` → overlays se reescalan automáticamente.
   const basePageWidth = containerWidth ? containerWidth - 48 : undefined
   const pageWidth     = basePageWidth ? basePageWidth * userZoom : undefined
+  useEffect(() => { pageWidthRef.current = pageWidth || 0 }, [pageWidth])
 
   const blocksMap = pages
     ? Object.fromEntries(pages.map(p => [p.page, p.blocks]))
     : {}
 
+  const currentStopData = tracking ? readingSequence[currentStop] : null
+
   return (
     <div className="relative h-full bg-gray-100">
       <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
 
+      {/* Tracking toolbar */}
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-2 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
+        <button
+          onClick={() => setTracking(t => !t)}
+          disabled={readingSequence.length === 0}
+          className={`px-3 h-8 rounded-lg text-xs font-semibold transition-colors disabled:opacity-30 disabled:pointer-events-none ${
+            tracking
+              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+              : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
+          }`}
+          title={tracking ? 'Salir (Esc)' : 'Activar Modo de Seguimiento'}
+        >
+          {tracking ? '◉ Seguimiento ON' : '◯ Activar Seguimiento'}
+        </button>
+        {tracking && (
+          <>
+            <button
+              onClick={() => setCurrentStop(s => Math.max(0, s - 1))}
+              disabled={currentStop <= 0}
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
+              title="Anterior (↑ / PgUp)"
+            >↑</button>
+            <span className="text-[11px] font-bold tabular-nums text-slate-600 min-w-[3.5rem] text-center">
+              {currentStop + 1}/{readingSequence.length}
+            </span>
+            <button
+              onClick={() => setCurrentStop(s => Math.min(readingSequence.length - 1, s + 1))}
+              disabled={currentStop >= readingSequence.length - 1}
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
+              title="Siguiente (↓ / Space / PgDn)"
+            >↓</button>
+          </>
+        )}
+      </div>
+
       <div
         ref={containerRef}
         className="h-full overflow-auto"
-        style={{ touchAction: 'pan-x pan-y' }}
+        style={{ touchAction: tracking ? 'none' : 'pan-x pan-y' }}
       >
-        <div className="flex flex-col items-center py-8 px-6 min-h-full">
+        <div
+          className="flex flex-col items-center py-8 px-6 min-h-full"
+          style={{ minWidth: 'fit-content' }}
+        >
           <Document
             file={file}
             onLoadSuccess={({ numPages }) => setNumPages(numPages)}
@@ -358,6 +535,7 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
                   onExplain={onExplain}
                   activeParagraph={activeParagraph}
                   currentExplanation={currentExplanation}
+                  trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
                 />
               ))}
           </Document>

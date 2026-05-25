@@ -75,11 +75,20 @@ class ParagraphBlock(BaseModel):
     text: str
     boxes: list[BBox]  # 1+ rects: uno por columna/sección contigua que ocupa el párrafo
     sentences: list[SentenceBlock] = []
+    reading_index: int = 0  # Orden lógico de lectura intra-página (0-based)
+
+
+class ImageBlock(BaseModel):
+    bbox: BBox
+    reading_index: int = 0  # Orden lógico de lectura intra-página (compartido con párrafos)
 
 
 class PageBlocks(BaseModel):
     page: int
+    width: float = 0.0       # Dimensiones de la página en pts (para tracking mode en frontend)
+    height: float = 0.0
     blocks: list[ParagraphBlock]
+    images: list[ImageBlock] = []
 
 
 class UploadResponse(BaseModel):
@@ -323,6 +332,131 @@ def _paragraph_boxes(visual_lines: list[LineBlock]) -> list[BBox]:
     return [_union_bbox(g) for g in _split_lines_into_columns(visual_lines)]
 
 
+# ── Reading order (column-aware) ──────────────────────────────────────────────
+
+_FW_WIDTH_RATIO = 0.6  # box que cubre >60% de page_width → full-width
+
+
+def _classify_boxes(boxes: list[BBox], page_width: float) -> str:
+    """'left' | 'right' | 'fw' | 'multi'. Genérica: párrafos o imágenes."""
+    if not boxes:
+        return 'left'
+    if len(boxes) > 1:
+        return 'multi'
+
+    b = boxes[0]
+    width = b.x1 - b.x0
+    if width > page_width * _FW_WIDTH_RATIO:
+        return 'fw'
+
+    cx = (b.x0 + b.x1) / 2
+    return 'left' if cx < page_width / 2 else 'right'
+
+
+def _boxes_top_y(boxes: list[BBox]) -> float:
+    return min(b.y0 for b in boxes) if boxes else 0.0
+
+
+def _boxes_bot_y(boxes: list[BBox]) -> float:
+    return max(b.y1 for b in boxes) if boxes else 0.0
+
+
+@dataclass
+class _OrderItem:
+    """Item genérico (párrafo o imagen) para ordenamiento unificado."""
+    kind: str            # 'p' = paragraph, 'i' = image
+    src_idx: int         # índice en su lista original (blocks o images)
+    boxes: list[BBox]
+
+
+def _compute_unified_reading_order(
+    paragraphs: list[ParagraphBlock],
+    images: list[ImageBlock],
+    page_width: float,
+) -> list[_OrderItem]:
+    """Orden lógico de lectura intercalando párrafos e imágenes.
+
+    Algoritmo:
+    1. Combina ambos en lista única de _OrderItem.
+    2. Clasifica cada item (left/right/fw/multi).
+    3. Si no hay estructura 2-col detectable → sort por Y.
+    4. Con 2 cols: walk por bandas verticales separadas por barreras (fw/multi).
+       Dentro de banda: items 'left' (top→bottom), luego 'right' (top→bottom).
+       Barrera insertada en su posición vertical.
+    Resultado: items en orden de lectura.
+    """
+    items: list[_OrderItem] = []
+    for i, p in enumerate(paragraphs):
+        items.append(_OrderItem('p', i, p.boxes))
+    for i, im in enumerate(images):
+        items.append(_OrderItem('i', i, [im.bbox]))
+
+    n = len(items)
+    if n == 0:
+        return []
+
+    classes = [_classify_boxes(it.boxes, page_width) for it in items]
+    n_left  = classes.count('left')
+    n_right = classes.count('right')
+
+    # Sin 2 columnas → orden Y puro
+    if n_left == 0 or n_right == 0:
+        ordered_idx = sorted(range(n), key=lambda i: _boxes_top_y(items[i].boxes))
+        return [items[i] for i in ordered_idx]
+
+    barriers = sorted(
+        (i for i in range(n) if classes[i] in ('fw', 'multi')),
+        key=lambda i: _boxes_top_y(items[i].boxes),
+    )
+
+    order: list[int] = []
+    y_cursor = -1.0
+
+    for bar_i in barriers:
+        bar_top = _boxes_top_y(items[bar_i].boxes)
+
+        col_l = sorted(
+            (j for j in range(n)
+             if classes[j] == 'left'
+             and _boxes_top_y(items[j].boxes) >= y_cursor
+             and _boxes_top_y(items[j].boxes) < bar_top),
+            key=lambda j: _boxes_top_y(items[j].boxes),
+        )
+        col_r = sorted(
+            (j for j in range(n)
+             if classes[j] == 'right'
+             and _boxes_top_y(items[j].boxes) >= y_cursor
+             and _boxes_top_y(items[j].boxes) < bar_top),
+            key=lambda j: _boxes_top_y(items[j].boxes),
+        )
+        order.extend(col_l)
+        order.extend(col_r)
+        order.append(bar_i)
+        y_cursor = _boxes_bot_y(items[bar_i].boxes)
+
+    col_l = sorted(
+        (j for j in range(n)
+         if classes[j] == 'left' and _boxes_top_y(items[j].boxes) >= y_cursor),
+        key=lambda j: _boxes_top_y(items[j].boxes),
+    )
+    col_r = sorted(
+        (j for j in range(n)
+         if classes[j] == 'right' and _boxes_top_y(items[j].boxes) >= y_cursor),
+        key=lambda j: _boxes_top_y(items[j].boxes),
+    )
+    order.extend(col_l)
+    order.extend(col_r)
+
+    seen = set(order)
+    leftovers = sorted(
+        (i for i in range(n) if i not in seen),
+        key=lambda i: _boxes_top_y(items[i].boxes),
+    )
+    order.extend(leftovers)
+
+    return [items[i] for i in order]
+
+
 def _looks_like_section_title(text: str) -> bool:
     words = text.split()
     if not words or len(words) > 8:
@@ -490,6 +624,7 @@ async def upload_pdf(
     pages_data: list[PageBlocks] = []
     for page_num in range(doc.page_count):
         page = doc.load_page(page_num)
+        page_w = page.rect.width
         page_h = page.rect.height
         top_limit = page_h * (_TITLE_PAGE_MARGIN if page_num == 0 else _HEADER_FOOTER_MARGIN)
         bot_limit = page_h * (1.0 - _HEADER_FOOTER_MARGIN)
@@ -498,7 +633,18 @@ async def upload_pdf(
         dict_blocks = raw.get("blocks", [])
         median_size = _page_median_font_size(dict_blocks)
 
-        # PASADA 1: Filtro de Ruido
+        # IMÁGENES: bloques tipo 1, filtrados por zona como el texto
+        images: list[ImageBlock] = []
+        for block in dict_blocks:
+            if block.get("type") != 1: continue
+            bx0, by0, bx1, by1 = block["bbox"]
+            if by0 < top_limit or by1 > bot_limit: continue
+            images.append(ImageBlock(bbox=BBox(
+                x0=round(bx0, 2), y0=round(by0, 2),
+                x1=round(bx1, 2), y1=round(by1, 2),
+            )))
+
+        # PASADA 1: Filtro de Ruido (solo texto, type==0)
         candidates: list[TextCandidate] = []
         for block in dict_blocks:
             if block.get("type") != 0: continue
@@ -506,7 +652,7 @@ async def upload_pdf(
             if by0 < top_limit or by1 > bot_limit: continue
             if page_num == 0 and _block_avg_font_size(block) > median_size * _TITLE_FONT_RATIO:
                 continue
-            
+
             for cand in _split_by_indent(block):
                 if not cand.text or _is_junk_section(cand.text): continue
                 if len(cand.text.split()) < _MIN_WORDS and not _looks_like_section_title(cand.text):
@@ -553,7 +699,26 @@ async def upload_pdf(
             ))
             i += 1
 
-        pages_data.append(PageBlocks(page=page_num + 1, blocks=blocks))
+        # PASADA 3: Reading order column-aware UNIFICADO (párrafos + imágenes)
+        sequence = _compute_unified_reading_order(blocks, images, page_w)
+        for rank, item in enumerate(sequence):
+            if item.kind == 'p':
+                blocks[item.src_idx].reading_index = rank
+            else:
+                images[item.src_idx].reading_index = rank
+
+        # Reordena las listas para que el array index coincida con reading_index
+        # (frontend puede iterar `blocks` o `images` y/o reconstruir secuencia mergeada)
+        sorted_blocks = sorted(blocks, key=lambda b: b.reading_index)
+        sorted_images = sorted(images, key=lambda im: im.reading_index)
+
+        pages_data.append(PageBlocks(
+            page=page_num + 1,
+            width=round(page_w, 2),
+            height=round(page_h, 2),
+            blocks=sorted_blocks,
+            images=sorted_images,
+        ))
 
     doc.close()
 
