@@ -17,6 +17,9 @@ export default function Reader() {
   const [loadingExplain, setLoadingExplain] = useState(false)
   const [errorExplain, setErrorExplain] = useState(null)
 
+  const [currentIndex, setCurrentIndex] = useState(0)
+  const [activeParagraph, setActiveParagraph] = useState(null)
+
   const explanationsCache = useRef(new Map())
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
@@ -28,8 +31,14 @@ export default function Reader() {
       .finally(() => setLoadingAnalysis(false))
   }, [decoded])
 
-  async function handleExplain(text) {
+  useEffect(() => {
+    setCurrentIndex(0)
+  }, [explanation])
+
+  async function handleExplain(text, bbox) {
     if (!analysis) return
+    setActiveParagraph({ text, bbox })
+    setCurrentIndex(0)
 
     if (explanationsCache.current.has(text)) {
       setErrorExplain(null)
@@ -52,6 +61,8 @@ export default function Reader() {
       setLoadingExplain(false)
     }
   }
+
+  const highlightTerm = explanation?.explanations?.[currentIndex]?.term ?? null
 
   if (loadingAnalysis) {
     return (
@@ -94,6 +105,8 @@ export default function Reader() {
           file={pdfUrl}
           onExplain={handleExplain}
           pages={analysis?.pages}
+          activeParagraph={activeParagraph}
+          highlightTerm={highlightTerm}
         />
       </div>
 
@@ -105,6 +118,8 @@ export default function Reader() {
           loadingExplain={loadingExplain}
           errorGlobal={null}
           errorExplain={errorExplain}
+          currentIndex={currentIndex}
+          onIndexChange={setCurrentIndex}
         />
       </div>
     </div>

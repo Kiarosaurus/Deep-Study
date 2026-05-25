@@ -99,26 +99,20 @@ function GlobalMapView({ globalMap }) {
   )
 }
 
-function ExplainView({ explanation, error }) {
-  const [currentIndex, setCurrentIndex] = useState(0)
-
-  useEffect(() => {
-    setCurrentIndex(0)
-  }, [explanation])
-
+function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
   useEffect(() => {
     const items = explanation?.explanations
     if (!items?.length) return
     const total = items.length
 
     function handleKey(e) {
-      if (e.key === 'ArrowRight') setCurrentIndex(i => Math.min(i + 1, total - 1))
-      else if (e.key === 'ArrowLeft') setCurrentIndex(i => Math.max(i - 1, 0))
+      if (e.key === 'ArrowRight') onIndexChange(i => Math.min(i + 1, total - 1))
+      else if (e.key === 'ArrowLeft') onIndexChange(i => Math.max(i - 1, 0))
     }
 
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [explanation])
+  }, [explanation, onIndexChange])
 
   if (error) {
     return (
@@ -147,7 +141,7 @@ function ExplainView({ explanation, error }) {
     )
   }
 
-  const current = items[currentIndex]
+  const current = items[currentIndex] ?? items[0]
   const canPrev = currentIndex > 0
   const canNext = currentIndex < total - 1
 
@@ -162,7 +156,7 @@ function ExplainView({ explanation, error }) {
 
       <div className="flex items-center gap-2">
         <button
-          onClick={() => setCurrentIndex(i => i - 1)}
+          onClick={() => onIndexChange(i => i - 1)}
           disabled={!canPrev}
           title="Anterior (←)"
           className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
@@ -175,7 +169,7 @@ function ExplainView({ explanation, error }) {
         </span>
 
         <button
-          onClick={() => setCurrentIndex(i => i + 1)}
+          onClick={() => onIndexChange(i => i + 1)}
           disabled={!canNext}
           title="Siguiente (→)"
           className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
@@ -191,6 +185,7 @@ export default function Sidebar({
   globalMap, explanation,
   loadingGlobal, loadingExplain,
   errorGlobal, errorExplain,
+  currentIndex, onIndexChange,
 }) {
   const [tab, setTab] = useState('global')
 
@@ -235,7 +230,12 @@ export default function Sidebar({
         )}
         {tab === 'explain' && (
           loadingExplain ? <SkeletonExplain /> :
-          <ExplainView explanation={explanation} error={errorExplain} />
+          <ExplainView
+            explanation={explanation}
+            error={errorExplain}
+            currentIndex={currentIndex}
+            onIndexChange={onIndexChange}
+          />
         )}
       </div>
     </div>
