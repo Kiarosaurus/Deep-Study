@@ -7,6 +7,7 @@ import Sidebar from './components/Sidebar'
 function App() {
   const [pdfFile, setPdfFile] = useState(null)
   const [globalMap, setGlobalMap] = useState(null)
+  const [pagesData, setPagesData] = useState(null)
   const [explanation, setExplanation] = useState(null)
   const [loadingGlobal, setLoadingGlobal] = useState(false)
   const [loadingExplain, setLoadingExplain] = useState(false)
@@ -26,6 +27,7 @@ function App() {
     try {
       const { data } = await axios.post('/api/upload-pdf/', formData)
       setGlobalMap(data.global_map)
+      setPagesData(data.pages)
     } catch (e) {
       setErrorGlobal(e.response?.data?.detail || e.message)
     } finally {
@@ -55,6 +57,7 @@ function App() {
   function handleReset() {
     setPdfFile(null)
     setGlobalMap(null)
+    setPagesData(null)
     setExplanation(null)
     setErrorGlobal(null)
     setErrorExplain(null)
@@ -76,7 +79,7 @@ function App() {
       <Header onReset={handleReset} filename={pdfFile.name} />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-[70%] overflow-y-auto bg-gray-100">
-          <PdfViewer file={pdfFile} onExplain={handleExplain} canExplain={!!globalMap} />
+          <PdfViewer file={pdfFile} onExplain={handleExplain} pages={pagesData} />
         </div>
         <div className="w-[30%] overflow-y-auto border-l border-slate-200 bg-white">
           <Sidebar
