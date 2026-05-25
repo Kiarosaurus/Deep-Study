@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import PdfViewer from '../components/PdfViewer'
@@ -17,6 +17,8 @@ export default function Reader() {
   const [loadingExplain, setLoadingExplain] = useState(false)
   const [errorExplain, setErrorExplain] = useState(null)
 
+  const explanationsCache = useRef(new Map())
+
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
 
   useEffect(() => {
@@ -28,6 +30,13 @@ export default function Reader() {
 
   async function handleExplain(text) {
     if (!analysis) return
+
+    if (explanationsCache.current.has(text)) {
+      setErrorExplain(null)
+      setExplanation(explanationsCache.current.get(text))
+      return
+    }
+
     setLoadingExplain(true)
     setErrorExplain(null)
     try {
@@ -35,6 +44,7 @@ export default function Reader() {
         paragraph_text: text,
         global_map: analysis.global_map,
       })
+      explanationsCache.current.set(text, res.data)
       setExplanation(res.data)
     } catch {
       setErrorExplain('Error al explicar el párrafo.')
