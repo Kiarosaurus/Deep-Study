@@ -4,7 +4,7 @@ import os
 import fitz
 import google.generativeai as genai
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -92,14 +92,27 @@ Tu tarea: identifica TODOS los términos técnicos, acrónimos y conceptos difí
 
 Devuelve ÚNICAMENTE un JSON válido. Sin texto adicional."""
 
-_gemini_model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash",
-    generation_config=genai.GenerationConfig(
-        response_mime_type="application/json",
-        response_schema=GlobalMapping,
-    ),
-    system_instruction=GLOBAL_MAPPING_PROMPT,
+_GLOBAL_GEN_CONFIG = genai.GenerationConfig(
+    response_mime_type="application/json",
+    response_schema=GlobalMapping,
 )
+
+
+def _build_global_model(language: str, keep_terms_in_english: bool) -> genai.GenerativeModel:
+    lang_name = "Spanish" if language == "es" else "English"
+    extra = f"\n\nLANGUAGE RULE: Generate ALL text values in {lang_name}."
+    if keep_terms_in_english:
+        extra += (
+            "\nTERMS RULE: The 'term' field in each acronym object, every item in "
+            "'assumed_concepts', and all technical labels MUST stay in English (original paper "
+            "language). Only the 'definition', 'core_methodology', and explanatory text are "
+            f"translated to {lang_name}."
+        )
+    return genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        generation_config=_GLOBAL_GEN_CONFIG,
+        system_instruction=GLOBAL_MAPPING_PROMPT + extra,
+    )
 
 _explain_model = genai.GenerativeModel(
     model_name="gemini-2.5-flash-lite",
@@ -119,7 +132,11 @@ def root():
 
 
 @app.post("/upload-pdf/")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    language: str = Form("es"),
+    keep_terms_in_english: bool = Form(False),
+):
     if file.content_type != "application/pdf":
         raise HTTPException(
             status_code=400,
@@ -164,7 +181,8 @@ async def upload_pdf(file: UploadFile = File(...)):
     )
 
     try:
-        response = _gemini_model.generate_content(full_text)
+        model = _build_global_model(language, keep_terms_in_english)
+        response = model.generate_content(full_text)
         global_map = GlobalMapping(**json.loads(response.text))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")

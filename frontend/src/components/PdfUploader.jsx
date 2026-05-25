@@ -3,6 +3,8 @@ import { useState, useRef } from 'react'
 export default function PdfUploader({ onUpload, loading, error }) {
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
+  const [language, setLanguage] = useState('es')
+  const [keepTermsInEnglish, setKeepTermsInEnglish] = useState(false)
   const inputRef = useRef()
 
   function handleFile(f) {
@@ -16,7 +18,7 @@ export default function PdfUploader({ onUpload, loading, error }) {
   }
 
   return (
-    <div className="flex flex-col items-center gap-8">
+    <div className="flex flex-col items-center gap-6">
       <div className="text-center">
         <h2 className="text-3xl font-bold text-slate-800">Sube tu paper</h2>
         <p className="mt-2 text-slate-500 text-sm">
@@ -24,6 +26,7 @@ export default function PdfUploader({ onUpload, loading, error }) {
         </p>
       </div>
 
+      {/* Drop zone */}
       <div
         onClick={() => inputRef.current.click()}
         onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
@@ -53,15 +56,49 @@ export default function PdfUploader({ onUpload, loading, error }) {
         )}
       </div>
 
+      {/* Settings */}
+      <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl px-5 py-4 flex flex-col gap-4">
+        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+          Configuración
+        </span>
+
+        <div className="flex items-center justify-between">
+          <label htmlFor="language" className="text-sm text-slate-700">
+            Idioma de explicación
+          </label>
+          <select
+            id="language"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            className="text-sm border border-slate-200 rounded-lg px-3 py-1.5 text-slate-700 bg-white focus:ring-2 focus:ring-indigo-300 focus:outline-none cursor-pointer"
+          >
+            <option value="es">Español</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+
+        <label className="flex items-start gap-3 cursor-pointer group">
+          <input
+            type="checkbox"
+            checked={keepTermsInEnglish}
+            onChange={(e) => setKeepTermsInEnglish(e.target.checked)}
+            className="mt-0.5 w-4 h-4 accent-indigo-600 cursor-pointer"
+          />
+          <span className="text-sm text-slate-700 leading-snug group-hover:text-slate-900 transition-colors">
+            Mantener términos técnicos y acrónimos en Inglés
+          </span>
+        </label>
+      </div>
+
       {error && (
-        <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-lg px-4 py-2">
+        <p className="text-red-500 text-sm bg-red-50 border border-red-200 rounded-lg px-4 py-2 w-full max-w-md">
           {error}
         </p>
       )}
 
       <button
         disabled={!file || loading}
-        onClick={() => onUpload(file)}
+        onClick={() => onUpload(file, { language, keepTermsInEnglish })}
         className="px-8 py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors min-w-40"
       >
         {loading ? (

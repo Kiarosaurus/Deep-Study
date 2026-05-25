@@ -14,7 +14,7 @@ function App() {
   const [errorGlobal, setErrorGlobal] = useState(null)
   const [errorExplain, setErrorExplain] = useState(null)
 
-  async function handleUpload(file) {
+  async function handleUpload(file, config = {}) {
     setPdfFile(file)
     setLoadingGlobal(true)
     setErrorGlobal(null)
@@ -23,6 +23,8 @@ function App() {
 
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('language', config.language ?? 'es')
+    formData.append('keep_terms_in_english', String(config.keepTermsInEnglish ?? false))
 
     try {
       const { data } = await axios.post('/api/upload-pdf/', formData)
