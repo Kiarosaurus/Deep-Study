@@ -25,14 +25,18 @@ function SkeletonGlobal() {
 
 function SkeletonExplain() {
   return (
-    <div className="flex flex-col gap-3 animate-pulse">
-      {[1, 2, 3, 4].map((i) => (
-        <div key={i} className="border border-slate-100 rounded-xl p-3 flex flex-col gap-2">
-          <div className="h-2.5 bg-slate-200 rounded w-1/4" />
-          <div className="h-2.5 bg-slate-100 rounded w-full" />
-          <div className="h-2.5 bg-slate-100 rounded w-5/6" />
-        </div>
-      ))}
+    <div className="flex flex-col gap-6 animate-pulse">
+      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-5 flex flex-col gap-3">
+        <div className="h-3 bg-slate-200 rounded w-1/3" />
+        <div className="h-2.5 bg-slate-100 rounded w-full" />
+        <div className="h-2.5 bg-slate-100 rounded w-5/6" />
+        <div className="h-2.5 bg-slate-100 rounded w-4/6" />
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="w-8 h-8 bg-slate-100 rounded-xl" />
+        <div className="flex-1 h-2.5 bg-slate-100 rounded mx-4" />
+        <div className="w-8 h-8 bg-slate-100 rounded-xl" />
+      </div>
     </div>
   )
 }
@@ -96,6 +100,26 @@ function GlobalMapView({ globalMap }) {
 }
 
 function ExplainView({ explanation, error }) {
+  const [currentIndex, setCurrentIndex] = useState(0)
+
+  useEffect(() => {
+    setCurrentIndex(0)
+  }, [explanation])
+
+  useEffect(() => {
+    const items = explanation?.explanations
+    if (!items?.length) return
+    const total = items.length
+
+    function handleKey(e) {
+      if (e.key === 'ArrowRight') setCurrentIndex(i => Math.min(i + 1, total - 1))
+      else if (e.key === 'ArrowLeft') setCurrentIndex(i => Math.max(i - 1, 0))
+    }
+
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [explanation])
+
   if (error) {
     return (
       <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
@@ -107,21 +131,58 @@ function ExplainView({ explanation, error }) {
   if (!explanation) {
     return (
       <p className="text-xs text-slate-400 text-center mt-10 leading-relaxed">
-        Selecciona texto en el PDF<br />y pulsa "Explicar selección".
+        Pulsa ✦ en cualquier párrafo<br />del PDF para explicarlo.
       </p>
     )
   }
 
+  const items = explanation.explanations
+  const total = items.length
+
+  if (total === 0) {
+    return (
+      <p className="text-xs text-slate-400 text-center mt-10 leading-relaxed">
+        Este párrafo no contiene<br />conceptos complejos.
+      </p>
+    )
+  }
+
+  const current = items[currentIndex]
+  const canPrev = currentIndex > 0
+  const canNext = currentIndex < total - 1
+
   return (
-    <div className="flex flex-col gap-2">
-      {explanation.explanations.map((e, i) => (
-        <div key={i} className="border border-slate-100 rounded-xl p-3">
-          <span className="font-mono text-[11px] font-bold text-indigo-600 block mb-1.5">
-            {e.term}
-          </span>
-          <p className="text-[11px] text-slate-600 leading-relaxed">{e.explanation}</p>
-        </div>
-      ))}
+    <div className="flex flex-col gap-6">
+      <div className="rounded-2xl border border-indigo-100 bg-indigo-50 p-5">
+        <p className="font-mono text-sm font-bold text-indigo-600 mb-3 break-words">
+          {current.term}
+        </p>
+        <p className="text-xs text-slate-700 leading-relaxed">{current.explanation}</p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setCurrentIndex(i => i - 1)}
+          disabled={!canPrev}
+          title="Anterior (←)"
+          className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+        >
+          ←
+        </button>
+
+        <span className="flex-1 text-center text-[11px] text-slate-400 font-medium tabular-nums select-none">
+          {currentIndex + 1} de {total} {total === 1 ? 'concepto' : 'conceptos'}
+        </span>
+
+        <button
+          onClick={() => setCurrentIndex(i => i + 1)}
+          disabled={!canNext}
+          title="Siguiente (→)"
+          className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+        >
+          →
+        </button>
+      </div>
     </div>
   )
 }
