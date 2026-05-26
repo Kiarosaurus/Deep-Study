@@ -47,7 +47,7 @@ export default function PdfUploader({ onUpload, loading, uploadProgress, error }
   const [file, setFile] = useState(null)
   const [dragging, setDragging] = useState(false)
   const [language, setLanguage] = useState('es')
-  const [keepTermsInEnglish, setKeepTermsInEnglish] = useState(false)
+  const [keepTermsInEnglish, setKeepTermsInEnglish] = useState(true)
   const inputRef = useRef()
 
   function handleFile(f) {

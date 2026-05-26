@@ -225,11 +225,11 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
               )
             })}
 
-            {/* Otras oraciones del carrusel (no la actual) — sombreado plomo */}
+            {/* Otras oraciones del carrusel (no la actual) — sombreado plomo, estático */}
             {otherBoxes.map((box, j) => (
               <div
                 key={`ot-${i}-${j}`}
-                className="absolute pointer-events-none rounded-sm bg-slate-400/30 transition-all duration-300 ease-out"
+                className="absolute pointer-events-none rounded-sm bg-slate-400/30"
                 style={{
                   left:   box.left,
                   top:    box.top,
