@@ -23,19 +23,26 @@ function SkeletonGlobal() {
   )
 }
 
-function SkeletonExplain() {
+function SkeletonExplain({ retryInfo }) {
   return (
-    <div className="flex flex-col gap-6 animate-pulse">
-      <div className="rounded-2xl border border-slate-100 bg-slate-50 p-5 flex flex-col gap-3">
-        <div className="h-3 bg-slate-200 rounded w-1/3" />
-        <div className="h-2.5 bg-slate-100 rounded w-full" />
-        <div className="h-2.5 bg-slate-100 rounded w-5/6" />
-        <div className="h-2.5 bg-slate-100 rounded w-4/6" />
-      </div>
-      <div className="flex items-center gap-2">
-        <div className="w-8 h-8 bg-slate-100 rounded-xl" />
-        <div className="flex-1 h-2.5 bg-slate-100 rounded mx-4" />
-        <div className="w-8 h-8 bg-slate-100 rounded-xl" />
+    <div className="flex flex-col gap-6">
+      {retryInfo && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+          Reintentando ({retryInfo.attempt}/{retryInfo.maxAttempts - 1}) en {Math.round(retryInfo.delayMs / 1000)}s — error transitorio del modelo.
+        </div>
+      )}
+      <div className="flex flex-col gap-6 animate-pulse">
+        <div className="rounded-2xl border border-slate-100 bg-slate-50 p-5 flex flex-col gap-3">
+          <div className="h-3 bg-slate-200 rounded w-1/3" />
+          <div className="h-2.5 bg-slate-100 rounded w-full" />
+          <div className="h-2.5 bg-slate-100 rounded w-5/6" />
+          <div className="h-2.5 bg-slate-100 rounded w-4/6" />
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-slate-100 rounded-xl" />
+          <div className="flex-1 h-2.5 bg-slate-100 rounded mx-4" />
+          <div className="w-8 h-8 bg-slate-100 rounded-xl" />
+        </div>
       </div>
     </div>
   )
@@ -210,6 +217,7 @@ export default function Sidebar({
   loadingGlobal, loadingExplain,
   errorGlobal, errorExplain,
   currentIndex, onIndexChange,
+  retryInfo,
 }) {
   const [tab, setTab] = useState('global')
 
@@ -253,7 +261,7 @@ export default function Sidebar({
             : <GlobalMapView globalMap={globalMap} />
         )}
         {tab === 'explain' && (
-          loadingExplain ? <SkeletonExplain /> :
+          loadingExplain ? <SkeletonExplain retryInfo={retryInfo} /> :
           <ExplainView
             explanation={explanation}
             error={errorExplain}
