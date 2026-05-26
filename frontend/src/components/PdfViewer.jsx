@@ -159,10 +159,12 @@ function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
   )
 }
 
-function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentExplanation }) {
+function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
   const [hoveredIdx, setHoveredIdx] = useState(null)
 
   if (!blocks || !scale) return null
+
+  const allItems = explanation?.sentence_explanations ?? []
 
   return (
     <div className="absolute inset-0 z-10 pointer-events-none">
@@ -177,18 +179,30 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
         const anchorLeft = lastBox.x1 * scale
         const anchorTop  = lastBox.y1 * scale
 
-        const sentenceIndices = (isActive && currentExplanation && block.sentences?.length)
+        const currentIndices = (isActive && currentExplanation && block.sentences?.length)
           ? resolveSentenceIndices(block.sentences, currentExplanation)
           : []
+        const currentSet = new Set(currentIndices)
 
-        const highlightBoxes = sentenceIndices.flatMap(idx =>
-          (block.sentences[idx].boxes || []).map(b => ({
+        const otherIndices = (isActive && allItems.length && block.sentences?.length)
+          ? [...new Set(
+              allItems
+                .filter(it => it !== currentExplanation)
+                .flatMap(it => resolveSentenceIndices(block.sentences, it))
+            )].filter(idx => !currentSet.has(idx))
+          : []
+
+        const boxesFromIndices = (indices) => indices.flatMap(idx =>
+          (block.sentences[idx]?.boxes || []).map(b => ({
             left:   b.x0 * scale,
             top:    b.y0 * scale,
             width:  (b.x1 - b.x0) * scale,
             height: (b.y1 - b.y0) * scale,
           }))
         )
+
+        const otherBoxes     = boxesFromIndices(otherIndices)
+        const highlightBoxes = boxesFromIndices(currentIndices)
 
         return (
           <div key={i}>
@@ -210,6 +224,21 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
                 />
               )
             })}
+
+            {/* Otras oraciones del carrusel (no la actual) — sombreado plomo */}
+            {otherBoxes.map((box, j) => (
+              <div
+                key={`ot-${i}-${j}`}
+                className="absolute pointer-events-none rounded-sm bg-slate-400/30 transition-all duration-300 ease-out"
+                style={{
+                  left:   box.left,
+                  top:    box.top,
+                  width:  box.width,
+                  height: box.height,
+                  mixBlendMode: 'multiply',
+                }}
+              />
+            ))}
 
             {/* Resaltado por oración — múltiples rects sliceados proporcionalmente */}
             {highlightBoxes.map((box, j) => (
@@ -256,7 +285,7 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation, trackedBox }) {
+function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
   // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
   // automáticamente cuando `width` cambia por zoom o resize.
   const [originalWidth, setOriginalWidth] = useState(null)
@@ -281,6 +310,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
         onExplain={onExplain}
         activeParagraph={activeParagraph}
         currentExplanation={currentExplanation}
+        explanation={explanation}
       />
       {trackedBox && scale && (
         <div
@@ -299,7 +329,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
   )
 }
 
-export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation }) {
+export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation, explanation }) {
   const [numPages, setNumPages]               = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
@@ -535,6 +565,7 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
                   onExplain={onExplain}
                   activeParagraph={activeParagraph}
                   currentExplanation={currentExplanation}
+                  explanation={explanation}
                   trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
                 />
               ))}

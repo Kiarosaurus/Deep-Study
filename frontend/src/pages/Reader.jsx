@@ -201,6 +201,7 @@ export default function Reader() {
           pages={analysis?.pages}
           activeParagraph={activeParagraph}
           currentExplanation={currentExplanation}
+          explanation={explanation}
         />
       </div>
 
