@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { resolveSentenceIndices } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
+import { usePdfDocument } from './use-pdf-document'
 
 const BBOX_INFLATE_PT = 2
 
 export default function LinearReader({
+  pdfDoc,
   pdfFile,
   linearBlocks,
   pageDims,
@@ -15,7 +17,11 @@ export default function LinearReader({
   currentExplanation,
   explanation,
 }) {
-  const { pageCanvases, requestPage } = usePageCache(pdfFile, { maxCached: 8, concurrent: 2 })
+  // If the parent already owns a doc, use it. Otherwise fall back to loading
+  // from pdfFile ourselves (LinearReaderTest standalone case).
+  const ownedDoc = usePdfDocument(pdfDoc ? null : pdfFile)
+  const effectiveDoc = pdfDoc ?? ownedDoc
+  const { pageCanvases, requestPage } = usePageCache(effectiveDoc, { maxCached: 8, concurrent: 2 })
 
   const [visibleSet, setVisibleSet] = useState(() => new Set())
   const [hoveredIdx, setHoveredIdx] = useState(null)
@@ -123,7 +129,11 @@ export default function LinearReader({
   )
 }
 
-function BlockCrop({
+// Shallow-prop memo. Stable refs for callbacks (handleHoverChange/onExplain/
+// requestPage are useCallback) + per-page srcCanvas references mean a cache
+// publish only re-renders blocks of the page that was just rendered/evicted,
+// and a hover/visibility change only re-renders the affected block.
+const BlockCrop = memo(function BlockCrop({
   blockIdx,
   block,
   srcCanvas,
@@ -166,6 +176,13 @@ function BlockCrop({
   useEffect(() => {
     if (visible && !srcCanvas) requestPage(block.page)
   }, [visible, srcCanvas, block.page, requestPage])
+
+  // Drop hover state when scrolling off-viewport. onMouseLeave only fires while
+  // the wrapper still has interactive handlers; once isInteractive flips false
+  // it never fires, leaving hovered=true stuck until the block re-enters.
+  useEffect(() => {
+    if (!visible && hovered) onHoverChange?.(blockIdx, false)
+  }, [visible, hovered, blockIdx, onHoverChange])
 
   // Draw crop on visibility + cache hit. Re-draws on srcCanvas change (e.g.
   // after eviction + re-render) and on resize/zoom.
@@ -330,4 +347,4 @@ function BlockCrop({
       )}
     </div>
   )
-}
+})

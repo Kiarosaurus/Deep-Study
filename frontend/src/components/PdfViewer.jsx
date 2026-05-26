@@ -4,6 +4,7 @@ import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import LinearReader from './LinearReader'
 import { resolveSentenceIndices } from './highlight-utils'
+import { usePdfDocument } from './use-pdf-document'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -274,6 +275,17 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
 
   const containerRef = useRef(null)
   const userZoomRef  = useRef(1.0)
+  const trackingToolbarRef = useRef(null)
+
+  // Lazy-load the pdfjs doc the first time tracking activates and keep it
+  // alive for the lifetime of this viewer. LinearReader unmounts on toggle off
+  // but the doc + page-canvas cache survive, so re-activating doesn't re-fetch
+  // or re-parse the PDF.
+  const [docNeeded, setDocNeeded] = useState(false)
+  useEffect(() => {
+    if (tracking) setDocNeeded(true)
+  }, [tracking])
+  const sharedPdfDoc = usePdfDocument(docNeeded ? file : null)
 
   useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
 
@@ -316,9 +328,13 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
       if (!el) return
       const containerRect = container.getBoundingClientRect()
       const elRect = el.getBoundingClientRect()
+      // Tracking toolbar sits 16px from container top; offset = its bottom
+      // edge plus a small breathing gap so the block lands clear of the chrome.
+      const toolbar = trackingToolbarRef.current
+      const toolbarH = toolbar ? toolbar.offsetTop + toolbar.offsetHeight : 0
       const targetY = container.scrollTop
                     + (elRect.top - containerRect.top)
-                    - 80  // toolbar offset
+                    - (toolbarH + 12)
       container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
       return
     }
@@ -493,7 +509,7 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
       )}
 
       {/* Tracking toolbar */}
-      <div className="absolute top-4 left-4 z-30 flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
+      <div ref={trackingToolbarRef} className="absolute top-4 left-4 z-30 flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
         {onHome && (
           <button
             onClick={onHome}
@@ -557,7 +573,7 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
           <div className="py-8 min-h-full" style={{ minWidth: 'fit-content' }}>
             {basePageWidth && (
               <LinearReader
-                pdfFile={file}
+                pdfDoc={sharedPdfDoc}
                 linearBlocks={linearBlocks}
                 pageDims={pageDims}
                 contentWidth={Math.max(1, basePageWidth - 96)}
