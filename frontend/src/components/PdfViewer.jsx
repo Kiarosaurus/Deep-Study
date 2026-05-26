@@ -329,7 +329,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
   )
 }
 
-export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation, explanation }) {
+export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation, explanation, onHome }) {
   const [numPages, setNumPages]               = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
@@ -506,7 +506,28 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
       <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
 
       {/* Tracking toolbar */}
-      <div className="absolute top-4 left-4 z-30 flex items-center gap-2 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
+      <div className="absolute top-4 left-4 z-30 flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
+        {onHome && (
+          <button
+            onClick={onHome}
+            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+            title="Volver al menú principal"
+            aria-label="Volver al menú principal"
+          >
+            <svg
+              className="w-4 h-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 12l9-9 9 9" />
+              <path d="M5 10v10h14V10" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={() => setTracking(t => !t)}
           disabled={readingSequence.length === 0}

@@ -187,13 +187,6 @@ export default function Reader() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white">
-      <button
-        onClick={() => navigate('/')}
-        className="absolute top-4 left-4 z-20 flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 bg-white/90 backdrop-blur px-3 py-1.5 rounded-xl border border-slate-200 shadow-sm transition-colors"
-      >
-        ← Inicio
-      </button>
-
       <div className="relative min-w-0 overflow-hidden" style={{ flex: 7 }}>
         <PdfViewer
           file={pdfUrl}
@@ -202,6 +195,7 @@ export default function Reader() {
           activeParagraph={activeParagraph}
           currentExplanation={currentExplanation}
           explanation={explanation}
+          onHome={() => navigate('/')}
         />
       </div>
 
