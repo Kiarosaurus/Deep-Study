@@ -224,6 +224,8 @@ _TITLE_PAGE_MARGIN   = 0.22
 _MIN_WORDS           = 5
 _INDENT_THRESHOLD    = 15.0     # pts: diferencia x0 para considerar sangría
 _TITLE_FONT_RATIO    = 1.5
+_MERGE_COL_TOLERANCE = 30.0     # pts: |Δx0| máximo para considerar misma columna al mergear
+_MERGE_MAX_GAP_RATIO = 4.0      # múltiplo de altura de línea: gap vertical máximo al mergear
 
 _JUNK_PREFIXES = (
     'keywords', 'keywords:', 'index terms', 'index terms:',
@@ -338,18 +340,24 @@ _FW_WIDTH_RATIO = 0.6  # box que cubre >60% de page_width → full-width
 
 
 def _classify_boxes(boxes: list[BBox], page_width: float) -> str:
-    """'left' | 'right' | 'fw' | 'multi'. Genérica: párrafos o imágenes."""
+    """'left' | 'right' | 'fw' | 'multi'. Genérica: párrafos o imágenes.
+
+    Multi-box NO implica multi-columna: un párrafo con corte vertical
+    dentro de una sola columna sigue siendo 'left' o 'right'.
+    """
     if not boxes:
         return 'left'
-    if len(boxes) > 1:
-        return 'multi'
 
-    b = boxes[0]
-    width = b.x1 - b.x0
-    if width > page_width * _FW_WIDTH_RATIO:
-        return 'fw'
+    min_x = min(b.x0 for b in boxes)
+    max_x = max(b.x1 for b in boxes)
+    span = max_x - min_x
 
-    cx = (b.x0 + b.x1) / 2
+    # Cubre >60% de página → barrera (fw si 1 caja, multi si varias cruzan columnas)
+    if span > page_width * _FW_WIDTH_RATIO:
+        return 'fw' if len(boxes) == 1 else 'multi'
+
+    # Span estrecho → todas las cajas viven en la misma columna
+    cx = (min_x + max_x) / 2
     return 'left' if cx < page_width / 2 else 'right'
 
 
@@ -673,8 +681,9 @@ async def upload_pdf(
             
             text = curr.text
             merged_lines = list(curr.lines)
+            last_cand = curr  # ancla para chequear adyacencia de columna y vertical
 
-            # Mergeo inteligente por Sangría (Columnas rotas)
+            # Mergeo inteligente por Sangría (Columnas rotas) — sólo dentro de la misma columna
             while i + 1 < len(candidates):
                 nxt = candidates[i+1]
 
@@ -685,12 +694,26 @@ async def upload_pdf(
                 elif len(nxt.text.split()) < 6 and not nxt.is_indented and nxt.font_size > curr.font_size * 1.2:
                     break
 
-                if not nxt.is_indented:
-                    i += 1
-                    text = f"{text} {nxt.text}"
-                    merged_lines.extend(nxt.lines)
-                else:
+                if nxt.is_indented:
                     break
+
+                # Anti-merge cross-column: distinto x0 → distinta columna
+                if abs(nxt.x0 - last_cand.x0) > _MERGE_COL_TOLERANCE:
+                    break
+
+                # Anti-merge upward jump: nxt no puede estar por encima del último mergeado
+                if nxt.y0 < last_cand.y1 - 2.0:
+                    break
+
+                # Anti-merge gap grande: separación vertical excesiva indica párrafos distintos
+                last_h = max(last_cand.y1 - last_cand.y0, 1.0)
+                if (nxt.y0 - last_cand.y1) > last_h * _MERGE_MAX_GAP_RATIO:
+                    break
+
+                i += 1
+                text = f"{text} {nxt.text}"
+                merged_lines.extend(nxt.lines)
+                last_cand = nxt
 
             blocks.append(ParagraphBlock(
                 text=text,
