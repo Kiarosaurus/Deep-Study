@@ -27,7 +27,10 @@ def main():
         print(f"  blocks: {len(p.blocks)}, images: {len(p.images)}")
         for b in p.blocks:
             text_preview = b.text[:80].replace("\n", " ")
-            print(f"  ri={b.reading_index:>2} sents={len(b.sentences):>2} | {text_preview}")
+            cont = " CONT" if b.continuation else "     "
+            print(
+                f"  ri={b.reading_index:>2} sents={len(b.sentences):>2}{cont} | {text_preview}"
+            )
         for im in p.images:
             bb = im.bbox
             print(f"  ri={im.reading_index:>2} IMG ({bb.x0:.0f},{bb.y0:.0f},{bb.x1:.0f},{bb.y1:.0f})")

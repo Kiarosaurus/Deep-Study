@@ -11,12 +11,16 @@ the JSONRenderer and walk `document.pages[i].structure` directly, gaining:
 Filters (no llegan al frontend ni a Gemini):
 - PageHeader / PageFooter / Footnote / Reference / TableOfContents /
   Handwriting / Form  → block_type filter (Marker labels these).
-- Document title (first SectionHeader on page 1, salvo nombre canónico de
-  sección como "Abstract" o "Introduction").
-- Bloques de autor / afiliación (página 1: email, "@", "University of",
-  "Institute", "School of", o líneas mayoritariamente en Title Case sin verbos).
-  Marker a veces etiqueta una línea de autor como SectionHeader; el filtro se
-  aplica también a esos casos.
+- SectionHeader (TODOS): nombres de sección / subsección no se emiten como
+  párrafo. El título del paper, "1 Introduction", "2.1 Architecture", etc.
+  Se sigue usando el texto del header para gestionar estado interno (detectar
+  Acknowledgments → stop, CCS/Keywords → skip body, body-section → abrir
+  contenido). Si Marker etiqueta erróneamente una línea de autor como
+  SectionHeader, también queda descartada porque ningún SectionHeader se
+  emite.
+- Bloques de autor / afiliación etiquetados como Text (página 1, antes de la
+  primera sección body): email, "@", "University of", "Institute", "School
+  of", líneas mayoritariamente en Title Case.
 - Bloques de metadatos de la página 1: copyright (©), "Permission to make",
   DOI/ISBN, "ACM Reference Format", "arXiv", "preprint", venue boilerplate.
 - Secciones "CCS Concepts" / "Keywords" / "Index Terms" / "Categories and
@@ -24,6 +28,12 @@ Filters (no llegan al frontend ni a Gemini):
   todo el cuerpo hasta el siguiente body-section header.
 - Todo lo posterior a SectionHeader == "Acknowledgments" / "References" /
   "Bibliography" / "Works Cited" (stop-content).
+
+Cross-page paragraph merge: cuando el primer párrafo no-Caption de una página
+N (N>0) cumple los dos criterios indicados por la guía (el párrafo previo no
+termina en punto/!/?/… y este empieza con letra minúscula), se marca con
+`continuation=True`. El consumidor (main.py) concatena las continuaciones con
+el párrafo anterior para construir el `full_text` que recibe Gemini.
 """
 import os
 import re
@@ -59,12 +69,13 @@ def _get_converter():
 
 
 # ── Block-type buckets ───────────────────────────────────────────────────────
+# SectionHeader is intentionally excluded: section / subsection names are not
+# emitted as paragraphs (they're recognized for state tracking but dropped).
 _TEXT_TYPES = frozenset({
     "Text",
     "TextInlineMath",
     "ListItem",
     "ListGroup",
-    "SectionHeader",
     "Caption",
     "Code",
     "Equation",
@@ -182,6 +193,22 @@ def _looks_like_author_line(text: str) -> bool:
     proper = sum(1 for w in words if _PROPER_NOUN_RE.match(w))
     # Allow a few connectors ("and", "of", "the", "&", "y", "de", …).
     return proper >= max(2, len(words) - 4)
+
+
+# ── Cross-page continuation detection ────────────────────────────────────────
+_TERMINAL_PUNCT = frozenset('.!?…')
+
+
+def _is_continuation(prev_text: str, new_text: str) -> bool:
+    """True if `new_text` is the cross-page tail of `prev_text`."""
+    prev = prev_text.rstrip()
+    new = new_text.lstrip()
+    if not prev or not new:
+        return False
+    if prev[-1] in _TERMINAL_PUNCT:
+        return False
+    first = new[0]
+    return first.isalpha() and first.islower()
 
 
 # ── Sentence segmentation ────────────────────────────────────────────────────
@@ -324,17 +351,20 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
 
     output: list[PageBlocks] = []
     stop_content = False
-    title_seen = False  # first SectionHeader of page 1 → discarded unless body
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
+    last_emitted_text = ""  # text of the most recent paragraph (cross-page tracker)
 
     for page_idx, page in enumerate(document.pages):
         if stop_content:
             break
 
         # skip_section is page-scoped: a CCS/Keywords boilerplate region never
-        # legitimately spans pages, and we don't want a stuck flag to drop
-        # body content on the next page.
+        # legitimately spans pages.
         skip_section = False
+        # Cross-page continuation only fires on the first non-Caption paragraph
+        # of a new page (figures captioning frequently lead a page but are not
+        # paragraph continuations themselves).
+        cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
         page_w = page.polygon.width
         page_h = page.polygon.height
@@ -358,67 +388,53 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
                 reading_idx += 1
                 continue
 
+            # SectionHeader: state-update only, never emitted as a paragraph.
+            if bt == "SectionHeader":
+                header_text = " ".join(
+                    l.text for l in _collect_lines(block, document)
+                ).strip()
+                if not header_text:
+                    continue
+                if _is_stop_header(header_text):
+                    stop_content = True
+                    break
+                if _is_skip_section(header_text):
+                    skip_section = True
+                elif _is_body_section_name(header_text):
+                    skip_section = False
+                    pre_abstract = False
+                continue
+
             if bt not in _TEXT_TYPES:
+                continue
+            if skip_section:
                 continue
 
             inner_lines = _collect_lines(block, document)
             text = " ".join(l.text for l in inner_lines).strip()
-            if not text:
-                continue
-
-            is_section = bt == "SectionHeader"
-            # Non-section text needs ≥3 words; section headers can be short
-            # ("Abstract", "1 Introduction").
-            if not is_section and len(text.split()) < 3:
+            if not text or len(text.split()) < 3:
                 continue
 
             if _is_stop_header(text):
                 stop_content = True
                 break
 
-            if is_section:
-                is_body = _is_body_section_name(text)
-                is_skip = _is_skip_section(text)
-
-                # Drop the document title (first SectionHeader on page 1).
-                if page_idx == 0 and not title_seen:
-                    title_seen = True
-                    if not is_body and not is_skip:
-                        continue
-                else:
-                    title_seen = True
-
-                if is_skip:
-                    skip_section = True
-                    continue
-
-                if is_body:
-                    skip_section = False
-                    pre_abstract = False
-
-            elif skip_section:
-                continue
-
-            # Page-1 noise: hard signals (copyright/DOI/ISBN/permission) always
-            # filter; soft signals (authors/affiliations) only inside the
-            # masthead window before the first body section.
+            # Page-1 noise filters.
             if page_idx == 0:
                 if _is_hard_noise(text):
                     continue
-                if pre_abstract and not is_section and (
+                if pre_abstract and (
                     _is_soft_noise(text) or _looks_like_author_line(text)
                 ):
                     continue
-                # Marker sometimes labels an author line as SectionHeader: catch
-                # it via the same soft-noise check, scoped to non-body headers
-                # on page 1.
-                if (
-                    is_section
-                    and pre_abstract
-                    and not _is_body_section_name(text)
-                    and (_is_soft_noise(text) or _looks_like_author_line(text))
-                ):
-                    continue
+
+            is_cont = (
+                cross_page_candidate
+                and bt != "Caption"
+                and _is_continuation(last_emitted_text, text)
+            )
+            if bt != "Caption":
+                cross_page_candidate = False
 
             sentences = _build_sentences(text, inner_lines)
 
@@ -428,9 +444,11 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
                     boxes=[bbox],
                     sentences=sentences,
                     reading_index=reading_idx,
+                    continuation=is_cont,
                 )
             )
             reading_idx += 1
+            last_emitted_text = text
 
         if page_idx == 0:
             pre_abstract = False

@@ -197,7 +197,21 @@ async def upload_pdf(
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
 
-    full_text = "\n\n".join(b.text for p in pages_data for b in p.blocks)
+    # Cross-page continuations join with the previous paragraph (no extra "\n\n")
+    # so Gemini receives the paragraph as a single semantic unit. If the
+    # previous text ends with a soft hyphen, drop it and concatenate seamlessly.
+    parts: list[str] = []
+    for p in pages_data:
+        for b in p.blocks:
+            if b.continuation and parts:
+                prev = parts[-1].rstrip()
+                if prev.endswith(("-", "—", "¬")):
+                    parts[-1] = prev[:-1] + b.text.lstrip()
+                else:
+                    parts[-1] = prev + " " + b.text.lstrip()
+            else:
+                parts.append(b.text)
+    full_text = "\n\n".join(parts)
 
     try:
         data = _generate_json(

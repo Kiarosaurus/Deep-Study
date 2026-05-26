@@ -23,6 +23,11 @@ class ParagraphBlock(BaseModel):
     boxes: list[BBox]
     sentences: list[SentenceBlock] = []
     reading_index: int = 0
+    # True when this paragraph is the cross-page continuation of the previous
+    # paragraph (prev did not end in terminal punctuation, this one begins
+    # with a lowercase letter). Consumers join continuations with the previous
+    # paragraph instead of treating them as a separate unit.
+    continuation: bool = False
 
 
 class ImageBlock(BaseModel):
