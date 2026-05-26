@@ -52,17 +52,23 @@ function buildReadingSequence(pages) {
 }
 
 // Linear sequence built directly from linearBlocks (already in global reading
-// order, one bbox per block). Only paragraphs and figures/tables become stops;
-// titles/section_headers/captions/authors/equations/code are visible but skipped
-// for navigation parity with paginated mode.
+// order, one bbox per block). Title is included so the first stop on activation
+// lands on the paper title rather than skipping straight to the first paragraph.
+// Section headers / captions / authors / equations / code remain visible but are
+// skipped for navigation.
+const _LINEAR_STOP_ROLES = new Set(['title', 'paragraph', 'figure', 'table'])
+
 function buildLinearReadingSequence(linearBlocks) {
   if (!linearBlocks) return []
   const seq = []
   for (let i = 0; i < linearBlocks.length; i++) {
     const b = linearBlocks[i]
-    if (b.role !== 'paragraph' && b.role !== 'figure' && b.role !== 'table') continue
+    if (!_LINEAR_STOP_ROLES.has(b.role)) continue
+    const kind = b.role === 'paragraph' ? 'p'
+               : b.role === 'title'     ? 'h'
+               : 'i'
     seq.push({
-      kind: b.role === 'paragraph' ? 'p' : 'i',
+      kind,
       reading_index: b.reading_index ?? 0,
       blockIdx: i,
       paragraph_ref: b.paragraph_ref ?? null,
@@ -334,9 +340,14 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
   }
 
-  // Toggle ON → reset al primer stop
+  // Toggle ON/OFF → reset stop + scroll. scrollTop is shared between the
+  // paginated Document and the LinearReader; without an explicit reset, the
+  // raw scroll number from one mode lands the user at unrelated content in
+  // the other (LinearReader is roughly half as tall as Document for the same
+  // content, so toggling jumps somewhere arbitrary).
   useEffect(() => {
     if (tracking) setCurrentStop(0)
+    containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
   }, [tracking])
 
   // Linear-mode sync: when an active paragraph is set (or changes), jump the
@@ -477,7 +488,9 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
 
   return (
     <div className="relative h-full bg-gray-100">
-      <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
+      {!tracking && (
+        <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
+      )}
 
       {/* Tracking toolbar */}
       <div className="absolute top-4 left-4 z-30 flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
