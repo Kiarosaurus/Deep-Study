@@ -36,9 +36,9 @@ export default function Reader() {
     setCurrentIndex(0)
   }, [explanation])
 
-  async function handleExplain(text, sentences) {
+  async function handleExplain(text, sentences, paragraphRef = null) {
     if (!analysis) return
-    setActiveParagraph({ text })
+    setActiveParagraph({ text, paragraphRef })
     setCurrentIndex(0)
 
     const cached = readCachedExplanation(decoded, text, explanationsCache.current)
@@ -192,6 +192,7 @@ export default function Reader() {
           file={pdfUrl}
           onExplain={handleExplain}
           pages={analysis?.pages}
+          linearBlocks={analysis?.linear_blocks ?? []}
           activeParagraph={activeParagraph}
           currentExplanation={currentExplanation}
           explanation={explanation}

@@ -87,6 +87,7 @@ export default function LinearReader({
         {linearBlocks.map((block, i) => (
           <BlockCrop
             key={`${block.page}-${block.reading_index}-${i}`}
+            blockIdx={i}
             block={block}
             srcCanvas={pageCanvases[block.page]}
             pageDim={pageDims?.[block.page]}
@@ -98,7 +99,7 @@ export default function LinearReader({
   )
 }
 
-function BlockCrop({ block, srcCanvas, pageDim, displayWidth }) {
+function BlockCrop({ blockIdx, block, srcCanvas, pageDim, displayWidth }) {
   const canvasRef = useRef(null)
 
   const bbox = block.bbox
@@ -136,27 +137,27 @@ function BlockCrop({ block, srcCanvas, pageDim, displayWidth }) {
     ctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, physicalW, physicalH)
   }, [srcCanvas, displayWidth, displayHeight, bbox.x0, bbox.y0, bbox.x1, bbox.y1, bbW, bbH, inflatedY0])
 
-  if (!srcCanvas) {
-    return (
-      <div
-        style={{
-          width: displayWidth,
-          height: displayHeight,
-          borderRadius: 2,
-        }}
-      />
-    )
-  }
-
   return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        width: displayWidth,
-        height: displayHeight,
-        borderRadius: 2,
-        display: 'block',
-      }}
-    />
+    <div data-block-idx={blockIdx} style={{ width: displayWidth }}>
+      {srcCanvas ? (
+        <canvas
+          ref={canvasRef}
+          style={{
+            width: displayWidth,
+            height: displayHeight,
+            borderRadius: 2,
+            display: 'block',
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            width: displayWidth,
+            height: displayHeight,
+            borderRadius: 2,
+          }}
+        />
+      )}
+    </div>
   )
 }

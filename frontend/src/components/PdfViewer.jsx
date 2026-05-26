@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
+import LinearReader from './LinearReader'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -142,6 +143,26 @@ function buildReadingSequence(pages) {
   return seq
 }
 
+// Linear sequence built directly from linearBlocks (already in global reading
+// order, one bbox per block). Only paragraphs and figures/tables become stops;
+// titles/section_headers/captions/authors/equations/code are visible but skipped
+// for navigation parity with paginated mode.
+function buildLinearReadingSequence(linearBlocks) {
+  if (!linearBlocks) return []
+  const seq = []
+  for (let i = 0; i < linearBlocks.length; i++) {
+    const b = linearBlocks[i]
+    if (b.role !== 'paragraph' && b.role !== 'figure' && b.role !== 'table') continue
+    seq.push({
+      kind: b.role === 'paragraph' ? 'p' : 'i',
+      reading_index: b.reading_index ?? 0,
+      blockIdx: i,
+      paragraph_ref: b.paragraph_ref ?? null,
+    })
+  }
+  return seq
+}
+
 function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
   const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors text-base font-semibold"
   return (
@@ -159,7 +180,7 @@ function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
   )
 }
 
-function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
+function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
   const [hoveredIdx, setHoveredIdx] = useState(null)
 
   if (!blocks || !scale) return null
@@ -271,7 +292,7 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain(block.text, block.sentences)}
+              onClick={() => onExplain(block.text, block.sentences, flatBase + i)}
               onMouseEnter={() => setHoveredIdx(i)}
               onMouseLeave={() => setHoveredIdx(null)}
               title="Explicar párrafo"
@@ -285,7 +306,7 @@ function ParagraphOverlay({ blocks, scale, onExplain, activeParagraph, currentEx
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
+function PdfPage({ pageNumber, width, blocks, flatBase, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
   // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
   // automáticamente cuando `width` cambia por zoom o resize.
   const [originalWidth, setOriginalWidth] = useState(null)
@@ -306,6 +327,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
       />
       <ParagraphOverlay
         blocks={blocks}
+        flatBase={flatBase}
         scale={scale}
         onExplain={onExplain}
         activeParagraph={activeParagraph}
@@ -329,7 +351,7 @@ function PdfPage({ pageNumber, width, blocks, onExplain, activeParagraph, curren
   )
 }
 
-export default function PdfViewer({ file, onExplain, pages, activeParagraph, currentExplanation, explanation, onHome }) {
+export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }) {
   const [numPages, setNumPages]               = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
@@ -342,7 +364,10 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
   useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
 
   // ── Tracking mode ───────────────────────────────────────────────────────────
-  const readingSequence = useMemo(() => buildReadingSequence(pages), [pages])
+  const paginatedSequence = useMemo(() => buildReadingSequence(pages), [pages])
+  const linearSequence    = useMemo(() => buildLinearReadingSequence(linearBlocks), [linearBlocks])
+  const readingSequence   = tracking ? linearSequence : paginatedSequence
+
   const pageDims = useMemo(
     () => pages
       ? Object.fromEntries(pages.map(p => [p.page, { width: p.width, height: p.height }]))
@@ -350,12 +375,41 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
     [pages],
   )
 
+  // Flat index base per page (cumulative count of pages[*].blocks). Lets each
+  // ✦ click forward a global paragraph_ref so linear-mode sync can find the
+  // same paragraph in linearBlocks.
+  const flatBaseByPage = useMemo(() => {
+    if (!pages) return {}
+    const out = {}
+    let cum = 0
+    for (const p of pages) {
+      out[p.page] = cum
+      cum += (p.blocks?.length || 0)
+    }
+    return out
+  }, [pages])
+
   // pageWidth recomputado abajo; capturamos vía ref para usar en scrollToStop
   const pageWidthRef = useRef(0)
 
   function scrollToStop(stop) {
     const container = containerRef.current
     if (!container || !stop) return
+
+    // Linear stop: scroll to the data-block-idx wrapper inside LinearReader.
+    if (typeof stop.blockIdx === 'number') {
+      const el = container.querySelector(`[data-block-idx="${stop.blockIdx}"]`)
+      if (!el) return
+      const containerRect = container.getBoundingClientRect()
+      const elRect = el.getBoundingClientRect()
+      const targetY = container.scrollTop
+                    + (elRect.top - containerRect.top)
+                    - 80  // toolbar offset
+      container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
+      return
+    }
+
+    // Paginated stop: position the bbox 25% from the viewport top.
     const el = container.querySelector(`[data-page="${stop.page}"]`)
     if (!el) return
     const dim = pageDims[stop.page]
@@ -376,6 +430,18 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
   useEffect(() => {
     if (tracking) setCurrentStop(0)
   }, [tracking])
+
+  // Linear-mode sync: when an active paragraph is set (or changes), jump the
+  // tracking cursor to the linear stop whose paragraph_ref matches. Fires both
+  // on tracking → true (deferred to after the reset above) and on subsequent
+  // ✦ clicks while tracking remains on.
+  useEffect(() => {
+    if (!tracking) return
+    const ref = activeParagraph?.paragraphRef
+    if (ref == null) return
+    const idx = linearSequence.findIndex(s => s.paragraph_ref === ref)
+    if (idx >= 0) setCurrentStop(idx)
+  }, [tracking, activeParagraph, linearSequence])
 
   // Auto-scroll al cambiar stop / activar tracking / re-zoom
   useEffect(() => {
@@ -566,6 +632,19 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
         className="h-full overflow-auto"
         style={{ touchAction: tracking ? 'none' : 'pan-x pan-y' }}
       >
+        {tracking ? (
+          <div className="py-8 min-h-full" style={{ minWidth: 'fit-content' }}>
+            {basePageWidth && (
+              <LinearReader
+                pdfFile={file}
+                linearBlocks={linearBlocks}
+                pageDims={pageDims}
+                contentWidth={Math.max(1, basePageWidth - 96)}
+                userZoom={userZoom}
+              />
+            )}
+          </div>
+        ) : (
         <div
           className="flex flex-col items-center py-8 px-6 min-h-full"
           style={{ minWidth: 'fit-content' }}
@@ -583,6 +662,7 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
                   pageNumber={i + 1}
                   width={pageWidth}
                   blocks={blocksMap[i + 1]}
+                  flatBase={flatBaseByPage[i + 1] ?? 0}
                   onExplain={onExplain}
                   activeParagraph={activeParagraph}
                   currentExplanation={currentExplanation}
@@ -592,6 +672,7 @@ export default function PdfViewer({ file, onExplain, pages, activeParagraph, cur
               ))}
           </Document>
         </div>
+        )}
       </div>
     </div>
   )
