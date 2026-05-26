@@ -1,16 +1,21 @@
 import json
 import os
-import re
 from pathlib import Path
-from dataclasses import dataclass
 
-import fitz
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+
+from extraction import extract_pages
+from models import (
+    DocumentInfo,
+    ExplainRequest,
+    ExplainResponse,
+    GlobalMapping,
+    UploadResponse,
+)
 
 load_dotenv()
 
@@ -39,105 +44,6 @@ Devuelve tu respuesta ÚNICAMENTE como un objeto JSON válido con esta estructur
 
 Si el párrafo es simple y no requiere explicaciones adicionales, devuelve una lista vacía en "explanations"."""
 
-
-# ── Pydantic models ───────────────────────────────────────────────────────────
-
-class Acronym(BaseModel):
-    term: str
-    definition: str
-
-
-class GlobalMapping(BaseModel):
-    acronyms: list[Acronym]
-    core_methodology: str
-    assumed_concepts: list[str]
-
-
-class BBox(BaseModel):
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-
-# Visual line (PyMuPDF) — usado internamente
-class LineBlock(BaseModel):
-    text: str
-    bbox: BBox
-
-
-# Oración semántica — unidad de resaltado expuesta al frontend
-class SentenceBlock(BaseModel):
-    text: str
-    boxes: list[BBox]  # 1+ rects: uno por línea visual tocada, sliceado proporcionalmente
-
-
-class ParagraphBlock(BaseModel):
-    text: str
-    boxes: list[BBox]  # 1+ rects: uno por columna/sección contigua que ocupa el párrafo
-    sentences: list[SentenceBlock] = []
-    reading_index: int = 0  # Orden lógico de lectura intra-página (0-based)
-
-
-class ImageBlock(BaseModel):
-    bbox: BBox
-    reading_index: int = 0  # Orden lógico de lectura intra-página (compartido con párrafos)
-
-
-class PageBlocks(BaseModel):
-    page: int
-    width: float = 0.0       # Dimensiones de la página en pts (para tracking mode en frontend)
-    height: float = 0.0
-    blocks: list[ParagraphBlock]
-    images: list[ImageBlock] = []
-
-
-class UploadResponse(BaseModel):
-    filename: str
-    page_count: int
-    global_map: GlobalMapping
-    pages: list[PageBlocks]
-
-
-class DocumentInfo(BaseModel):
-    filename: str
-    size_bytes: int
-    has_analysis: bool
-
-
-class ExplainRequest(BaseModel):
-    paragraph_sentences: list[str]
-    global_map: dict
-
-
-class ConceptExplanation(BaseModel):
-    term: str
-    explanation: str
-
-
-class SentenceExplanation(BaseModel):
-    sentence_indices: list[int]
-    quote: str
-    concepts: list[ConceptExplanation]
-
-
-class ExplainResponse(BaseModel):
-    sentence_explanations: list[SentenceExplanation]
-
-
-# ── Estructura Temporal para Heurística ───────────────────────────────────────
-@dataclass
-class TextCandidate:
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    text: str
-    is_indented: bool
-    font_size: float
-    lines: list[LineBlock]  # Ahora guardamos las líneas temporalmente aquí
-
-
-# ── AI models ─────────────────────────────────────────────────────────────────
 
 EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás un párrafo de un paper científico SEGMENTADO POR ORACIONES y el Mapa Global del documento.
 
@@ -170,7 +76,7 @@ REGLAS GLOBALES:
 - NO uses puntuación rara como "))" o "((".
 - Devuelve ÚNICAMENTE un JSON válido. Sin texto adicional fuera del JSON."""
 
-_GLOBAL_MODEL  = "gemini-3.1-flash-lite"
+_GLOBAL_MODEL = "gemini-3.1-flash-lite"
 _EXPLAIN_MODEL = "gemini-2.5-flash-lite"
 
 
@@ -202,7 +108,6 @@ _EXPLAIN_CONFIG = types.GenerateContentConfig(
 
 
 def _generate_json(model: str, contents: str, config: types.GenerateContentConfig) -> dict:
-    """Llama Gemini, valida finish_reason, parsea JSON. Lanza RuntimeError con causa específica."""
     response = _client.models.generate_content(model=model, contents=contents, config=config)
     candidate = response.candidates[0] if response.candidates else None
     finish = getattr(candidate, "finish_reason", None)
@@ -216,367 +121,8 @@ def _generate_json(model: str, contents: str, config: types.GenerateContentConfi
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Invalid JSON (finish_reason={finish}): {e}")
 
-# ── Extraction helpers ────────────────────────────────────────────────────────
 
-_CLOSING_PUNCT       = frozenset('.!?…')
-_HEADER_FOOTER_MARGIN = 0.08
-_TITLE_PAGE_MARGIN   = 0.22
-_MIN_WORDS           = 5
-_INDENT_THRESHOLD    = 15.0     # pts: diferencia x0 para considerar sangría
-_TITLE_FONT_RATIO    = 1.5
-_MERGE_COL_TOLERANCE = 30.0     # pts: |Δx0| máximo para considerar misma columna al mergear
-_MERGE_MAX_GAP_RATIO = 4.0      # múltiplo de altura de línea: gap vertical máximo al mergear
-
-_JUNK_PREFIXES = (
-    'keywords', 'keywords:', 'index terms', 'index terms:',
-    'reference format', 'reference format:', 'acm reference format',
-    'ccs concepts',
-)
-
-# Stop-section: agradecimientos y referencias terminan el contenido del paper
-_STOP_SECTION_RE = re.compile(
-    r'^(acknowledg(?:e)?ments?|references?)\b[\s:.]*$',
-    re.IGNORECASE,
-)
-_STOP_SECTION_MIN_FONT_RATIO = 1.05  # heading > body por al menos 5%
-
-# Sentence boundary: punctuation + whitespace + uppercase-or-opener
-# Evita romper en "Fig. 1", "et al.", "e.g." (lookahead exige Mayúscula / paréntesis / comilla)
-_SENT_BOUNDARY_RE = re.compile(r'(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"\(])')
-
-
-def _split_sentences(text: str) -> list[tuple[str, int, int]]:
-    """Devuelve [(sentence_text, start_char, end_char), ...] sobre `text`."""
-    spans: list[tuple[str, int, int]] = []
-    cursor = 0
-    for m in _SENT_BOUNDARY_RE.finditer(text):
-        end = m.start()
-        s = cursor
-        while s < end and text[s].isspace():
-            s += 1
-        if s < end:
-            spans.append((text[s:end], s, end))
-        cursor = m.end()
-    if cursor < len(text):
-        s = cursor
-        while s < len(text) and text[s].isspace():
-            s += 1
-        if s < len(text):
-            spans.append((text[s:], s, len(text)))
-    return spans
-
-
-def _sentence_boxes(visual_lines: list[LineBlock], sent_start: int, sent_end: int) -> list[BBox]:
-    """Para una oración [sent_start, sent_end) sobre el texto concatenado (join con ' '),
-    calcula los rects en pantalla intersectando con cada línea visual y sliceando
-    horizontalmente vía proporción char→pixel."""
-    boxes: list[BBox] = []
-    cursor = 0
-    for line in visual_lines:
-        ln_len = len(line.text)
-        ln_start = cursor
-        ln_end   = cursor + ln_len
-        cursor   = ln_end + 1  # +1 = separador espacio
-
-        ovl_s = max(sent_start, ln_start)
-        ovl_e = min(sent_end,   ln_end)
-        if ovl_e <= ovl_s or ln_len == 0:
-            continue
-
-        local_s = ovl_s - ln_start
-        local_e = ovl_e - ln_start
-
-        bb = line.bbox
-        line_w = bb.x1 - bb.x0
-        ratio  = line_w / ln_len
-        new_x0 = bb.x0 + local_s * ratio
-        new_x1 = bb.x0 + local_e * ratio
-
-        boxes.append(BBox(
-            x0=round(new_x0, 2), y0=round(bb.y0, 2),
-            x1=round(new_x1, 2), y1=round(bb.y1, 2),
-        ))
-    return boxes
-
-
-def _build_sentences(paragraph_text: str, visual_lines: list[LineBlock]) -> list[SentenceBlock]:
-    """Segmenta el párrafo en oraciones y asigna rects proporcionales."""
-    out: list[SentenceBlock] = []
-    for sent_text, s, e in _split_sentences(paragraph_text):
-        boxes = _sentence_boxes(visual_lines, s, e)
-        if boxes:
-            out.append(SentenceBlock(text=sent_text, boxes=boxes))
-    return out
-
-
-def _union_bbox(lines: list[LineBlock]) -> BBox:
-    return BBox(
-        x0=round(min(l.bbox.x0 for l in lines), 2),
-        y0=round(min(l.bbox.y0 for l in lines), 2),
-        x1=round(max(l.bbox.x1 for l in lines), 2),
-        y1=round(max(l.bbox.y1 for l in lines), 2),
-    )
-
-
-def _split_lines_into_columns(lines: list[LineBlock]) -> list[list[LineBlock]]:
-    """Agrupa líneas visuales contiguas verticalmente. Rompe en saltos grandes
-    (cambio de columna, salto vertical hacia arriba) → cada grupo = un rect."""
-    if not lines:
-        return []
-    groups: list[list[LineBlock]] = [[lines[0]]]
-    for ln in lines[1:]:
-        prev = groups[-1][-1]
-        prev_h = max(prev.bbox.y1 - prev.bbox.y0, 1.0)
-        vert_gap = ln.bbox.y0 - prev.bbox.y1
-        # Salto hacia arriba (nueva columna) OR gap vertical > 2x altura línea
-        if ln.bbox.y0 < prev.bbox.y0 - prev_h * 0.5 or vert_gap > prev_h * 2.0:
-            groups.append([ln])
-        else:
-            groups[-1].append(ln)
-    return groups
-
-
-def _paragraph_boxes(visual_lines: list[LineBlock]) -> list[BBox]:
-    """Rects ajustados al párrafo: uno por sección contigua (columna)."""
-    return [_union_bbox(g) for g in _split_lines_into_columns(visual_lines)]
-
-
-# ── Reading order (column-aware) ──────────────────────────────────────────────
-
-_FW_WIDTH_RATIO = 0.6  # box que cubre >60% de page_width → full-width
-
-
-def _classify_boxes(boxes: list[BBox], page_width: float) -> str:
-    """'left' | 'right' | 'fw' | 'multi'. Genérica: párrafos o imágenes.
-
-    Multi-box NO implica multi-columna: un párrafo con corte vertical
-    dentro de una sola columna sigue siendo 'left' o 'right'.
-    """
-    if not boxes:
-        return 'left'
-
-    min_x = min(b.x0 for b in boxes)
-    max_x = max(b.x1 for b in boxes)
-    span = max_x - min_x
-
-    # Cubre >60% de página → barrera (fw si 1 caja, multi si varias cruzan columnas)
-    if span > page_width * _FW_WIDTH_RATIO:
-        return 'fw' if len(boxes) == 1 else 'multi'
-
-    # Span estrecho → todas las cajas viven en la misma columna
-    cx = (min_x + max_x) / 2
-    return 'left' if cx < page_width / 2 else 'right'
-
-
-def _boxes_top_y(boxes: list[BBox]) -> float:
-    return min(b.y0 for b in boxes) if boxes else 0.0
-
-
-def _boxes_bot_y(boxes: list[BBox]) -> float:
-    return max(b.y1 for b in boxes) if boxes else 0.0
-
-
-@dataclass
-class _OrderItem:
-    """Item genérico (párrafo o imagen) para ordenamiento unificado."""
-    kind: str            # 'p' = paragraph, 'i' = image
-    src_idx: int         # índice en su lista original (blocks o images)
-    boxes: list[BBox]
-
-
-def _compute_unified_reading_order(
-    paragraphs: list[ParagraphBlock],
-    images: list[ImageBlock],
-    page_width: float,
-) -> list[_OrderItem]:
-    """Orden lógico de lectura intercalando párrafos e imágenes.
-
-    Algoritmo:
-    1. Combina ambos en lista única de _OrderItem.
-    2. Clasifica cada item (left/right/fw/multi).
-    3. Si no hay estructura 2-col detectable → sort por Y.
-    4. Con 2 cols: walk por bandas verticales separadas por barreras (fw/multi).
-       Dentro de banda: items 'left' (top→bottom), luego 'right' (top→bottom).
-       Barrera insertada en su posición vertical.
-    Resultado: items en orden de lectura.
-    """
-    items: list[_OrderItem] = []
-    for i, p in enumerate(paragraphs):
-        items.append(_OrderItem('p', i, p.boxes))
-    for i, im in enumerate(images):
-        items.append(_OrderItem('i', i, [im.bbox]))
-
-    n = len(items)
-    if n == 0:
-        return []
-
-    classes = [_classify_boxes(it.boxes, page_width) for it in items]
-    n_left  = classes.count('left')
-    n_right = classes.count('right')
-
-    # Sin 2 columnas → orden Y puro
-    if n_left == 0 or n_right == 0:
-        ordered_idx = sorted(range(n), key=lambda i: _boxes_top_y(items[i].boxes))
-        return [items[i] for i in ordered_idx]
-
-    barriers = sorted(
-        (i for i in range(n) if classes[i] in ('fw', 'multi')),
-        key=lambda i: _boxes_top_y(items[i].boxes),
-    )
-
-    order: list[int] = []
-    y_cursor = -1.0
-
-    for bar_i in barriers:
-        bar_top = _boxes_top_y(items[bar_i].boxes)
-
-        col_l = sorted(
-            (j for j in range(n)
-             if classes[j] == 'left'
-             and _boxes_top_y(items[j].boxes) >= y_cursor
-             and _boxes_top_y(items[j].boxes) < bar_top),
-            key=lambda j: _boxes_top_y(items[j].boxes),
-        )
-        col_r = sorted(
-            (j for j in range(n)
-             if classes[j] == 'right'
-             and _boxes_top_y(items[j].boxes) >= y_cursor
-             and _boxes_top_y(items[j].boxes) < bar_top),
-            key=lambda j: _boxes_top_y(items[j].boxes),
-        )
-        order.extend(col_l)
-        order.extend(col_r)
-        order.append(bar_i)
-        y_cursor = _boxes_bot_y(items[bar_i].boxes)
-
-    col_l = sorted(
-        (j for j in range(n)
-         if classes[j] == 'left' and _boxes_top_y(items[j].boxes) >= y_cursor),
-        key=lambda j: _boxes_top_y(items[j].boxes),
-    )
-    col_r = sorted(
-        (j for j in range(n)
-         if classes[j] == 'right' and _boxes_top_y(items[j].boxes) >= y_cursor),
-        key=lambda j: _boxes_top_y(items[j].boxes),
-    )
-    order.extend(col_l)
-    order.extend(col_r)
-
-    seen = set(order)
-    leftovers = sorted(
-        (i for i in range(n) if i not in seen),
-        key=lambda i: _boxes_top_y(items[i].boxes),
-    )
-    order.extend(leftovers)
-
-    return [items[i] for i in order]
-
-
-def _looks_like_section_title(text: str) -> bool:
-    words = text.split()
-    if not words or len(words) > 8:
-        return False
-    if re.match(r'^(?:\d+\.?[\d.]*|[A-Z]{1,5}\.?)\s+\S', text):
-        return True
-    alpha = [w for w in words if w.isalpha()]
-    if alpha and all(w.isupper() for w in alpha):
-        return True
-    return False
-
-
-def _ends_sentence(text: str) -> bool:
-    return bool(text) and text[-1] in _CLOSING_PUNCT
-
-
-def _is_junk_section(text: str) -> bool:
-    lower = text.lower().lstrip()
-    return any(lower.startswith(kw) for kw in _JUNK_PREFIXES)
-
-
-def _is_stop_section_heading(text: str, font_size: float, median_size: float) -> bool:
-    """Detecta subtítulos ACKNOWLEDGMENTS / REFERENCES — marcan fin de contenido.
-
-    Criterios:
-    - Texto matchea regex (≤3 palabras, encabezado puro)
-    - Fuente entre 1.05× y 1.5× la mediana del body (subtítulo, no título)
-    """
-    txt = text.strip()
-    if not _STOP_SECTION_RE.match(txt):
-        return False
-    if len(txt.split()) > 3:
-        return False
-    return median_size * _STOP_SECTION_MIN_FONT_RATIO <= font_size < median_size * _TITLE_FONT_RATIO
-
-
-def _page_median_font_size(dict_blocks: list) -> float:
-    sizes = [
-        span["size"]
-        for b in dict_blocks if b.get("type") == 0
-        for line in b.get("lines", [])
-        for span in line.get("spans", [])
-        if span.get("text", "").strip()
-    ]
-    if not sizes: return 10.0
-    sizes.sort()
-    return sizes[len(sizes) // 2]
-
-
-def _block_avg_font_size(block: dict) -> float:
-    sizes = [
-        span["size"]
-        for line in block.get("lines", [])
-        for span in line.get("spans", [])
-        if span.get("text", "").strip()
-    ]
-    return sum(sizes) / len(sizes) if sizes else 0.0
-
-def _split_by_indent(block: dict) -> list[TextCandidate]:
-    """Calcula matemáticamente la sangría y extrae sub-bloques y sus líneas nativas."""
-    lines = block.get("lines", [])
-    if not lines:
-        return []
-    std_x0 = min(ln["bbox"][0] for ln in lines)
-    block_font = _block_avg_font_size(block)
-    
-    result = []
-    cur_texts, cur_bbox, cur_lines = [], None, []
-    
-    for ln in lines:
-        lx0, ly0, lx1, ly1 = ln["bbox"]
-        line_text = " ".join(s.get("text", "") for s in ln.get("spans", [])).strip()
-        if not line_text:
-            continue
-        
-        # Matemáticas de sangría: si el inicio de esta línea se separa del borde general
-        line_is_indented = (lx0 - std_x0) > _INDENT_THRESHOLD
-        
-        if cur_texts and line_is_indented:
-            # Nuevo párrafo detectado por sangría
-            is_indented = (cur_bbox[0] - std_x0) > _INDENT_THRESHOLD if cur_bbox else False
-            result.append(TextCandidate(*cur_bbox, " ".join(cur_texts), is_indented, block_font, cur_lines))
-            cur_texts, cur_bbox, cur_lines = [], None, []
-        
-        cur_texts.append(line_text)
-        # GUARDAMOS LA LÍNEA INDIVIDUAL
-        cur_lines.append(LineBlock(
-            text=line_text,
-            bbox=BBox(x0=round(lx0, 2), y0=round(ly0, 2), x1=round(lx1, 2), y1=round(ly1, 2))
-        ))
-
-        if cur_bbox is None:
-            cur_bbox = (lx0, ly0, lx1, ly1)
-        else:
-            cur_bbox = (min(cur_bbox[0], lx0), min(cur_bbox[1], ly0),
-                        max(cur_bbox[2], lx1), max(cur_bbox[3], ly1))
-        
-    if cur_texts:
-        is_indented = (cur_bbox[0] - std_x0) > _INDENT_THRESHOLD if cur_bbox else False
-        result.append(TextCandidate(*cur_bbox, " ".join(cur_texts), is_indented, block_font, cur_lines))
-        
-    return result
-
-
-app = FastAPI(title="DeepStudy API", version="0.1.0")
+app = FastAPI(title="DeepStudy API", version="0.2.0")
 
 
 # ── Document management endpoints ─────────────────────────────────────────────
@@ -646,134 +192,10 @@ async def upload_pdf(
     dest.write_bytes(contents)
 
     try:
-        doc = fitz.open(stream=contents, filetype="pdf")
+        pages_data = extract_pages(contents)
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
-
-    pages_data: list[PageBlocks] = []
-    stop_extraction = False  # ACKNOWLEDGMENTS / REFERENCES marca fin del paper
-    for page_num in range(doc.page_count):
-        if stop_extraction:
-            break
-        page = doc.load_page(page_num)
-        page_w = page.rect.width
-        page_h = page.rect.height
-        top_limit = page_h * (_TITLE_PAGE_MARGIN if page_num == 0 else _HEADER_FOOTER_MARGIN)
-        bot_limit = page_h * (1.0 - _HEADER_FOOTER_MARGIN)
-
-        raw = page.get_text("dict")
-        dict_blocks = raw.get("blocks", [])
-        median_size = _page_median_font_size(dict_blocks)
-
-        # IMÁGENES: bloques tipo 1, filtrados por zona como el texto
-        images: list[ImageBlock] = []
-        for block in dict_blocks:
-            if block.get("type") != 1: continue
-            bx0, by0, bx1, by1 = block["bbox"]
-            if by0 < top_limit or by1 > bot_limit: continue
-            images.append(ImageBlock(bbox=BBox(
-                x0=round(bx0, 2), y0=round(by0, 2),
-                x1=round(bx1, 2), y1=round(by1, 2),
-            )))
-
-        # PASADA 1: Filtro de Ruido (solo texto, type==0)
-        candidates: list[TextCandidate] = []
-        for block in dict_blocks:
-            if block.get("type") != 0: continue
-            _, by0, _, by1 = block["bbox"]
-            if by0 < top_limit or by1 > bot_limit: continue
-            if page_num == 0 and _block_avg_font_size(block) > median_size * _TITLE_FONT_RATIO:
-                continue
-
-            for cand in _split_by_indent(block):
-                if not cand.text or _is_junk_section(cand.text): continue
-                if _is_stop_section_heading(cand.text, cand.font_size, median_size):
-                    stop_extraction = True
-                    break
-                if len(cand.text.split()) < _MIN_WORDS and not _looks_like_section_title(cand.text):
-                    continue
-                candidates.append(cand)
-            if stop_extraction:
-                break
-
-        # PASADA 2: Heurística avanzada de Subtítulos y Mergeo por Sangría
-        blocks: list[ParagraphBlock] = []
-        i = 0
-        while i < len(candidates):
-            curr = candidates[i]
-            
-            if i + 1 < len(candidates):
-                nxt = candidates[i+1]
-                if curr.font_size > nxt.font_size * 1.2 and len(curr.text.split()) < 6 and not curr.is_indented:
-                    i += 1
-                    continue
-            
-            text = curr.text
-            merged_lines = list(curr.lines)
-            last_cand = curr  # ancla para chequear adyacencia de columna y vertical
-
-            # Mergeo inteligente por Sangría (Columnas rotas) — sólo dentro de la misma columna
-            while i + 1 < len(candidates):
-                nxt = candidates[i+1]
-
-                if i + 2 < len(candidates):
-                    n_nxt = candidates[i+2]
-                    if nxt.font_size > n_nxt.font_size * 1.2 and len(nxt.text.split()) < 6 and not nxt.is_indented:
-                        break
-                elif len(nxt.text.split()) < 6 and not nxt.is_indented and nxt.font_size > curr.font_size * 1.2:
-                    break
-
-                if nxt.is_indented:
-                    break
-
-                # Anti-merge cross-column: distinto x0 → distinta columna
-                if abs(nxt.x0 - last_cand.x0) > _MERGE_COL_TOLERANCE:
-                    break
-
-                # Anti-merge upward jump: nxt no puede estar por encima del último mergeado
-                if nxt.y0 < last_cand.y1 - 2.0:
-                    break
-
-                # Anti-merge gap grande: separación vertical excesiva indica párrafos distintos
-                last_h = max(last_cand.y1 - last_cand.y0, 1.0)
-                if (nxt.y0 - last_cand.y1) > last_h * _MERGE_MAX_GAP_RATIO:
-                    break
-
-                i += 1
-                text = f"{text} {nxt.text}"
-                merged_lines.extend(nxt.lines)
-                last_cand = nxt
-
-            blocks.append(ParagraphBlock(
-                text=text,
-                boxes=_paragraph_boxes(merged_lines),
-                sentences=_build_sentences(text, merged_lines),
-            ))
-            i += 1
-
-        # PASADA 3: Reading order column-aware UNIFICADO (párrafos + imágenes)
-        sequence = _compute_unified_reading_order(blocks, images, page_w)
-        for rank, item in enumerate(sequence):
-            if item.kind == 'p':
-                blocks[item.src_idx].reading_index = rank
-            else:
-                images[item.src_idx].reading_index = rank
-
-        # Reordena las listas para que el array index coincida con reading_index
-        # (frontend puede iterar `blocks` o `images` y/o reconstruir secuencia mergeada)
-        sorted_blocks = sorted(blocks, key=lambda b: b.reading_index)
-        sorted_images = sorted(images, key=lambda im: im.reading_index)
-
-        pages_data.append(PageBlocks(
-            page=page_num + 1,
-            width=round(page_w, 2),
-            height=round(page_h, 2),
-            blocks=sorted_blocks,
-            images=sorted_images,
-        ))
-
-    doc.close()
 
     full_text = "\n\n".join(b.text for p in pages_data for b in p.blocks)
 
@@ -797,6 +219,7 @@ async def upload_pdf(
     analysis_path.write_text(json.dumps(result.model_dump(), ensure_ascii=False), encoding="utf-8")
 
     return JSONResponse(content=result.model_dump())
+
 
 @app.post("/explain-paragraph/")
 async def explain_paragraph(req: ExplainRequest):

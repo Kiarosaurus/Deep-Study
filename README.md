@@ -1,10 +1,12 @@
 # DeepStudy
 
-Lector inmersivo de papers científicos. Backend FastAPI procesa PDFs (extracción por columnas, segmentación por oraciones, reading order column-aware) y usa Gemini para generar un mapa global del documento y explicaciones contextuales por párrafo. Frontend Vite + React 19 con `react-pdf` para visualización.
+Lector inmersivo de papers científicos. Backend FastAPI procesa PDFs con Marker (layout-detection models de Surya: clasifica `Text`, `SectionHeader`, `Caption`, `Figure`, etc.) y construye párrafos + bboxes por oración a partir de las líneas que Marker ya extrae. Gemini genera el mapa global y las explicaciones contextuales. Frontend Vite + React 19 con `react-pdf`.
+
+Filtros aplicados automáticamente al pipeline: título del documento, bloques de autor/afiliación (también cuando Marker los etiqueta como `SectionHeader`), copyright/DOI/ISBN/`Permission to make`, secciones `CCS Concepts` / `Keywords` / `Index Terms`, `PageHeader`, `PageFooter`, `Footnote`, `Reference`, y todo lo posterior a `Acknowledgments` / `References` / `Bibliography`.
 
 ## Stack
 
-- **Backend:** Python 3.12, FastAPI, Uvicorn, PyMuPDF (fitz), google-genai
+- **Backend:** Python 3.12, FastAPI, Uvicorn, Marker (`marker-pdf`, modelos Surya), google-genai
 - **Frontend:** React 19, Vite 8, TailwindCSS 4, axios, react-pdf, react-router-dom
 - **IA:** Gemini (`gemini-3.1-flash-lite` para mapping global, `gemini-2.5-flash-lite` para explicaciones)
 
