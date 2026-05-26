@@ -117,18 +117,14 @@ export default function Reader() {
       .finally(() => setLoadingAnalysis(false))
   }, [decoded])
 
-  useEffect(() => {
-    setCurrentIndex(0)
-  }, [explanation])
-
   const linearBlocks = useMemo(
     () => analysis?.linear_blocks ?? [],
-    [analysis?.linear_blocks],
+    [analysis],
   )
 
-  const handleExplain = useCallback(async (text, sentences, paragraphRef = null) => {
+  const handleExplain = useCallback(async (text, sentences, flatBlockRef = null) => {
     if (!analysis) return
-    setActiveParagraph({ text, paragraphRef })
+    setActiveParagraph({ text, flatBlockRef })
     setCurrentIndex(0)
 
     const cached = readCachedExplanation(decoded, text, explanationsCache.current)

@@ -72,7 +72,9 @@ function buildLinearReadingSequence(linearBlocks) {
       kind,
       reading_index: b.reading_index ?? 0,
       blockIdx: i,
-      paragraph_ref: b.paragraph_ref ?? null,
+      // Fallback to legacy `paragraph_ref` for analysis.json files cached
+      // before the rename; new files use `flat_block_ref`.
+      flat_block_ref: b.flat_block_ref ?? b.paragraph_ref ?? null,
     })
   }
   return seq
@@ -283,6 +285,10 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
   // or re-parse the PDF.
   const [docNeeded, setDocNeeded] = useState(false)
   useEffect(() => {
+    // Intentional latch: flip on first activation, never reset. Drives the
+    // lazy-mount of the shared pdfjs doc so paginated-only sessions don't pay
+    // the parsing cost.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (tracking) setDocNeeded(true)
   }, [tracking])
   const sharedPdfDoc = usePdfDocument(docNeeded ? file : null)
@@ -362,19 +368,21 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
   // the other (LinearReader is roughly half as tall as Document for the same
   // content, so toggling jumps somewhere arbitrary).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (tracking) setCurrentStop(0)
     containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
   }, [tracking])
 
   // Linear-mode sync: when an active paragraph is set (or changes), jump the
-  // tracking cursor to the linear stop whose paragraph_ref matches. Fires both
-  // on tracking → true (deferred to after the reset above) and on subsequent
-  // ✦ clicks while tracking remains on.
+  // tracking cursor to the linear stop whose flat_block_ref matches. Fires
+  // both on tracking → true (deferred to after the reset above) and on
+  // subsequent ✦ clicks while tracking remains on.
   useEffect(() => {
     if (!tracking) return
-    const ref = activeParagraph?.paragraphRef
+    const ref = activeParagraph?.flatBlockRef
     if (ref == null) return
-    const idx = linearSequence.findIndex(s => s.paragraph_ref === ref)
+    const idx = linearSequence.findIndex(s => s.flat_block_ref === ref)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (idx >= 0) setCurrentStop(idx)
   }, [tracking, activeParagraph, linearSequence])
 

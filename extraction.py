@@ -307,8 +307,18 @@ def _block_type_name(block) -> str:
 _WS_RE = re.compile(r"\s+")
 
 
-def _collect_lines(block, document) -> list[LineBlock]:
-    """LineBlocks for a layout block, using Marker's per-line polygons."""
+def _collect_lines(block, document, cache: dict | None = None) -> list[LineBlock]:
+    """LineBlocks for a layout block, using Marker's per-line polygons.
+
+    Pass `cache` (dict keyed by `id(block)`) when the same document is walked
+    by multiple pipelines (see `extract_both`) to avoid re-traversing Marker's
+    structure for each block.
+    """
+    if cache is not None:
+        cached = cache.get(id(block))
+        if cached is not None:
+            return cached
+
     from marker.schema import BlockTypes
 
     out: list[LineBlock] = []
@@ -319,6 +329,9 @@ def _collect_lines(block, document) -> list[LineBlock]:
         if not text:
             continue
         out.append(LineBlock(text=text, bbox=_polygon_to_bbox(ln.polygon)))
+
+    if cache is not None:
+        cache[id(block)] = out
     return out
 
 
@@ -355,7 +368,7 @@ def _run_marker(pdf_bytes: bytes):
             pass
 
 
-def _extract_pages_from_document(document) -> list[PageBlocks]:
+def _extract_pages_from_document(document, line_cache: dict | None = None) -> list[PageBlocks]:
     output: list[PageBlocks] = []
     stop_content = False
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
@@ -398,7 +411,7 @@ def _extract_pages_from_document(document) -> list[PageBlocks]:
             # SectionHeader: state-update only, never emitted as a paragraph.
             if bt == "SectionHeader":
                 header_text = " ".join(
-                    l.text for l in _collect_lines(block, document)
+                    l.text for l in _collect_lines(block, document, line_cache)
                 ).strip()
                 if not header_text:
                     continue
@@ -417,7 +430,7 @@ def _extract_pages_from_document(document) -> list[PageBlocks]:
             if skip_section:
                 continue
 
-            inner_lines = _collect_lines(block, document)
+            inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
             if not text or len(text.split()) < 3:
                 continue
@@ -495,7 +508,7 @@ def _role_for_image_block(bt: str) -> str:
     return "table" if bt == "Table" else "figure"
 
 
-def _extract_linear_from_document(document) -> list[FullBlock]:
+def _extract_linear_from_document(document, line_cache: dict | None = None) -> list[FullBlock]:
     """Walk the whole Marker document in global reading order.
 
     Emits a FullBlock for every layout block (title, authors, headers, paragraphs,
@@ -529,7 +542,7 @@ def _extract_linear_from_document(document) -> list[FullBlock]:
             # it's a stop or skip header, which we still consume for state.
             if bt == "SectionHeader":
                 header_text = " ".join(
-                    l.text for l in _collect_lines(block, document)
+                    l.text for l in _collect_lines(block, document, line_cache)
                 ).strip()
                 if not header_text:
                     continue
@@ -583,7 +596,7 @@ def _extract_linear_from_document(document) -> list[FullBlock]:
             if skip_section:
                 continue
 
-            inner_lines = _collect_lines(block, document)
+            inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
             if not text or len(text.split()) < 3:
                 continue
@@ -633,9 +646,15 @@ def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
 def extract_both(
     pdf_bytes: bytes,
 ) -> tuple[list[PageBlocks], list[FullBlock]]:
-    """Run Marker once; return both the per-page and linear projections."""
+    """Run Marker once; return both the per-page and linear projections.
+
+    Both pipelines walk the same blocks and need their line geometry, so a
+    shared `line_cache` (keyed by `id(block)`) is threaded through to halve
+    the line-collection work.
+    """
     document = _run_marker(pdf_bytes)
+    line_cache: dict[int, list[LineBlock]] = {}
     return (
-        _extract_pages_from_document(document),
-        _extract_linear_from_document(document),
+        _extract_pages_from_document(document, line_cache),
+        _extract_linear_from_document(document, line_cache),
     )

@@ -77,7 +77,7 @@ class FullBlock(BaseModel):
     bbox: BBox
     reading_index: int
     sentences: list[SentenceBlock] = []
-    paragraph_ref: int | None = None
+    flat_block_ref: int | None = None
 
 
 class UploadResponse(BaseModel):

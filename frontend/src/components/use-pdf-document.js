@@ -19,10 +19,9 @@ export function usePdfDocument(pdfFile) {
   const [doc, setDoc] = useState(null)
 
   useEffect(() => {
-    if (!pdfFile) {
-      setDoc(null)
-      return
-    }
+    // No pdfFile → no load. The previous effect's cleanup (if any) already
+    // ran and nulled the doc, so we don't need to setDoc(null) here.
+    if (!pdfFile) return
     let cancelled = false
     let loadedDoc = null
 

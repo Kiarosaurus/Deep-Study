@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import LinearReader from '../components/LinearReader'
@@ -34,11 +34,14 @@ export default function LinearReaderTest() {
     return () => ro.disconnect()
   }, [])
 
-  const pageDims = analysis?.pages
-    ? Object.fromEntries(
-        analysis.pages.map(p => [p.page, { width: p.width, height: p.height }]),
-      )
-    : {}
+  const pageDims = useMemo(
+    () => analysis?.pages
+      ? Object.fromEntries(
+          analysis.pages.map(p => [p.page, { width: p.width, height: p.height }]),
+        )
+      : {},
+    [analysis],
+  )
 
   const readingContentWidth = containerWidth ? Math.min(containerWidth - 96, 880) : null
 

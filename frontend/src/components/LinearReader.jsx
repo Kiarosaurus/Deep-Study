@@ -337,7 +337,7 @@ const BlockCrop = memo(function BlockCrop({
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain?.(block.text, block.sentences, block.paragraph_ref ?? null)}
+              onClick={() => onExplain?.(block.text, block.sentences, block.flat_block_ref ?? block.paragraph_ref ?? null)}
               title="Explicar párrafo"
             >
               ✦

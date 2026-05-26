@@ -124,12 +124,13 @@ def _generate_json(model: str, contents: str, config: types.GenerateContentConfi
         raise RuntimeError(f"Invalid JSON (finish_reason={finish}): {e}")
 
 
-def _assign_paragraph_refs(
+def _assign_flat_block_refs(
     pages_data: list[PageBlocks], linear_blocks: list[FullBlock]
 ) -> None:
     """Match every linear paragraph back to its flat index in pages[*].blocks.
 
-    Indices are global across pages (page 1 block 0 = 0, page 1 block 1 = 1, ...).
+    `pages[*].blocks` is a flat list across all pages (page 1 block 0 = 0,
+    page 1 block 1 = 1, …) and includes captions alongside body paragraphs.
     Matching key is (page, bbox) since both pipelines share filters and emit
     the same ParagraphBlock geometry for non-section, non-noise text blocks.
     """
@@ -145,7 +146,7 @@ def _assign_paragraph_refs(
         if fb.role != "paragraph":
             continue
         key = (fb.page, fb.bbox.x0, fb.bbox.y0, fb.bbox.x1, fb.bbox.y1)
-        fb.paragraph_ref = para_map.get(key)
+        fb.flat_block_ref = para_map.get(key)
 
 
 app = FastAPI(title="DeepStudy API", version="0.2.0")
@@ -223,7 +224,7 @@ async def upload_pdf(
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
 
-    _assign_paragraph_refs(pages_data, linear_blocks)
+    _assign_flat_block_refs(pages_data, linear_blocks)
 
     # Cross-page continuations join with the previous paragraph (no extra "\n\n")
     # so Gemini receives the paragraph as a single semantic unit. If the
