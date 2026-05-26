@@ -26,16 +26,25 @@ export function usePageCache(pdfDoc, { maxCached = 8, concurrent = 2 } = {}) {
   const pendingPages  = useRef(new Set())    // pages currently rendering or queued
   const renderQueue   = useRef([])
   const activeRenders = useRef(0)
+  // Tracks the doc currently consumed. renderPage closures capture the doc
+  // they started with; on resolve they compare against this ref and bail if
+  // the parent has since swapped to a new doc.
+  const currentDocRef = useRef(pdfDoc)
+  currentDocRef.current = pdfDoc
 
   // Reset cache state when the underlying doc changes (e.g. file swap).
+  // Note: we deliberately do NOT reset `activeRenders` — in-flight renders
+  // from the old doc still need to decrement it in their `.finally`. Zeroing
+  // it here would make the counter go negative as those finalize, briefly
+  // allowing more than `concurrent` parallel renders on the new doc.
   useEffect(() => {
     return () => {
+      const hadCanvases = cacheRef.current.size > 0
       cacheRef.current.clear()
       lruOrder.current = []
       pendingPages.current.clear()
       renderQueue.current = []
-      activeRenders.current = 0
-      setPageCanvases({})
+      if (hadCanvases) setPageCanvases({})
     }
   }, [pdfDoc])
 
@@ -57,15 +66,19 @@ export function usePageCache(pdfDoc, { maxCached = 8, concurrent = 2 } = {}) {
   }, [maxCached, publish])
 
   const renderPage = useCallback(async (pn) => {
-    if (!pdfDoc) return
+    const myDoc = pdfDoc
+    if (!myDoc) return
     try {
-      const page = await pdfDoc.getPage(pn)
+      const page = await myDoc.getPage(pn)
       const viewport = page.getViewport({ scale: PDF_RENDER_SCALE })
       const canvas = document.createElement('canvas')
       canvas.width  = Math.ceil(viewport.width)
       canvas.height = Math.ceil(viewport.height)
       const ctx = canvas.getContext('2d')
       await page.render({ canvasContext: ctx, viewport }).promise
+      // Doc swapped while we were rendering — discard so we don't mix
+      // canvases from two different documents in the same cache.
+      if (currentDocRef.current !== myDoc) return
       cacheRef.current.set(pn, canvas)
       touch(pn)
       publish()

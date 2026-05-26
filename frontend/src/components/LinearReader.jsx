@@ -85,7 +85,13 @@ export default function LinearReader({
   }, [visibleSet])
 
   const handleHoverChange = useCallback((idx, hover) => {
-    setHoveredIdx(hover ? idx : null)
+    // Functional setter so that an out-of-order mouseLeave doesn't clear a
+    // freshly-set hoveredIdx from a sibling's mouseEnter, and an off-viewport
+    // cleanup for block A doesn't erase a hover that has since moved to B.
+    setHoveredIdx(prev => {
+      if (hover) return idx
+      return prev === idx ? null : prev
+    })
   }, [])
 
   const displayWidth = Math.max(1, (contentWidth || 0) * userZoom)

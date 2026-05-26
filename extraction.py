@@ -552,13 +552,21 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 if _is_skip_section(header_text):
                     skip_section = True
                     continue
-                if _is_body_section_name(header_text):
+                # First SectionHeader on page 1 is the paper title — even when
+                # its text happens to match a body-section regex (rare but
+                # possible, e.g. preprints whose first labeled block is the
+                # word "Abstract"). Still apply body-section side-effects in
+                # that overlap so subsequent text is processed correctly.
+                if page_idx == 0 and not title_emitted:
+                    role = "title"
+                    title_emitted = True
+                    if _is_body_section_name(header_text):
+                        skip_section = False
+                        pre_abstract = False
+                elif _is_body_section_name(header_text):
                     skip_section = False
                     pre_abstract = False
                     role = "section_header"
-                elif page_idx == 0 and not title_emitted:
-                    role = "title"
-                    title_emitted = True
                 elif page_idx == 0 and pre_abstract and (
                     _is_soft_noise(header_text)
                     or _looks_like_author_line(header_text)

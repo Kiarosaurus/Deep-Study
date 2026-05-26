@@ -140,7 +140,13 @@ def _assign_flat_block_refs(
         for b in p.blocks:
             if b.boxes:
                 bb = b.boxes[0]
-                para_map[(p.page, bb.x0, bb.y0, bb.x1, bb.y1)] = flat
+                key = (p.page, bb.x0, bb.y0, bb.x1, bb.y1)
+                # Bboxes are rounded to 2 decimals (see _polygon_to_bbox), so
+                # exact-match collisions imply Marker emitted two paragraphs
+                # at the same polygon — never observed in real PDFs. Last
+                # entry wins; the earlier flat index becomes unreachable from
+                # the linear side, which is fine since both blocks share text.
+                para_map[key] = flat
             flat += 1
     for fb in linear_blocks:
         if fb.role != "paragraph":
