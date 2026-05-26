@@ -8,12 +8,14 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from extraction import extract_pages
+from extraction import extract_both
 from models import (
     DocumentInfo,
     ExplainRequest,
     ExplainResponse,
+    FullBlock,
     GlobalMapping,
+    PageBlocks,
     UploadResponse,
 )
 
@@ -122,6 +124,30 @@ def _generate_json(model: str, contents: str, config: types.GenerateContentConfi
         raise RuntimeError(f"Invalid JSON (finish_reason={finish}): {e}")
 
 
+def _assign_paragraph_refs(
+    pages_data: list[PageBlocks], linear_blocks: list[FullBlock]
+) -> None:
+    """Match every linear paragraph back to its flat index in pages[*].blocks.
+
+    Indices are global across pages (page 1 block 0 = 0, page 1 block 1 = 1, ...).
+    Matching key is (page, bbox) since both pipelines share filters and emit
+    the same ParagraphBlock geometry for non-section, non-noise text blocks.
+    """
+    para_map: dict[tuple, int] = {}
+    flat = 0
+    for p in pages_data:
+        for b in p.blocks:
+            if b.boxes:
+                bb = b.boxes[0]
+                para_map[(p.page, bb.x0, bb.y0, bb.x1, bb.y1)] = flat
+            flat += 1
+    for fb in linear_blocks:
+        if fb.role != "paragraph":
+            continue
+        key = (fb.page, fb.bbox.x0, fb.bbox.y0, fb.bbox.x1, fb.bbox.y1)
+        fb.paragraph_ref = para_map.get(key)
+
+
 app = FastAPI(title="DeepStudy API", version="0.2.0")
 
 
@@ -192,10 +218,12 @@ async def upload_pdf(
     dest.write_bytes(contents)
 
     try:
-        pages_data = extract_pages(contents)
+        pages_data, linear_blocks = extract_both(contents)
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
+
+    _assign_paragraph_refs(pages_data, linear_blocks)
 
     # Cross-page continuations join with the previous paragraph (no extra "\n\n")
     # so Gemini receives the paragraph as a single semantic unit. If the
@@ -228,6 +256,7 @@ async def upload_pdf(
         page_count=len(pages_data),
         global_map=global_map,
         pages=pages_data,
+        linear_blocks=linear_blocks,
     )
     analysis_path = UPLOADS_DIR / f"{file.filename}.analysis.json"
     analysis_path.write_text(json.dumps(result.model_dump(), ensure_ascii=False), encoding="utf-8")

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -54,11 +56,36 @@ class GlobalMapping(BaseModel):
     assumed_concepts: list[str]
 
 
+FullBlockRole = Literal[
+    "title",
+    "author",
+    "section_header",
+    "paragraph",
+    "caption",
+    "figure",
+    "table",
+    "equation",
+    "code",
+    "list",
+]
+
+
+class FullBlock(BaseModel):
+    role: FullBlockRole
+    text: str = ""
+    page: int
+    bbox: BBox
+    reading_index: int
+    sentences: list[SentenceBlock] = []
+    paragraph_ref: int | None = None
+
+
 class UploadResponse(BaseModel):
     filename: str
     page_count: int
     global_map: GlobalMapping
     pages: list[PageBlocks]
+    linear_blocks: list[FullBlock] = []
 
 
 class DocumentInfo(BaseModel):

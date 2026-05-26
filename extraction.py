@@ -46,6 +46,7 @@ from threading import Lock
 
 from models import (
     BBox,
+    FullBlock,
     ImageBlock,
     LineBlock,
     PageBlocks,
@@ -339,21 +340,22 @@ def _iter_layout_blocks(page):
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
-def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
-    """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
+def _run_marker(pdf_bytes: bytes):
+    """Write pdf_bytes to a tmp file, build a Marker Document, clean up."""
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(pdf_bytes)
         tmp_path = tmp.name
-
     try:
         converter = _get_converter()
-        document = converter.build_document(tmp_path)
+        return converter.build_document(tmp_path)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
+
+def _extract_pages_from_document(document) -> list[PageBlocks]:
     output: list[PageBlocks] = []
     stop_content = False
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
@@ -469,3 +471,171 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
         )
 
     return output
+
+
+def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
+    """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
+    document = _run_marker(pdf_bytes)
+    return _extract_pages_from_document(document)
+
+
+# ── Linear (global reading-order) extraction ─────────────────────────────────
+def _role_for_text_block(bt: str) -> str:
+    if bt == "Caption":
+        return "caption"
+    if bt == "Equation":
+        return "equation"
+    if bt == "Code":
+        return "code"
+    # Text / TextInlineMath / ListItem / ListGroup / ComplexRegion → paragraph
+    return "paragraph"
+
+
+def _role_for_image_block(bt: str) -> str:
+    return "table" if bt == "Table" else "figure"
+
+
+def _extract_linear_from_document(document) -> list[FullBlock]:
+    """Walk the whole Marker document in global reading order.
+
+    Emits a FullBlock for every layout block (title, authors, headers, paragraphs,
+    captions, figures, tables, equations, code). Applies the same stop / skip /
+    page-1 noise filters as the per-page pipeline, but unlike that pipeline does
+    not collapse SectionHeaders into state-only events.
+    """
+    output: list[FullBlock] = []
+    stop_content = False
+    pre_abstract = True
+    skip_section = False
+    title_emitted = False
+    reading_index = 0
+
+    for page_idx, page in enumerate(document.pages):
+        if stop_content:
+            break
+        page_no = page_idx + 1
+
+        for block in _iter_layout_blocks(page):
+            if stop_content:
+                break
+
+            bt = _block_type_name(block)
+            if bt in _DROP_TYPES:
+                continue
+
+            bbox = _polygon_to_bbox(block.polygon)
+
+            # SectionHeader: emit (as title / author / section_header) unless
+            # it's a stop or skip header, which we still consume for state.
+            if bt == "SectionHeader":
+                header_text = " ".join(
+                    l.text for l in _collect_lines(block, document)
+                ).strip()
+                if not header_text:
+                    continue
+                if _is_stop_header(header_text):
+                    stop_content = True
+                    break
+                if _is_skip_section(header_text):
+                    skip_section = True
+                    continue
+                if _is_body_section_name(header_text):
+                    skip_section = False
+                    pre_abstract = False
+                    role = "section_header"
+                elif page_idx == 0 and not title_emitted:
+                    role = "title"
+                    title_emitted = True
+                elif page_idx == 0 and pre_abstract and (
+                    _is_soft_noise(header_text)
+                    or _looks_like_author_line(header_text)
+                ):
+                    role = "author"
+                else:
+                    role = "section_header"
+                output.append(
+                    FullBlock(
+                        role=role,
+                        text=header_text,
+                        page=page_no,
+                        bbox=bbox,
+                        reading_index=reading_index,
+                    )
+                )
+                reading_index += 1
+                continue
+
+            if bt in _IMAGE_TYPES:
+                output.append(
+                    FullBlock(
+                        role=_role_for_image_block(bt),
+                        text="",
+                        page=page_no,
+                        bbox=bbox,
+                        reading_index=reading_index,
+                    )
+                )
+                reading_index += 1
+                continue
+
+            if bt not in _TEXT_TYPES:
+                continue
+            if skip_section:
+                continue
+
+            inner_lines = _collect_lines(block, document)
+            text = " ".join(l.text for l in inner_lines).strip()
+            if not text or len(text.split()) < 3:
+                continue
+
+            if _is_stop_header(text):
+                stop_content = True
+                break
+
+            role = _role_for_text_block(bt)
+
+            if page_idx == 0:
+                if _is_hard_noise(text):
+                    continue
+                if pre_abstract and (
+                    _is_soft_noise(text) or _looks_like_author_line(text)
+                ):
+                    role = "author"
+
+            sentences = (
+                _build_sentences(text, inner_lines) if role == "paragraph" else []
+            )
+
+            output.append(
+                FullBlock(
+                    role=role,
+                    text=text,
+                    page=page_no,
+                    bbox=bbox,
+                    reading_index=reading_index,
+                    sentences=sentences,
+                )
+            )
+            reading_index += 1
+
+        if page_idx == 0:
+            pre_abstract = False
+
+    return output
+
+
+def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
+    """Parse a PDF with Marker and return all blocks in global reading order."""
+    document = _run_marker(pdf_bytes)
+    return _extract_linear_from_document(document)
+
+
+def extract_both(
+    pdf_bytes: bytes,
+) -> tuple[list[PageBlocks], list[FullBlock]]:
+    """Run Marker once; return both the per-page and linear projections."""
+    document = _run_marker(pdf_bytes)
+    return (
+        _extract_pages_from_document(document),
+        _extract_linear_from_document(document),
+    )
