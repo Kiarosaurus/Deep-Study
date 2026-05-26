@@ -1,18 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { pdfjs } from 'react-pdf'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { resolveSentenceIndices } from './highlight-utils'
-
-if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/build/pdf.worker.min.mjs',
-    import.meta.url,
-  ).toString()
-}
-
-const PDF_RENDER_SCALE =
-  typeof window !== 'undefined'
-    ? 2 * (window.devicePixelRatio || 1)
-    : 2
+import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 
 const BBOX_INFLATE_PT = 2
 
@@ -27,57 +15,78 @@ export default function LinearReader({
   currentExplanation,
   explanation,
 }) {
-  const [pageCanvases, setPageCanvases] = useState({})
+  const { pageCanvases, requestPage } = usePageCache(pdfFile, { maxCached: 8, concurrent: 2 })
+
+  const [visibleSet, setVisibleSet] = useState(() => new Set())
   const [hoveredIdx, setHoveredIdx] = useState(null)
-  const pdfDocRef = useRef(null)
+  const [observerInstance, setObserverInstance] = useState(null)
+
+  const rootDivRef = useRef(null)
+  const firstVisibleLoggedRef = useRef(false)
+  const mountTimeRef = useRef(0)
 
   useEffect(() => {
-    if (!pdfFile || !linearBlocks?.length) return
-    let cancelled = false
+    mountTimeRef.current = performance.now()
+  }, [])
 
-    async function load() {
-      const doc = await pdfjs.getDocument(pdfFile).promise
-      if (cancelled) {
-        doc.destroy?.()
-        return
+  // Auto-detect nearest scroll container so IntersectionObserver fires on the
+  // right axis even when LinearReader is nested inside PdfViewer.
+  useEffect(() => {
+    if (!rootDivRef.current) return
+    let cur = rootDivRef.current.parentElement
+    let scrollRoot = null
+    while (cur && cur !== document.body) {
+      const style = window.getComputedStyle(cur)
+      if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+        scrollRoot = cur
+        break
       }
-      pdfDocRef.current = doc
-
-      const pageNums = [...new Set(linearBlocks.map(b => b.page))].sort(
-        (a, b) => a - b,
-      )
-
-      for (const pn of pageNums) {
-        if (cancelled) return
-        const page = await doc.getPage(pn)
-        const viewport = page.getViewport({ scale: PDF_RENDER_SCALE })
-        const canvas = document.createElement('canvas')
-        canvas.width = Math.ceil(viewport.width)
-        canvas.height = Math.ceil(viewport.height)
-        const ctx = canvas.getContext('2d')
-        await page.render({ canvasContext: ctx, viewport }).promise
-        if (cancelled) return
-        setPageCanvases(prev => ({ ...prev, [pn]: canvas }))
-      }
+      cur = cur.parentElement
     }
 
-    load().catch(err => {
-      if (!cancelled) console.error('LinearReader: failed to render PDF', err)
-    })
+    const observer = new IntersectionObserver(entries => {
+      setVisibleSet(prev => {
+        const next = new Set(prev)
+        let changed = false
+        for (const e of entries) {
+          const idx = Number(e.target.dataset.blockIdx)
+          if (Number.isNaN(idx)) continue
+          if (e.isIntersecting) {
+            if (!next.has(idx)) { next.add(idx); changed = true }
+          } else if (next.has(idx)) {
+            next.delete(idx); changed = true
+          }
+        }
+        return changed ? next : prev
+      })
+    }, { root: scrollRoot, rootMargin: '400px 0px 400px 0px', threshold: 0 })
 
+    setObserverInstance(observer)
     return () => {
-      cancelled = true
-      const doc = pdfDocRef.current
-      pdfDocRef.current = null
-      if (doc) doc.destroy?.()
-      setPageCanvases({})
+      observer.disconnect()
+      setObserverInstance(null)
     }
-  }, [pdfFile, linearBlocks])
+  }, [])
+
+  // Dev-only timing: first block visible after mount.
+  useEffect(() => {
+    if (firstVisibleLoggedRef.current || visibleSet.size === 0) return
+    if (import.meta.env?.DEV) {
+      const elapsed = (performance.now() - mountTimeRef.current).toFixed(1)
+      console.log(`[LinearReader] first block visible @ ${elapsed}ms`)
+    }
+    firstVisibleLoggedRef.current = true
+  }, [visibleSet])
+
+  const handleHoverChange = useCallback((idx, hover) => {
+    setHoveredIdx(hover ? idx : null)
+  }, [])
 
   const displayWidth = Math.max(1, (contentWidth || 0) * userZoom)
 
   return (
     <div
+      ref={rootDivRef}
       className="bg-white"
       style={{ paddingLeft: 48, paddingRight: 48 }}
     >
@@ -98,8 +107,11 @@ export default function LinearReader({
             srcCanvas={pageCanvases[block.page]}
             pageDim={pageDims?.[block.page]}
             displayWidth={displayWidth}
+            visible={visibleSet.has(i)}
+            observer={observerInstance}
+            requestPage={requestPage}
             hovered={hoveredIdx === i}
-            onHoverChange={hover => setHoveredIdx(hover ? i : null)}
+            onHoverChange={handleHoverChange}
             onExplain={onExplain}
             activeParagraph={activeParagraph}
             currentExplanation={currentExplanation}
@@ -117,6 +129,9 @@ function BlockCrop({
   srcCanvas,
   pageDim,
   displayWidth,
+  visible,
+  observer,
+  requestPage,
   hovered,
   onHoverChange,
   onExplain,
@@ -124,7 +139,8 @@ function BlockCrop({
   currentExplanation,
   explanation,
 }) {
-  const canvasRef = useRef(null)
+  const wrapperRef = useRef(null)
+  const canvasRef  = useRef(null)
 
   const bbox = block.bbox
   const inflatedY0 = Math.max(0, bbox.y0 - BBOX_INFLATE_PT)
@@ -137,16 +153,33 @@ function BlockCrop({
   const aspect = bbW > 0 ? bbH / bbW : 0
   const displayHeight = Math.max(1, Math.round(displayWidth * aspect))
 
+  // Register with the shared IntersectionObserver.
   useEffect(() => {
+    const node = wrapperRef.current
+    if (!node || !observer) return
+    observer.observe(node)
+    return () => observer.unobserve(node)
+  }, [observer])
+
+  // Trigger page render when this block becomes visible without a cached page.
+  // Also re-requests if the page is evicted while we're still on-screen.
+  useEffect(() => {
+    if (visible && !srcCanvas) requestPage(block.page)
+  }, [visible, srcCanvas, block.page, requestPage])
+
+  // Draw crop on visibility + cache hit. Re-draws on srcCanvas change (e.g.
+  // after eviction + re-render) and on resize/zoom.
+  useEffect(() => {
+    if (!visible || !srcCanvas) return
     const canvas = canvasRef.current
-    if (!canvas || !srcCanvas || displayWidth <= 0 || bbW <= 0 || bbH <= 0) return
+    if (!canvas || displayWidth <= 0 || bbW <= 0 || bbH <= 0) return
 
     const dpr = window.devicePixelRatio || 1
     const physicalW = Math.max(1, Math.round(displayWidth * dpr))
     const physicalH = Math.max(1, Math.round(displayHeight * dpr))
     if (canvas.width !== physicalW) canvas.width = physicalW
     if (canvas.height !== physicalH) canvas.height = physicalH
-    canvas.style.width = `${displayWidth}px`
+    canvas.style.width  = `${displayWidth}px`
     canvas.style.height = `${displayHeight}px`
 
     const ctx = canvas.getContext('2d')
@@ -154,18 +187,21 @@ function BlockCrop({
     ctx.imageSmoothingQuality = 'high'
     ctx.clearRect(0, 0, physicalW, physicalH)
 
-    const sx = bbox.x0 * PDF_RENDER_SCALE
-    const sy = inflatedY0 * PDF_RENDER_SCALE
-    const sw = bbW * PDF_RENDER_SCALE
-    const sh = bbH * PDF_RENDER_SCALE
-    ctx.drawImage(srcCanvas, sx, sy, sw, sh, 0, 0, physicalW, physicalH)
-  }, [srcCanvas, displayWidth, displayHeight, bbox.x0, bbox.y0, bbox.x1, bbox.y1, bbW, bbH, inflatedY0])
+    ctx.drawImage(
+      srcCanvas,
+      bbox.x0 * PDF_RENDER_SCALE,
+      inflatedY0 * PDF_RENDER_SCALE,
+      bbW * PDF_RENDER_SCALE,
+      bbH * PDF_RENDER_SCALE,
+      0, 0, physicalW, physicalH,
+    )
+  }, [visible, srcCanvas, displayWidth, displayHeight, bbox.x0, inflatedY0, bbW, bbH])
 
-  const isInteractive = block.role === 'paragraph' && !!block.sentences?.length
-  const isActive = isInteractive && activeParagraph?.text === block.text
-  const bboxScale = bbW > 0 ? displayWidth / bbW : 0
+  const isRendered    = visible && !!srcCanvas
+  const isInteractive = isRendered && block.role === 'paragraph' && !!block.sentences?.length
+  const isActive      = isInteractive && activeParagraph?.text === block.text
+  const bboxScale     = bbW > 0 ? displayWidth / bbW : 0
 
-  // Page-space sentence box → crop-local CSS pixel rect.
   function toLocalRect(b) {
     return {
       left:   (b.x0 - bbox.x0) * bboxScale,
@@ -196,8 +232,6 @@ function BlockCrop({
   const otherBoxes     = boxesFromIndices(otherIndices)
   const highlightBoxes = boxesFromIndices(currentIndices)
 
-  // Anchor ✦ button at the last sentence's last box (bottom-right of the
-  // paragraph text), translated up-left so it sits just above end of line.
   let anchor = null
   if (isInteractive) {
     const lastSent = block.sentences[block.sentences.length - 1]
@@ -212,13 +246,14 @@ function BlockCrop({
 
   return (
     <div
+      ref={wrapperRef}
       data-block-idx={blockIdx}
       className="relative"
-      style={{ width: displayWidth }}
-      onMouseEnter={isInteractive ? () => onHoverChange?.(true) : undefined}
-      onMouseLeave={isInteractive ? () => onHoverChange?.(false) : undefined}
+      style={{ width: displayWidth, height: displayHeight }}
+      onMouseEnter={isInteractive ? () => onHoverChange?.(blockIdx, true) : undefined}
+      onMouseLeave={isInteractive ? () => onHoverChange?.(blockIdx, false) : undefined}
     >
-      {srcCanvas ? (
+      {isRendered ? (
         <canvas
           ref={canvasRef}
           style={{
@@ -230,6 +265,7 @@ function BlockCrop({
         />
       ) : (
         <div
+          className="bg-slate-100"
           style={{
             width: displayWidth,
             height: displayHeight,
@@ -240,7 +276,6 @@ function BlockCrop({
 
       {isInteractive && (
         <div className="absolute inset-0 pointer-events-none">
-          {/* Hover tint over the whole paragraph crop */}
           <div
             className="absolute rounded-sm transition-opacity duration-150"
             style={{
@@ -253,7 +288,6 @@ function BlockCrop({
             }}
           />
 
-          {/* Other sentences from the carousel — static gray */}
           {otherBoxes.map((box, j) => (
             <div
               key={`ot-${j}`}
@@ -262,7 +296,6 @@ function BlockCrop({
             />
           ))}
 
-          {/* Current sentence — animated yellow */}
           {highlightBoxes.map((box, j) => (
             <div
               key={`hl-${j}`}
@@ -271,7 +304,6 @@ function BlockCrop({
             />
           ))}
 
-          {/* ✦ explain button anchored at last sentence end */}
           {anchor && (
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
