@@ -238,7 +238,7 @@ async def upload_pdf(
 @app.post("/explain-paragraph/")
 async def explain_paragraph(req: ExplainRequest):
     if not req.paragraph_sentences:
-        raise HTTPException(status_code=400, detail="paragraph_sentences vacío")
+        raise HTTPException(status_code=400, detail="paragraph_sentences is empty")
 
     numbered = "\n".join(f"[S{i}] {s}" for i, s in enumerate(req.paragraph_sentences))
     prompt = (

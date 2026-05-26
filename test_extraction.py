@@ -1,4 +1,4 @@
-"""Smoke test for extraction.py — verifica que Marker produzca PageBlocks válidos."""
+"""Smoke test for extraction.py: verifies Marker produces valid PageBlocks."""
 import sys
 import json
 from pathlib import Path

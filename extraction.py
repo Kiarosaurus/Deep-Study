@@ -1,39 +1,43 @@
-"""PDF layout extraction via Marker (Document object, no JSON render).
+"""PDF layout extraction backed by Marker (Document object, no JSON render).
 
-Marker's layout-detection models classify blocks (Text, SectionHeader, Caption,
-Figure, ...) and group child Lines + Spans with precise polygon data. We bypass
-the JSONRenderer and walk `document.pages[i].structure` directly, gaining:
+Marker's layout-detection models classify each block (Text, SectionHeader,
+Caption, Figure, ...) and group child Lines and Spans with precise polygon
+data. This module bypasses the JSONRenderer and walks
+`document.pages[i].structure` directly, which yields:
 
-- Line-level polygons → precise sentence bboxes without re-parsing the PDF.
-- No BeautifulSoup pass / no content-ref unfolding.
-- No second PyMuPDF read.
+- Line-level polygons, enabling precise sentence bounding boxes without
+  re-parsing the PDF.
+- No BeautifulSoup pass and no content-ref unfolding.
+- No additional PyMuPDF read for line geometry.
 
-Filters (no llegan al frontend ni a Gemini):
+Filters (these blocks never reach the frontend payload nor the Gemini prompt):
+
 - PageHeader / PageFooter / Footnote / Reference / TableOfContents /
-  Handwriting / Form  → block_type filter (Marker labels these).
-- SectionHeader (TODOS): nombres de sección / subsección no se emiten como
-  párrafo. El título del paper, "1 Introduction", "2.1 Architecture", etc.
-  Se sigue usando el texto del header para gestionar estado interno (detectar
-  Acknowledgments → stop, CCS/Keywords → skip body, body-section → abrir
-  contenido). Si Marker etiqueta erróneamente una línea de autor como
-  SectionHeader, también queda descartada porque ningún SectionHeader se
-  emite.
-- Bloques de autor / afiliación etiquetados como Text (página 1, antes de la
-  primera sección body): email, "@", "University of", "Institute", "School
-  of", líneas mayoritariamente en Title Case.
-- Bloques de metadatos de la página 1: copyright (©), "Permission to make",
-  DOI/ISBN, "ACM Reference Format", "arXiv", "preprint", venue boilerplate.
-- Secciones "CCS Concepts" / "Keywords" / "Index Terms" / "Categories and
-  Subject Descriptors" / "ACM Reference Format": se descarta el encabezado y
-  todo el cuerpo hasta el siguiente body-section header.
-- Todo lo posterior a SectionHeader == "Acknowledgments" / "References" /
-  "Bibliography" / "Works Cited" (stop-content).
+  Handwriting / Form: dropped by block type (Marker labels these natively).
+- SectionHeader (ALL): section and subsection titles are never emitted as
+  paragraphs. This covers the paper title, "1 Introduction", "2.1 Architecture",
+  and so on. The header text is still consumed to drive internal state:
+  detecting Acknowledgments triggers stop-content; CCS or Keywords sections
+  enable body-skip; canonical body-section names reopen content. When Marker
+  mislabels an author line as a SectionHeader, the line is dropped as well,
+  since no SectionHeader is ever emitted.
+- Author and affiliation blocks classified as Text on page 1 before the first
+  body section: email, "@", "University of", "Institute", "School of", and
+  lines composed mostly of Title Case tokens.
+- Page-1 metadata blocks: copyright (©), "Permission to make", DOI/ISBN,
+  "ACM Reference Format", "arXiv", "preprint", venue boilerplate.
+- "CCS Concepts" / "Keywords" / "Index Terms" / "Categories and Subject
+  Descriptors" / "ACM Reference Format" sections: the header is dropped and
+  every block in the body is skipped until the next body-section header.
+- All content after a SectionHeader matching "Acknowledgments" / "References"
+  / "Bibliography" / "Works Cited" (stop-content).
 
-Cross-page paragraph merge: cuando el primer párrafo no-Caption de una página
-N (N>0) cumple los dos criterios indicados por la guía (el párrafo previo no
-termina en punto/!/?/… y este empieza con letra minúscula), se marca con
-`continuation=True`. El consumidor (main.py) concatena las continuaciones con
-el párrafo anterior para construir el `full_text` que recibe Gemini.
+Cross-page paragraph merge: when the first non-Caption paragraph on page N
+(N > 0) satisfies the two-rule heuristic — the previous paragraph does not
+end with `.!?…` and the new one begins with a lowercase letter — it is
+flagged with `continuation=True`. Downstream code (see `main.py`) joins
+continuations with the previous paragraph when assembling the `full_text`
+payload that is sent to Gemini.
 """
 import os
 import re
@@ -191,7 +195,8 @@ def _looks_like_author_line(text: str) -> bool:
     if text.count(".") > 2 or text.count(";") > 2:
         return False
     proper = sum(1 for w in words if _PROPER_NOUN_RE.match(w))
-    # Allow a few connectors ("and", "of", "the", "&", "y", "de", …).
+    # Allow a few connectors ("and", "of", "the", "&", and their Spanish
+    # equivalents such as "y", "de", which can appear in author lists).
     return proper >= max(2, len(words) - 4)
 
 

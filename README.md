@@ -1,24 +1,24 @@
 # DeepStudy
 
-Lector inmersivo de papers científicos. Backend FastAPI procesa PDFs con Marker (layout-detection models de Surya: clasifica `Text`, `SectionHeader`, `Caption`, `Figure`, etc.) y construye párrafos + bboxes por oración a partir de las líneas que Marker ya extrae. Gemini genera el mapa global y las explicaciones contextuales. Frontend Vite + React 19 con `react-pdf`.
+Immersive reader for scientific papers. A FastAPI backend processes PDFs through Marker (Surya layout-detection models that classify `Text`, `SectionHeader`, `Caption`, `Figure`, and related block types) and builds paragraphs plus per-sentence bounding boxes from the lines Marker already extracts. Gemini produces a global document map and contextual per-paragraph explanations. The frontend is built with Vite and React 19 using `react-pdf` for rendering.
 
-Filtros aplicados automáticamente al pipeline: título del documento, bloques de autor/afiliación (también cuando Marker los etiqueta como `SectionHeader`), copyright/DOI/ISBN/`Permission to make`, secciones `CCS Concepts` / `Keywords` / `Index Terms`, `PageHeader`, `PageFooter`, `Footnote`, `Reference`, y todo lo posterior a `Acknowledgments` / `References` / `Bibliography`.
+The pipeline applies the following filters automatically: the document title, author and affiliation blocks (including the case in which Marker mislabels them as `SectionHeader`), copyright / DOI / ISBN / `Permission to make` notices, `CCS Concepts` / `Keywords` / `Index Terms` sections, `PageHeader`, `PageFooter`, `Footnote`, `Reference`, and every block that appears after `Acknowledgments` / `References` / `Bibliography`.
 
 ## Stack
 
-- **Backend:** Python 3.12, FastAPI, Uvicorn, Marker (`marker-pdf`, modelos Surya), google-genai
+- **Backend:** Python 3.12, FastAPI, Uvicorn, Marker (`marker-pdf`, Surya models), google-genai
 - **Frontend:** React 19, Vite 8, TailwindCSS 4, axios, react-pdf, react-router-dom
-- **IA:** Gemini (`gemini-3.1-flash-lite` para mapping global, `gemini-2.5-flash-lite` para explicaciones)
+- **AI:** Gemini (`gemini-3.1-flash-lite` for global mapping, `gemini-2.5-flash-lite` for explanations)
 
-## Requisitos
+## Requirements
 
 - Python 3.12+
-- Node.js 18+ y npm
-- API key de Google Gemini ([obtenerla aquí](https://aistudio.google.com/apikey))
+- Node.js 18+ and npm
+- A Google Gemini API key ([get one here](https://aistudio.google.com/apikey))
 
-## Instalación
+## Installation
 
-### 1. Clonar y entrar al proyecto
+### 1. Clone the repository
 
 ```bash
 git clone <repo-url> DeepStudy
@@ -27,7 +27,7 @@ cd DeepStudy
 
 ### 2. Backend
 
-Crear venv e instalar dependencias:
+Create the virtual environment and install dependencies:
 
 ```bash
 python3 -m venv venv
@@ -36,10 +36,10 @@ source venv/bin/activate          # Linux/WSL/macOS
 pip install -r requirements.txt
 ```
 
-Crear archivo `.env` en la raíz del proyecto:
+Create a `.env` file at the project root:
 
 ```env
-GEMINI_API_KEY=tu_api_key_aqui
+GEMINI_API_KEY=your_api_key_here
 ```
 
 ### 3. Frontend
@@ -50,11 +50,11 @@ npm install
 cd ..
 ```
 
-## Cómo correr el proyecto
+## Running the project
 
-Necesitas **dos terminales** abiertas simultáneamente.
+Two terminals must be open in parallel.
 
-### Terminal 1 — Backend (puerto 8000)
+### Terminal 1 — Backend (port 8000)
 
 ```bash
 cd DeepStudy
@@ -62,57 +62,59 @@ source venv/bin/activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Verifica que esté corriendo: <http://localhost:8000/> debe responder `{"status": "ok", "message": "DeepStudy API running"}`.
+Confirm the service is reachable: <http://localhost:8000/> should return `{"status": "ok", "message": "DeepStudy API running"}`.
 
-### Terminal 2 — Frontend (puerto 5173)
+### Terminal 2 — Frontend (port 5173)
 
 ```bash
 cd DeepStudy/frontend
 npm run dev
 ```
 
-Abre <http://localhost:5173> en el navegador.
+Open <http://localhost:5173> in the browser.
 
-## Endpoints principales
+## Main endpoints
 
-| Método | Ruta | Descripción |
+| Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/` | Health check |
-| `GET`  | `/documents/` | Lista PDFs subidos |
-| `GET`  | `/documents/{filename}` | Descarga el PDF |
-| `GET`  | `/documents/{filename}/analysis` | Devuelve el análisis JSON |
-| `DELETE` | `/documents/{filename}` | Elimina PDF + análisis |
-| `POST` | `/upload-pdf/` | Sube y analiza un PDF |
-| `POST` | `/explain-paragraph/` | Explica conceptos de un párrafo |
+| `GET`  | `/documents/` | Lists uploaded PDFs |
+| `GET`  | `/documents/{filename}` | Downloads the PDF |
+| `GET`  | `/documents/{filename}/analysis` | Returns the cached analysis JSON |
+| `DELETE` | `/documents/{filename}` | Deletes the PDF and its analysis |
+| `POST` | `/upload-pdf/` | Uploads and analyzes a PDF |
+| `POST` | `/explain-paragraph/` | Explains the concepts contained in a paragraph |
 
-### Parámetros de `/upload-pdf/` (multipart/form-data)
+### Parameters for `/upload-pdf/` (multipart/form-data)
 
-- `file` (PDF, obligatorio)
-- `language` — `"es"` (default) o `"en"`
-- `keep_terms_in_english` — `true` para mantener acrónimos y conceptos asumidos en inglés
-- `overwrite` — `true` para sobrescribir si ya existe
+- `file` (PDF, required)
+- `language` — `"es"` (default) or `"en"`
+- `keep_terms_in_english` — `true` to retain acronyms and assumed concepts in English
+- `overwrite` — `true` to replace an existing document with the same filename
 
-Docs interactivos: <http://localhost:8000/docs>
+Interactive API docs: <http://localhost:8000/docs>
 
-## Estructura
+## Project structure
 
 ```
 DeepStudy/
-├── main.py              # Backend FastAPI completo
+├── main.py              # FastAPI application (routes + Gemini calls)
+├── extraction.py        # Marker-based PDF layout extraction pipeline
+├── models.py            # Pydantic models shared across endpoints
 ├── requirements.txt
-├── .env                 # GEMINI_API_KEY (no commitear)
-├── uploads/             # PDFs y análisis JSON persistidos
-├── venv/                # Entorno Python (gitignorar)
+├── .env                 # GEMINI_API_KEY (not committed)
+├── uploads/             # Persisted PDFs and analysis JSON files
+├── venv/                # Python virtual environment (gitignored)
 └── frontend/
     ├── package.json
     ├── src/
-    └── node_modules/    # (gitignorar)
+    └── node_modules/    # (gitignored)
 ```
 
-## Notas
+## Notes
 
-- Los PDFs subidos y sus análisis se guardan en `uploads/`. El análisis se cachea como `<filename>.analysis.json` para no re-llamar a Gemini.
-- Si el frontend (5173) no logra hablar con el backend (8000) por CORS, agregar `CORSMiddleware` en `main.py`:
+- Uploaded PDFs and their analyses are stored under `uploads/`. The analysis is cached as `<filename>.analysis.json` to avoid redundant Gemini calls.
+- If the frontend (5173) cannot reach the backend (8000) because of CORS, add `CORSMiddleware` to `main.py`:
   ```python
   from fastapi.middleware.cors import CORSMiddleware
   app.add_middleware(
@@ -122,4 +124,4 @@ DeepStudy/
       allow_headers=["*"],
   )
   ```
-- En WSL, accede al frontend desde Windows vía `http://localhost:5173` (port forwarding automático).
+- On WSL, access the frontend from Windows via `http://localhost:5173` (automatic port forwarding).
