@@ -233,6 +233,13 @@ _JUNK_PREFIXES = (
     'ccs concepts',
 )
 
+# Stop-section: agradecimientos y referencias terminan el contenido del paper
+_STOP_SECTION_RE = re.compile(
+    r'^(acknowledg(?:e)?ments?|references?)\b[\s:.]*$',
+    re.IGNORECASE,
+)
+_STOP_SECTION_MIN_FONT_RATIO = 1.05  # heading > body por al menos 5%
+
 # Sentence boundary: punctuation + whitespace + uppercase-or-opener
 # Evita romper en "Fig. 1", "et al.", "e.g." (lookahead exige Mayúscula / paréntesis / comilla)
 _SENT_BOUNDARY_RE = re.compile(r'(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"\(])')
@@ -486,6 +493,21 @@ def _is_junk_section(text: str) -> bool:
     return any(lower.startswith(kw) for kw in _JUNK_PREFIXES)
 
 
+def _is_stop_section_heading(text: str, font_size: float, median_size: float) -> bool:
+    """Detecta subtítulos ACKNOWLEDGMENTS / REFERENCES — marcan fin de contenido.
+
+    Criterios:
+    - Texto matchea regex (≤3 palabras, encabezado puro)
+    - Fuente entre 1.05× y 1.5× la mediana del body (subtítulo, no título)
+    """
+    txt = text.strip()
+    if not _STOP_SECTION_RE.match(txt):
+        return False
+    if len(txt.split()) > 3:
+        return False
+    return median_size * _STOP_SECTION_MIN_FONT_RATIO <= font_size < median_size * _TITLE_FONT_RATIO
+
+
 def _page_median_font_size(dict_blocks: list) -> float:
     sizes = [
         span["size"]
@@ -630,7 +652,10 @@ async def upload_pdf(
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
 
     pages_data: list[PageBlocks] = []
+    stop_extraction = False  # ACKNOWLEDGMENTS / REFERENCES marca fin del paper
     for page_num in range(doc.page_count):
+        if stop_extraction:
+            break
         page = doc.load_page(page_num)
         page_w = page.rect.width
         page_h = page.rect.height
@@ -663,9 +688,14 @@ async def upload_pdf(
 
             for cand in _split_by_indent(block):
                 if not cand.text or _is_junk_section(cand.text): continue
+                if _is_stop_section_heading(cand.text, cand.font_size, median_size):
+                    stop_extraction = True
+                    break
                 if len(cand.text.split()) < _MIN_WORDS and not _looks_like_section_title(cand.text):
                     continue
                 candidates.append(cand)
+            if stop_extraction:
+                break
 
         # PASADA 2: Heurística avanzada de Subtítulos y Mergeo por Sangría
         blocks: list[ParagraphBlock] = []
