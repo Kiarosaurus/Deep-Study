@@ -53,30 +53,56 @@ FORMATO DE ENTRADA: Cada oración del párrafo viene precedida por una etiqueta 
 [S0] Recent advances in MEMS designs have enabled high-frequency resonators.
 [S1] These devices operate with low power consumption.
 
-REGLA FUNDAMENTAL — NO TRADUCIR, EXPLICAR:
-Tu trabajo NO es traducir, parafrasear ni resumir las oraciones. Tu trabajo es identificar los CONCEPTOS TÉCNICOS, ACRÓNIMOS, JERGA ESPECIALIZADA, CONTEXTO TEÓRICO IMPLÍCITO o IMPLICACIONES NO TRIVIALES que aparecen DENTRO de cada oración, y explicar QUÉ SIGNIFICAN, POR QUÉ SON RELEVANTES o QUÉ CONTEXTO ASUMEN. Si la oración es trivial y no contiene conceptos especializados, OMÍTELA de la respuesta.
+Debes producir DOS salidas en el MISMO JSON:
 
-TAREA: Recorre el párrafo oración por oración. Por cada oración (o rango de oraciones) que contenga conceptos no triviales, devuelve UN ÚNICO objeto agrupando todos sus conceptos.
+═══════════════════════════════════════════════════════════
+PARTE A — "sentence_explanations" (CONCEPTOS)
+═══════════════════════════════════════════════════════════
+
+REGLA FUNDAMENTAL — NO TRADUCIR, EXPLICAR:
+Tu trabajo NO es traducir, parafrasear ni resumir las oraciones. Tu trabajo es identificar los CONCEPTOS TÉCNICOS, ACRÓNIMOS, JERGA ESPECIALIZADA, CONTEXTO TEÓRICO IMPLÍCITO o IMPLICACIONES NO TRIVIALES que aparecen DENTRO de cada oración, y explicar QUÉ SIGNIFICAN, POR QUÉ SON RELEVANTES o QUÉ CONTEXTO ASUMEN. Si la oración es trivial y no contiene conceptos especializados, OMÍTELA.
+
+Recorre el párrafo oración por oración. Por cada oración (o rango de oraciones) que contenga conceptos no triviales, devuelve UN ÚNICO objeto agrupando todos sus conceptos.
 
 ESTRUCTURA POR OBJETO (3 campos):
 
-1. "sentence_indices": Lista ordenada de índices Sk a los que pertenece este grupo. Normalmente [k]. Si una idea cruza dos oraciones consecutivas, [k, k+1]. NO mezcles oraciones no contiguas en un mismo objeto.
+1. "sentence_indices": Lista ordenada de índices Sk. Normalmente [k]. Si una idea cruza dos oraciones consecutivas, [k, k+1]. NO mezcles oraciones no contiguas.
 
-2. "quote": Fragmento textual EXACTO Y VERBATIM del párrafo que abarca los conceptos explicados. Subcadena literal:
+2. "quote": Fragmento textual EXACTO Y VERBATIM del párrafo que abarca los conceptos. Subcadena literal:
    - Cero paráfrasis, cero reordenamiento, cero cambios de puntuación.
    - Sin prefijos "[Sk]".
    - Largo recomendado: 4 a 25 palabras.
 
-3. "concepts": LISTA de explicaciones, una por concepto técnico identificado en esa(s) oración(es). Cada elemento contiene:
-   - "term": Concepto, acrónimo, jerga o frase clave (puede ser reformulado o resumido por ti). NO incluyas dos puntos finales.
-   - "explanation": Análisis técnico CONCISO en español. Máximo 3 oraciones. NO traduzcas la oración: explica el concepto subyacente — qué es, contexto, por qué importa.
+3. "concepts": LISTA, una por concepto técnico. Cada elemento:
+   - "term": Concepto, acrónimo, jerga o frase clave. NO incluyas dos puntos finales.
+   - "explanation": Análisis técnico CONCISO en español. Máximo 3 oraciones. NO traduzcas la oración: explica el concepto subyacente.
 
-REGLAS GLOBALES:
-- Múltiples conceptos en una sola oración → varios elementos dentro de "concepts", UN solo objeto SentenceExplanation.
-- Oraciones triviales o puramente descriptivas → no aparecen en la respuesta.
-- "quote" y "sentence_indices" deben ser consistentes entre sí.
-- NO uses puntuación rara como "))" o "((".
-- Devuelve ÚNICAMENTE un JSON válido. Sin texto adicional fuera del JSON."""
+REGLAS PARTE A:
+- Múltiples conceptos en una sola oración → varios elementos en "concepts", UN solo objeto.
+- Oraciones triviales → no aparecen.
+- "quote" y "sentence_indices" deben ser consistentes.
+- Sin puntuación rara como "))" o "((".
+
+═══════════════════════════════════════════════════════════
+PARTE B — "paragraph_context" (CONTEXTO)
+═══════════════════════════════════════════════════════════
+
+Explica el CONTEXTO en el que fueron escritas estas oraciones — no qué dicen, sino POR QUÉ aparecen aquí y QUÉ ROL CUMPLEN en el paper.
+
+Usa el Mapa Global para inferir en qué sección del paper estás (introducción, métodos, resultados, discusión, etc.) y qué hilo argumental conecta este párrafo con el resto del documento.
+
+ESTRUCTURA (2 campos):
+
+1. "section_role": UNA línea (máximo 12 palabras) etiquetando qué hace este párrafo. Ejemplos: "Motiva el problema desde una limitación previa", "Describe la configuración experimental", "Reporta resultado clave del método propuesto", "Contrasta con trabajo relacionado".
+
+2. "narrative": 2 a 4 oraciones en español que respondan: ¿Sobre qué construye este párrafo (qué viene antes)? ¿Hacia dónde lleva (qué viene después)? ¿Qué intención tiene el autor aquí — argumentar, justificar, contrastar, definir, evaluar? NO repitas el contenido literal del párrafo: explica su FUNCIÓN.
+
+REGLAS PARTE B:
+- Siempre devuelve "paragraph_context" aunque el párrafo sea simple. Nunca lo omitas.
+- No uses comillas para citar el párrafo — referencia su rol, no su texto.
+
+═══════════════════════════════════════════════════════════
+SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
 
 _GLOBAL_MODEL = "gemini-3.1-flash-lite"
 _EXPLAIN_MODEL = "gemini-2.5-flash-lite"
@@ -105,7 +131,7 @@ _EXPLAIN_CONFIG = types.GenerateContentConfig(
     system_instruction=EXPLAIN_PROMPT,
     response_mime_type="application/json",
     response_schema=ExplainResponse,
-    max_output_tokens=8192,
+    max_output_tokens=10240,
 )
 
 

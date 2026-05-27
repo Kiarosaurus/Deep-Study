@@ -114,5 +114,11 @@ class SentenceExplanation(BaseModel):
     concepts: list[ConceptExplanation]
 
 
+class ParagraphContext(BaseModel):
+    section_role: str
+    narrative: str
+
+
 class ExplainResponse(BaseModel):
     sentence_explanations: list[SentenceExplanation]
+    paragraph_context: ParagraphContext
