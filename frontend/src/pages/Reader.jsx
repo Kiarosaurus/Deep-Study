@@ -186,30 +186,37 @@ export default function Reader() {
 
       if (e.key === '<') {
         e.preventDefault() 
+        // Leemos el estado actual al milisegundo
         const currentTab = uiStateRef.current.tab
         const currentMode = uiStateRef.current.explainMode
         
-        if (tab === 'global') {
+        if (currentTab === 'global') {
           setTab('explain')
           setExplainMode('contexto')
-        } else if (tab === 'explain') {
-          setExplainMode(prev => prev === 'contexto' ? 'conceptos' : 'contexto')
+          uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
+        } else if (currentTab === 'explain') {
+          const nextMode = currentMode === 'contexto' ? 'conceptos' : 'contexto'
+          setExplainMode(nextMode)
+          uiStateRef.current = { tab: 'explain', explainMode: nextMode }
         }
         return
       }
 
       if (e.key === '-') {
         setTab('global')
+        uiStateRef.current = { ...uiStateRef.current, tab: 'global' } // FIX
         return
       }
       if (e.key === ',') {
         setTab('explain')
         setExplainMode('contexto')
+        uiStateRef.current = { tab: 'explain', explainMode: 'contexto' } // FIX
         return
       }
       if (e.key === '.') {
         setTab('explain')
         setExplainMode('conceptos')
+        uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' } // FIX
         return
       }
 
