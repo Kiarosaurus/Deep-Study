@@ -17,6 +17,11 @@ const BASE_GAP_PX     = 7
 const SECTION_TOP_PX  = 16
 const SECTION_BOT_PX  = 4
 
+// Fraction of the available column the reading text occupies at userZoom=1.
+// Anything below 1 leaves visible margin on both sides via the mx-auto wrap.
+// Lower values = more breathing room; chosen by user preference.
+const DEFAULT_COLUMN_FACTOR = 0.7
+
 // Walk continuation chains forward+backward from each paragraph and emit
 // a shared { text, sentences, offset } payload for every block in the chain.
 // `text` and `sentences` are the merged values (cache-key + Gemini payload —
@@ -179,11 +184,18 @@ export default function LinearReader({
     })
   }, [])
 
-  const displayWidth = Math.max(1, (contentWidth || 0) * userZoom)
-  const maxBoxWidth  = Math.max(
-    displayWidth,
-    ((maxBlockWidth ?? contentWidth) || 0) * userZoom,
-  )
+  // Tracking-mode zoom semantics differ from paginated: zoom up shrinks the
+  // reading column (widening the side margins) and scales text down, zoom
+  // down expands the column toward the container edges (less margin) and
+  // scales text up. displayWidth never exceeds the column the parent gave
+  // us, so zooming out far enough flattens against contentWidth.
+  const baseWidth = Math.max(1, contentWidth || 0)
+  const desired   = (baseWidth * DEFAULT_COLUMN_FACTOR) / Math.max(0.1, userZoom)
+  const displayWidth = Math.max(1, Math.min(baseWidth, desired))
+  // Full-width figures are still allowed to bleed up to the absolute outer
+  // bound the parent provided (basePageWidth). Independent of userZoom — the
+  // figure scales proportionally via pxPerPt derived from displayWidth.
+  const maxBoxWidth = Math.max(displayWidth, (maxBlockWidth ?? contentWidth) || 0)
 
   const chainPayloads = useMemo(
     () => buildChainPayloads(linearBlocks),
