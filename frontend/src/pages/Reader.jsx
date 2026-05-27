@@ -109,6 +109,11 @@ export default function Reader() {
   const [tab, setTab] = useState('global')
   const [explainMode, setExplainMode] = useState('conceptos')
 
+  const uiStateRef = useRef({ tab, explainMode })
+  useEffect(() => {
+    uiStateRef.current = { tab, explainMode }
+  }, [tab, explainMode])
+
   // Auto-switch after receiving an explanation
   useEffect(() => {
     if (explanation) setTab('explain')
@@ -179,8 +184,10 @@ export default function Reader() {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
-      if (e.key === 'Tab') {
-        e.preventDefault()
+      if (e.key === '<') {
+        e.preventDefault() 
+        const currentTab = uiStateRef.current.tab
+        const currentMode = uiStateRef.current.explainMode
         
         if (tab === 'global') {
           setTab('explain')
@@ -191,16 +198,16 @@ export default function Reader() {
         return
       }
 
-      if (e.key === ',') {
+      if (e.key === '-') {
         setTab('global')
         return
       }
-      if (e.key === '.') {
+      if (e.key === ',') {
         setTab('explain')
         setExplainMode('contexto')
         return
       }
-      if (e.key === '-') {
+      if (e.key === '.') {
         setTab('explain')
         setExplainMode('conceptos')
         return
@@ -244,7 +251,7 @@ export default function Reader() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, tab, explainMode])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain])
 
   const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
