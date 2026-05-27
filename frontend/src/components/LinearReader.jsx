@@ -1,9 +1,93 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { resolveSentenceIndices } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 
-const BBOX_INFLATE_PT = 2
+const BBOX_INFLATE_PT       = 2
+const EQUATION_Y_INFLATE_PT = 4
+
+// Figure / table wider than this fraction of the PDF page is treated as
+// full-width (spans both columns of a two-column layout).
+const FULL_WIDTH_PT_FRACTION = 0.6
+// Approximate single-column-text width relative to page width. Used to derive
+// px-per-pt scale so that a full-width figure renders at ~2× column width.
+const SINGLE_COL_PT_RATIO    = 0.46
+
+const BASE_GAP_PX     = 7
+const SECTION_TOP_PX  = 16
+const SECTION_BOT_PX  = 4
+
+// Walk continuation chains forward+backward from each paragraph and emit
+// a shared { text, sentences, offset } payload for every block in the chain.
+// `text` and `sentences` are the merged values (cache-key + Gemini payload —
+// clicking ✦ on either half hits the same cache entry). `offset` is the
+// number of sentences from earlier chain members that precede this block,
+// used at render time to filter merged sentence indices back into the
+// block's own sentence array for highlight rendering.
+function buildChainPayloads(linearBlocks) {
+  const out = new Array(linearBlocks.length).fill(null)
+  for (let i = 0; i < linearBlocks.length; i++) {
+    if (out[i] !== null) continue
+    const b = linearBlocks[i]
+    if (b.role !== 'paragraph') continue
+
+    let start = i
+    while (
+      start > 0
+      && linearBlocks[start].continuation
+      && linearBlocks[start - 1].role === 'paragraph'
+    ) {
+      start--
+    }
+    let end = i
+    while (
+      end + 1 < linearBlocks.length
+      && linearBlocks[end + 1].role === 'paragraph'
+      && linearBlocks[end + 1].continuation
+    ) {
+      end++
+    }
+
+    if (start === end) {
+      out[i] = { text: b.text, sentences: b.sentences ?? [], offset: 0 }
+      continue
+    }
+
+    const head = linearBlocks[start]
+    let text = head.text ?? ''
+    const sentences = [...(head.sentences ?? [])]
+    const offsets = new Array(end - start + 1)
+    offsets[0] = 0
+    for (let k = start + 1; k <= end; k++) {
+      offsets[k - start] = sentences.length
+      const t   = text.replace(/\s+$/, '')
+      const nxt = (linearBlocks[k].text ?? '').replace(/^\s+/, '')
+      text = /[-—¬]$/.test(t) ? t.slice(0, -1) + nxt : t + ' ' + nxt
+      sentences.push(...(linearBlocks[k].sentences ?? []))
+    }
+    for (let k = start; k <= end; k++) {
+      out[k] = { text, sentences, offset: offsets[k - start] }
+    }
+  }
+  return out
+}
+
+function blockMarginTop(block, prev) {
+  if (!prev) return 0
+  if (block.role === 'title') return 0
+  if (block.role === 'section_header') return SECTION_TOP_PX
+  // Continuation only visually merges when the previous block is also a
+  // paragraph. If a figure / equation / header interrupts the cross-page chain
+  // the gap should remain so the reader sees the interrupting block clearly.
+  if (block.role === 'paragraph' && block.continuation && prev.role === 'paragraph') return 0
+  if (block.role === 'caption' && (prev.role === 'figure' || prev.role === 'table')) return 0
+  return BASE_GAP_PX
+}
+
+function blockMarginBottom(block) {
+  if (block.role === 'section_header') return SECTION_BOT_PX
+  return 0
+}
 
 export default function LinearReader({
   pdfDoc,
@@ -11,6 +95,7 @@ export default function LinearReader({
   linearBlocks,
   pageDims,
   contentWidth,
+  maxBlockWidth,
   userZoom = 1,
   onExplain,
   activeParagraph,
@@ -95,6 +180,15 @@ export default function LinearReader({
   }, [])
 
   const displayWidth = Math.max(1, (contentWidth || 0) * userZoom)
+  const maxBoxWidth  = Math.max(
+    displayWidth,
+    ((maxBlockWidth ?? contentWidth) || 0) * userZoom,
+  )
+
+  const chainPayloads = useMemo(
+    () => buildChainPayloads(linearBlocks),
+    [linearBlocks],
+  )
 
   return (
     <div
@@ -105,10 +199,9 @@ export default function LinearReader({
       <div
         className="mx-auto"
         style={{
-          width: displayWidth,
           display: 'flex',
           flexDirection: 'column',
-          gap: 7,
+          alignItems: 'center',
         }}
       >
         {linearBlocks.map((block, i) => (
@@ -116,15 +209,18 @@ export default function LinearReader({
             key={`${block.page}-${block.reading_index}-${i}`}
             blockIdx={i}
             block={block}
+            prevBlock={i > 0 ? linearBlocks[i - 1] : null}
             srcCanvas={pageCanvases[block.page]}
             pageDim={pageDims?.[block.page]}
             displayWidth={displayWidth}
+            maxBoxWidth={maxBoxWidth}
             visible={visibleSet.has(i)}
             observer={observerInstance}
             requestPage={requestPage}
             hovered={hoveredIdx === i}
             onHoverChange={handleHoverChange}
             onExplain={onExplain}
+            chainPayload={chainPayloads[i]}
             activeParagraph={activeParagraph}
             currentExplanation={currentExplanation}
             explanation={explanation}
@@ -142,15 +238,18 @@ export default function LinearReader({
 const BlockCrop = memo(function BlockCrop({
   blockIdx,
   block,
+  prevBlock,
   srcCanvas,
   pageDim,
   displayWidth,
+  maxBoxWidth,
   visible,
   observer,
   requestPage,
   hovered,
   onHoverChange,
   onExplain,
+  chainPayload,
   activeParagraph,
   currentExplanation,
   explanation,
@@ -159,15 +258,48 @@ const BlockCrop = memo(function BlockCrop({
   const canvasRef  = useRef(null)
 
   const bbox = block.bbox
-  const inflatedY0 = Math.max(0, bbox.y0 - BBOX_INFLATE_PT)
+  // Equations: Marker sometimes emits a tight y-bbox that clips ascenders /
+  // descenders of math symbols. Use a larger vertical inflation for them.
+  const yInflate = block.role === 'equation' ? EQUATION_Y_INFLATE_PT : BBOX_INFLATE_PT
+  const inflatedY0 = Math.max(0, bbox.y0 - yInflate)
   const inflatedY1 = pageDim?.height
-    ? Math.min(pageDim.height, bbox.y1 + BBOX_INFLATE_PT)
-    : bbox.y1 + BBOX_INFLATE_PT
+    ? Math.min(pageDim.height, bbox.y1 + yInflate)
+    : bbox.y1 + yInflate
   const bbW = Math.max(0, bbox.x1 - bbox.x0)
   const bbH = Math.max(0, inflatedY1 - inflatedY0)
-
   const aspect = bbW > 0 ? bbH / bbW : 0
-  const displayHeight = Math.max(1, Math.round(displayWidth * aspect))
+
+  // Full-width detection: a figure/table whose bbox spans most of the page
+  // width almost always covers both columns of the original PDF, and should
+  // render wider than a single paragraph column. Estimate px-per-pt from the
+  // assumed single-column ratio so the natural size matches the visual feel.
+  const canBeFullWidth = block.role === 'figure' || block.role === 'table'
+  const isFullWidth = canBeFullWidth
+    && pageDim
+    && bbW > pageDim.width * FULL_WIDTH_PT_FRACTION
+
+  let boxWidth, canvasWidth, overflowX
+  if (isFullWidth) {
+    const pxPerPt = displayWidth / Math.max(1, pageDim.width * SINGLE_COL_PT_RATIO)
+    const natural = Math.max(displayWidth, Math.round(bbW * pxPerPt))
+    if (natural > maxBoxWidth) {
+      boxWidth = maxBoxWidth
+      canvasWidth = natural
+      overflowX = true
+    } else {
+      boxWidth = natural
+      canvasWidth = natural
+      overflowX = false
+    }
+  } else {
+    boxWidth = displayWidth
+    canvasWidth = displayWidth
+    overflowX = false
+  }
+  const displayHeight = Math.max(1, Math.round(canvasWidth * aspect))
+
+  const marginTop    = blockMarginTop(block, prevBlock)
+  const marginBottom = blockMarginBottom(block)
 
   // Register with the shared IntersectionObserver.
   useEffect(() => {
@@ -195,14 +327,14 @@ const BlockCrop = memo(function BlockCrop({
   useEffect(() => {
     if (!visible || !srcCanvas) return
     const canvas = canvasRef.current
-    if (!canvas || displayWidth <= 0 || bbW <= 0 || bbH <= 0) return
+    if (!canvas || canvasWidth <= 0 || bbW <= 0 || bbH <= 0) return
 
     const dpr = window.devicePixelRatio || 1
-    const physicalW = Math.max(1, Math.round(displayWidth * dpr))
+    const physicalW = Math.max(1, Math.round(canvasWidth * dpr))
     const physicalH = Math.max(1, Math.round(displayHeight * dpr))
     if (canvas.width !== physicalW) canvas.width = physicalW
     if (canvas.height !== physicalH) canvas.height = physicalH
-    canvas.style.width  = `${displayWidth}px`
+    canvas.style.width  = `${canvasWidth}px`
     canvas.style.height = `${displayHeight}px`
 
     const ctx = canvas.getContext('2d')
@@ -218,12 +350,27 @@ const BlockCrop = memo(function BlockCrop({
       bbH * PDF_RENDER_SCALE,
       0, 0, physicalW, physicalH,
     )
-  }, [visible, srcCanvas, displayWidth, displayHeight, bbox.x0, inflatedY0, bbW, bbH])
+  }, [visible, srcCanvas, canvasWidth, displayHeight, bbox.x0, inflatedY0, bbW, bbH])
 
   const isRendered    = visible && !!srcCanvas
-  const isInteractive = isRendered && block.role === 'paragraph' && !!block.sentences?.length
-  const isActive      = isInteractive && activeParagraph?.text === block.text
-  const bboxScale     = bbW > 0 ? displayWidth / bbW : 0
+  const isInteractive = isRendered
+    && block.role === 'paragraph'
+    && (block.sentences?.length ?? 0) > 0
+  // Cross-page chain merged text/sentences (cache-key + Gemini payload). For
+  // non-paragraph roles we fall back to block.text so the active check on
+  // those still degrades gracefully (it never matches anyway). `offset` is
+  // the position of this block's sentences inside payload.sentences — used
+  // to translate LLM-returned indices (relative to the merged array) back
+  // into this block's own sentence array for highlight rendering.
+  const payload = chainPayload ?? {
+    text: block.text,
+    sentences: block.sentences ?? [],
+    offset: 0,
+  }
+  const isActive  = isInteractive && activeParagraph?.text === payload.text
+  const bboxScale = bbW > 0 ? canvasWidth / bbW : 0
+  const ownLen    = block.sentences?.length ?? 0
+  const ownOffset = payload.offset ?? 0
 
   function toLocalRect(b) {
     return {
@@ -234,16 +381,27 @@ const BlockCrop = memo(function BlockCrop({
     }
   }
 
+  // Map merged-array indices to this block's own sentence indices. Indices
+  // outside [offset, offset+ownLen) belong to other halves of the chain and
+  // are dropped here (they get rendered by those halves).
+  const localizeIndices = (mergedIndices) => {
+    const out = []
+    for (const idx of mergedIndices) {
+      if (idx >= ownOffset && idx < ownOffset + ownLen) out.push(idx - ownOffset)
+    }
+    return out
+  }
+
   const allItems = explanation?.sentence_explanations ?? []
   const currentIndices = (isActive && currentExplanation)
-    ? resolveSentenceIndices(block.sentences, currentExplanation)
+    ? localizeIndices(resolveSentenceIndices(payload.sentences, currentExplanation))
     : []
   const currentSet = new Set(currentIndices)
   const otherIndices = isActive
     ? [...new Set(
         allItems
           .filter(it => it !== currentExplanation)
-          .flatMap(it => resolveSentenceIndices(block.sentences, it))
+          .flatMap(it => localizeIndices(resolveSentenceIndices(payload.sentences, it)))
       )].filter(idx => !currentSet.has(idx))
     : []
 
@@ -272,7 +430,13 @@ const BlockCrop = memo(function BlockCrop({
       ref={wrapperRef}
       data-block-idx={blockIdx}
       className="relative"
-      style={{ width: displayWidth, height: displayHeight }}
+      style={{
+        width: boxWidth,
+        height: displayHeight,
+        marginTop,
+        marginBottom,
+        overflowX: overflowX ? 'auto' : 'visible',
+      }}
       onMouseEnter={isInteractive ? () => onHoverChange?.(blockIdx, true) : undefined}
       onMouseLeave={isInteractive ? () => onHoverChange?.(blockIdx, false) : undefined}
     >
@@ -280,7 +444,7 @@ const BlockCrop = memo(function BlockCrop({
         <canvas
           ref={canvasRef}
           style={{
-            width: displayWidth,
+            width: canvasWidth,
             height: displayHeight,
             borderRadius: 2,
             display: 'block',
@@ -290,7 +454,7 @@ const BlockCrop = memo(function BlockCrop({
         <div
           className="bg-slate-100"
           style={{
-            width: displayWidth,
+            width: canvasWidth,
             height: displayHeight,
             borderRadius: 2,
           }}
@@ -298,13 +462,16 @@ const BlockCrop = memo(function BlockCrop({
       )}
 
       {isInteractive && (
-        <div className="absolute inset-0 pointer-events-none">
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{ width: canvasWidth, height: displayHeight }}
+        >
           <div
             className="absolute rounded-sm transition-opacity duration-150"
             style={{
               left: 0,
               top: 0,
-              width: displayWidth,
+              width: canvasWidth,
               height: displayHeight,
               background: hovered ? 'rgba(99,102,241,0.07)' : 'transparent',
               border: hovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent',
@@ -343,7 +510,11 @@ const BlockCrop = memo(function BlockCrop({
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain?.(block.text, block.sentences, block.flat_block_ref ?? block.paragraph_ref ?? null)}
+              onClick={() => onExplain?.(
+                payload.text,
+                payload.sentences,
+                block.flat_block_ref ?? block.paragraph_ref ?? null,
+              )}
               title="Explicar párrafo"
             >
               ✦

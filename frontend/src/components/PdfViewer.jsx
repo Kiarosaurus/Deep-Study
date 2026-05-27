@@ -111,7 +111,17 @@ function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagr
         if (paragraphBoxes.length === 0) return null
 
         const isHovered = hoveredIdx === i
+        // Match by text first (handles non-chain paragraphs and same-mode
+        // clicks) and fall back to flat_block_ref. The fallback covers the
+        // cross-page chain case: a ✦ click in tracking mode sends the merged
+        // chain text as `activeParagraph.text`, which never equals an
+        // individual paginated block's own text — but it always carries the
+        // clicked half's own flat ref, so the corresponding paginated half
+        // can still light up via this check.
+        const ownFlatRef = flatBase + i
         const isActive  = activeParagraph?.text === block.text
+                       || (activeParagraph?.flatBlockRef != null
+                           && activeParagraph.flatBlockRef === ownFlatRef)
 
         const lastBox    = paragraphBoxes[paragraphBoxes.length - 1]
         const anchorLeft = lastBox.x1 * scale
@@ -278,6 +288,22 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
   const containerRef = useRef(null)
   const userZoomRef  = useRef(1.0)
   const trackingToolbarRef = useRef(null)
+  // Scroll preservation across tracking toggle. lastLinearBlockIdxRef stores
+  // the linearBlocks index the user was reading in tracking mode; restored
+  // when they toggle back on after a paginated detour. lastPaginatedFlatRef
+  // is the flat_block_ref of the paragraph closest to the viewport when they
+  // toggle on from paginated, used to land tracking on the same content.
+  const lastLinearBlockIdxRef  = useRef(null)
+  const lastPaginatedFlatRef   = useRef(null)
+
+  // Cross-document hand-off: flat indices from a previous document do not
+  // address valid stops in the new one, so refs are wiped when the file prop
+  // flips. Reader.jsx keeps PdfViewer mounted across navigations, so without
+  // this reset a stale ref could land tracking at an arbitrary stop.
+  useEffect(() => {
+    lastLinearBlockIdxRef.current = null
+    lastPaginatedFlatRef.current  = null
+  }, [file])
 
   // Lazy-load the pdfjs doc the first time tracking activates and keep it
   // alive for the lifetime of this viewer. LinearReader unmounts on toggle off
@@ -362,16 +388,128 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
   }
 
-  // Toggle ON/OFF → reset stop + scroll. scrollTop is shared between the
-  // paginated Document and the LinearReader; without an explicit reset, the
-  // raw scroll number from one mode lands the user at unrelated content in
-  // the other (LinearReader is roughly half as tall as Document for the same
-  // content, so toggling jumps somewhere arbitrary).
+  // Translate a global flat_block_ref (paginated paragraph index, cumulative
+  // across pages[*].blocks) into a paginated stop { page, bbox } for scrolling.
+  function findPaginatedStopByFlat(flatRef) {
+    if (flatRef == null || !pages) return null
+    let cum = 0
+    for (const p of pages) {
+      const blocks = p.blocks ?? []
+      if (flatRef < cum + blocks.length) {
+        const b = blocks[flatRef - cum]
+        if (b?.boxes?.length) return { page: p.page, bbox: b.boxes[0] }
+        return null
+      }
+      cum += blocks.length
+    }
+    return null
+  }
+
+  // Paginated Document re-mounts on toggle off; its data-page wrappers exist
+  // before react-pdf has measured the Page, so getBoundingClientRect().top is
+  // unreliable until layout completes. Retry on rAF until both the wrapper
+  // exists AND it has non-trivial height (a proxy for the Page having rendered
+  // its first viewport). Cap retries to avoid a runaway loop.
+  function scheduleScrollToPaginatedFlat(flatRef, attempts = 0) {
+    if (attempts > 60 || flatRef == null) return
+    const target = findPaginatedStopByFlat(flatRef)
+    if (!target) return
+    const container = containerRef.current
+    const el = container?.querySelector(`[data-page="${target.page}"]`)
+    const ready = el && pageWidthRef.current && el.getBoundingClientRect().height > 20
+    if (!ready) {
+      requestAnimationFrame(() => scheduleScrollToPaginatedFlat(flatRef, attempts + 1))
+      return
+    }
+    scrollToStop(target)
+  }
+
+  // Closest paginated paragraph to the current viewport top — sampled BEFORE
+  // toggling on so tracking can land on the user's reading position rather
+  // than at the document start. Iterates pages[*].blocks in flat order and
+  // picks the one whose rendered top is nearest the container's top edge.
+  function findClosestPaginatedFlatRef() {
+    const container = containerRef.current
+    if (!container || !pages) return null
+    const cRect = container.getBoundingClientRect()
+    let best = { flat: null, dist: Infinity }
+    let flat = 0
+    for (const p of pages) {
+      const blocks = p.blocks ?? []
+      const pageEl = container.querySelector(`[data-page="${p.page}"]`)
+      if (!pageEl) { flat += blocks.length; continue }
+      const pageRect = pageEl.getBoundingClientRect()
+      if (pageRect.bottom < cRect.top) { flat += blocks.length; continue }
+      if (pageRect.top > cRect.bottom) break
+      const pw = pageWidthRef.current
+      const scale = pw && p.width ? pw / p.width : 0
+      for (const b of blocks) {
+        const y0 = b.boxes?.[0]?.y0 ?? 0
+        const top = pageRect.top + y0 * scale
+        const dist = Math.abs(top - cRect.top)
+        if (dist < best.dist) best = { flat, dist }
+        flat++
+      }
+    }
+    return best.flat
+  }
+
+  // Toggle ON/OFF → preserve reading position across modes. scrollTop is
+  // shared between paginated and linear, so a raw carry-over lands in
+  // unrelated content; instead, on ON pick the matching linear stop
+  // (activeParagraph > closest paginated paragraph > last linear position),
+  // and on OFF save the current linear stop and scroll the paginated view
+  // to the corresponding paragraph.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (tracking) setCurrentStop(0)
-    containerRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+    const container = containerRef.current
+    if (!container) return
+
+    if (tracking) {
+      let initialIdx = null
+      const ar = activeParagraph?.flatBlockRef
+      if (ar != null) {
+        const idx = linearSequence.findIndex(s => s.flat_block_ref === ar)
+        if (idx >= 0) initialIdx = idx
+      }
+      if (initialIdx == null && lastPaginatedFlatRef.current != null) {
+        const idx = linearSequence.findIndex(
+          s => s.flat_block_ref === lastPaginatedFlatRef.current,
+        )
+        if (idx >= 0) initialIdx = idx
+      }
+      if (initialIdx == null && lastLinearBlockIdxRef.current != null) {
+        const idx = linearSequence.findIndex(
+          s => s.blockIdx === lastLinearBlockIdxRef.current,
+        )
+        if (idx >= 0) initialIdx = idx
+      }
+      setCurrentStop(initialIdx ?? 0)
+      if (initialIdx == null) container.scrollTo({ top: 0, behavior: 'auto' })
+      // When initialIdx is set, the auto-scroll effect below scrolls to it
+      // once the linear blocks mount.
+    } else {
+      const stop = linearSequence[currentStop]
+      if (stop) lastLinearBlockIdxRef.current = stop.blockIdx
+      const ref = stop?.flat_block_ref
+      if (ref == null) {
+        container.scrollTo({ top: 0, behavior: 'auto' })
+      } else {
+        scheduleScrollToPaginatedFlat(ref)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracking])
+
+  function handleToggleTracking() {
+    if (!tracking) {
+      // About to turn ON — capture the closest visible paginated paragraph so
+      // tracking can resume at the same content. Esc / forced OFF goes through
+      // the toggle effect, which captures the linear blockIdx there instead.
+      const ref = findClosestPaginatedFlatRef()
+      if (ref != null) lastPaginatedFlatRef.current = ref
+    }
+    setTracking(t => !t)
+  }
 
   // Linear-mode sync: when an active paragraph is set (or changes), jump the
   // tracking cursor to the linear stop whose flat_block_ref matches. Fires
@@ -386,13 +524,17 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     if (idx >= 0) setCurrentStop(idx)
   }, [tracking, activeParagraph, linearSequence])
 
-  // Auto-scroll al cambiar stop / activar tracking / re-zoom
+  // Auto-scroll al cambiar stop / activar tracking / re-zoom. scrollToStop is
+  // a closure over refs + pageDims; pulling it into deps would force a
+  // useCallback wrapper for no behavioural gain (the effect already re-fires
+  // on every input that scrollToStop reads).
   useEffect(() => {
     if (!tracking) return
     const stop = readingSequence[currentStop]
     if (!stop) return
     const id = requestAnimationFrame(() => scrollToStop(stop))
     return () => cancelAnimationFrame(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracking, currentStop, readingSequence, userZoom, containerWidth])
 
   // Hijack wheel + teclado en tracking mode
@@ -540,7 +682,7 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
           </button>
         )}
         <button
-          onClick={() => setTracking(t => !t)}
+          onClick={handleToggleTracking}
           disabled={readingSequence.length === 0}
           className={`px-3 h-8 rounded-lg text-xs font-semibold transition-colors disabled:opacity-30 disabled:pointer-events-none ${
             tracking
@@ -585,6 +727,7 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
                 linearBlocks={linearBlocks}
                 pageDims={pageDims}
                 contentWidth={Math.max(1, basePageWidth - 96)}
+                maxBlockWidth={basePageWidth}
                 userZoom={userZoom}
                 onExplain={onExplain}
                 activeParagraph={activeParagraph}

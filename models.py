@@ -78,6 +78,10 @@ class FullBlock(BaseModel):
     reading_index: int
     sentences: list[SentenceBlock] = []
     flat_block_ref: int | None = None
+    # True iff this paragraph is the cross-page tail of the previous paragraph
+    # (same heuristic as ParagraphBlock.continuation). Lets the linear reader
+    # render N-1 and N visually contiguous and merge them for explain payloads.
+    continuation: bool = False
 
 
 class UploadResponse(BaseModel):

@@ -522,11 +522,22 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
     skip_section = False
     title_emitted = False
     reading_index = 0
+    # Cross-page continuation tracker (linear projection). Mirrors the
+    # per-page pipeline:
+    # - `last_emitted_text` updates on every text block (paragraph, equation,
+    #   caption, …) so an intervening caption-after-page-break can still anchor
+    #   the next paragraph's continuation check.
+    # - `cross_page_candidate` flips on at the start of a new page and is
+    #   consumed by the first non-caption text block. Figures / section
+    #   headers do not consume it.
+    last_emitted_text = ""
+    cross_page_candidate = False
 
     for page_idx, page in enumerate(document.pages):
         if stop_content:
             break
         page_no = page_idx + 1
+        cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
         for block in _iter_layout_blocks(page):
             if stop_content:
@@ -627,6 +638,19 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 _build_sentences(text, inner_lines) if role == "paragraph" else []
             )
 
+            is_continuation = (
+                role == "paragraph"
+                and cross_page_candidate
+                and _is_continuation(last_emitted_text, text)
+            )
+            # Captions on a new page do not consume the cross-page candidate
+            # state (a figure caption leading a page is not a paragraph tail),
+            # but their text still updates `last_emitted_text` so a later
+            # paragraph on the same page can check continuation against it —
+            # same behaviour as the per-page pipeline.
+            if role != "caption":
+                cross_page_candidate = False
+
             output.append(
                 FullBlock(
                     role=role,
@@ -635,9 +659,11 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                     bbox=bbox,
                     reading_index=reading_index,
                     sentences=sentences,
+                    continuation=is_continuation,
                 )
             )
             reading_index += 1
+            last_emitted_text = text
 
         if page_idx == 0:
             pre_abstract = False
