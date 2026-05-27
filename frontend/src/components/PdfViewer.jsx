@@ -80,19 +80,19 @@ function buildLinearReadingSequence(linearBlocks) {
   return seq
 }
 
-function ZoomToolbar({ zoom, onZoomOut, onFit, onZoomIn }) {
+function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, canDecrease }) {
   const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors text-base font-semibold"
   return (
     <div className="absolute top-4 right-4 z-30 flex items-center gap-0.5 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1 select-none">
-      <button onClick={onZoomOut} disabled={zoom <= ZOOM_MIN + 1e-3} title="Disminuir zoom (−)" className={btn}>−</button>
+      <button onClick={onDecrease} disabled={!canDecrease} title="Texto más pequeño (−)" className={btn}>−</button>
       <button
         onClick={onFit}
-        title="Ajustar a pantalla"
+        title="Ajustar a 100%"
         className="px-2.5 h-8 flex items-center justify-center rounded-lg text-[11px] font-bold tabular-nums text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors min-w-[3.25rem]"
       >
-        {Math.round(zoom * 100)}%
+        {Math.round(displayZoom * 100)}%
       </button>
-      <button onClick={onZoomIn} disabled={zoom >= ZOOM_MAX - 1e-3} title="Aumentar zoom (+)" className={btn}>+</button>
+      <button onClick={onIncrease} disabled={!canIncrease} title="Texto más grande (+)" className={btn}>+</button>
     </div>
   )
 }
@@ -656,8 +656,24 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
 
   return (
     <div className="relative h-full bg-gray-100">
-      {!tracking && (
-        <ZoomToolbar zoom={userZoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onFit={zoomFit} />
+      {tracking ? (
+        <ZoomToolbar
+          displayZoom={1 / userZoom}
+          onIncrease={zoomOut}
+          onDecrease={zoomIn}
+          onFit={zoomFit}
+          canIncrease={userZoom > ZOOM_MIN + 1e-3}
+          canDecrease={userZoom < ZOOM_MAX - 1e-3}
+        />
+      ) : (
+        <ZoomToolbar
+          displayZoom={userZoom}
+          onIncrease={zoomIn}
+          onDecrease={zoomOut}
+          onFit={zoomFit}
+          canIncrease={userZoom < ZOOM_MAX - 1e-3}
+          canDecrease={userZoom > ZOOM_MIN + 1e-3}
+        />
       )}
 
       {/* Tracking toolbar */}
