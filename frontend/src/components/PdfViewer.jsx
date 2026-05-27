@@ -554,12 +554,15 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     function onKey(e) {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
+      
+      const viewportFactor = tracking ? 0.1 : 0.55
+      
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        node.scrollBy({ top: node.clientHeight * 0.4, behavior: 'smooth' })
+        node.scrollBy({ top: node.clientHeight * viewportFactor, behavior: 'smooth' })
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
-        node.scrollBy({ top: -node.clientHeight * 0.4, behavior: 'smooth' })
+        node.scrollBy({ top: -node.clientHeight * viewportFactor, behavior: 'smooth' })
       } else if (e.key === ' ' || e.key === 'PageDown') {
         e.preventDefault(); step(1)
       } else if (e.key === 'PageUp') {
