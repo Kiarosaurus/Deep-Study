@@ -106,6 +106,14 @@ export default function Reader() {
   const [activeParagraph, setActiveParagraph] = useState(null)
   const [retryInfo, setRetryInfo] = useState(null)
 
+  const [tab, setTab] = useState('global')
+  const [explainMode, setExplainMode] = useState('conceptos')
+
+  // Auto-switch after receiving an explanation
+  useEffect(() => {
+    if (explanation) setTab('explain')
+  }, [explanation])
+
   const explanationsCache = useRef(new Map())
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
@@ -122,10 +130,16 @@ export default function Reader() {
     [analysis],
   )
 
-  const handleExplain = useCallback(async (text, sentences, flatBlockRef = null) => {
+  // Precompute list of paragraphs for easy access
+  const paragraphList = useMemo(
+    () => linearBlocks.filter(b => b.role === 'paragraph'),
+    [linearBlocks]
+  )
+
+  const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, initialIndex = 0) => {
     if (!analysis) return
     setActiveParagraph({ text, flatBlockRef })
-    setCurrentIndex(0)
+    setCurrentIndex(initialIndex)
 
     const cached = readCachedExplanation(decoded, text, explanationsCache.current)
     if (cached) {
@@ -158,6 +172,67 @@ export default function Reader() {
   }, [analysis, decoded])
 
   const handleHome = useCallback(() => navigate('/'), [navigate])
+
+  // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
+  useEffect(() => {
+    function onKey(e) {
+      const tag = (e.target?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+
+      if (e.key === ',') {
+        setTab('global')
+        return
+      }
+      if (e.key === '.') {
+        setTab('explain')
+        setExplainMode('contexto')
+        return
+      }
+      if (e.key === '-') {
+        setTab('explain')
+        setExplainMode('conceptos')
+        return
+      }
+
+      const items = explanation?.sentence_explanations ?? []
+      
+      if (e.key === 'ArrowRight') {
+        if (items.length === 0) return // No explanations to navigate
+        e.preventDefault()
+        if (currentIndex < items.length - 1) {
+          setCurrentIndex(i => i + 1)
+        } else {
+          // Cross-paragraph: Jump to next paragraph
+          const curParaIdx = paragraphList.findIndex(
+            b => b.flat_block_ref === activeParagraph?.flatBlockRef
+          )
+          const next = paragraphList[curParaIdx + 1]
+          if (next) handleExplain(next.text, next.sentences, next.flat_block_ref, 0)
+        }
+      }
+      
+      if (e.key === 'ArrowLeft') {
+        if (items.length === 0) return
+        e.preventDefault()
+        if (currentIndex > 0) {
+          setCurrentIndex(i => i - 1)
+        } else {
+          // Cross-paragraph: Jump to previous paragraph
+          const curParaIdx = paragraphList.findIndex(
+            b => b.flat_block_ref === activeParagraph?.flatBlockRef
+          )
+          const prev = paragraphList[curParaIdx - 1]
+          if (prev) {
+            const lastIdx = Math.max(0, (prev.sentences?.length || 1) - 1)
+            handleExplain(prev.text, prev.sentences, prev.flat_block_ref, lastIdx)
+          }
+        }
+      }
+    }
+
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain])
 
   const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
@@ -214,6 +289,10 @@ export default function Reader() {
           currentIndex={currentIndex}
           onIndexChange={setCurrentIndex}
           retryInfo={retryInfo}
+          tab={tab}
+          onTabChange={setTab}
+          explainMode={explainMode}
+          onExplainModeChange={setExplainMode}
         />
       </div>
     </div>

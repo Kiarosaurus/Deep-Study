@@ -109,16 +109,6 @@ function GlobalMapView({ globalMap }) {
 function ConceptosPanel({ items, currentIndex, onIndexChange }) {
   const total = items.length
 
-  useEffect(() => {
-    if (!total) return
-    function handleKey(e) {
-      if (e.key === 'ArrowRight') onIndexChange(i => Math.min(i + 1, total - 1))
-      else if (e.key === 'ArrowLeft') onIndexChange(i => Math.max(i - 1, 0))
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [total, onIndexChange])
-
   if (total === 0) {
     return (
       <div className="mt-6 px-4 py-5 rounded-2xl border border-slate-100 bg-slate-50 text-center">
@@ -225,9 +215,7 @@ function ContextoPanel({ context }) {
   )
 }
 
-function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
-  const [mode, setMode] = useState('conceptos')
-
+function ExplainView({ explanation, error, currentIndex, onIndexChange, explainMode, onExplainModeChange }) {
   if (error) {
     return (
       <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
@@ -251,14 +239,14 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
     <div className="flex flex-col gap-4">
       <div className="flex p-0.5 bg-slate-100 rounded-lg">
         {[
-          { id: 'conceptos', label: 'Conceptos' },
           { id: 'contexto',  label: 'Contexto'  },
+          { id: 'conceptos', label: 'Conceptos' },
         ].map(m => (
           <button
             key={m.id}
-            onClick={() => setMode(m.id)}
+            onClick={() => onExplainModeChange(m.id)}
             className={`flex-1 text-[11px] font-semibold py-1.5 rounded-md transition-colors ${
-              mode === m.id
+              explainMode === m.id
                 ? 'bg-white text-indigo-600 shadow-sm'
                 : 'text-slate-500 hover:text-slate-700'
             }`}
@@ -268,7 +256,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange }) {
         ))}
       </div>
 
-      {mode === 'conceptos'
+      {explainMode === 'conceptos'
         ? <ConceptosPanel items={items} currentIndex={currentIndex} onIndexChange={onIndexChange} />
         : <ContextoPanel context={context} />
       }
@@ -282,12 +270,9 @@ export default function Sidebar({
   errorGlobal, errorExplain,
   currentIndex, onIndexChange,
   retryInfo,
+  tab, onTabChange,
+  explainMode, onExplainModeChange
 }) {
-  const [tab, setTab] = useState('global')
-
-  useEffect(() => {
-    if (explanation) setTab('explain')
-  }, [explanation])
 
   return (
     <div className="flex flex-col h-full">
@@ -298,7 +283,7 @@ export default function Sidebar({
         ].map((t) => (
           <button
             key={t.id}
-            onClick={() => setTab(t.id)}
+            onClick={() => onTabChange(t.id)}
             className={`flex-1 text-[11px] font-semibold py-3 transition-colors relative ${
               tab === t.id
                 ? 'text-indigo-600 border-b-2 border-indigo-600'
@@ -331,6 +316,8 @@ export default function Sidebar({
             error={errorExplain}
             currentIndex={currentIndex}
             onIndexChange={onIndexChange}
+            explainMode={explainMode}
+            onExplainModeChange={onExplainModeChange}
           />
         )}
       </div>
