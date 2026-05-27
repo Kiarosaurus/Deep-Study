@@ -179,6 +179,18 @@ export default function Reader() {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        
+        if (tab === 'global') {
+          setTab('explain')
+          setExplainMode('contexto')
+        } else if (tab === 'explain') {
+          setExplainMode(prev => prev === 'contexto' ? 'conceptos' : 'contexto')
+        }
+        return
+      }
+
       if (e.key === ',') {
         setTab('global')
         return
@@ -232,7 +244,7 @@ export default function Reader() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, tab, explainMode])
 
   const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
