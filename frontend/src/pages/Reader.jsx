@@ -184,11 +184,24 @@ export default function Reader() {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
+      // Find if there is an explanation already loaded
+      const items = explanation?.sentence_explanations ?? []
+      const hasExplanation = items.length > 0
+
       if (e.key === '<') {
         e.preventDefault() 
-        // Leemos el estado actual al milisegundo
         const currentTab = uiStateRef.current.tab
         const currentMode = uiStateRef.current.explainMode
+
+        // If no explanation is loaded, jump to the first paragraph's explanation
+        if (!hasExplanation && paragraphList[0]) {
+          const first = paragraphList[0]
+          handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+          setTab('explain')
+          setExplainMode('contexto')
+          uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
+          return
+        }
         
         if (currentTab === 'global') {
           setTab('explain')
@@ -204,31 +217,37 @@ export default function Reader() {
 
       if (e.key === '-') {
         setTab('global')
-        uiStateRef.current = { ...uiStateRef.current, tab: 'global' } // FIX
+        uiStateRef.current = { ...uiStateRef.current, tab: 'global' }
         return
       }
       if (e.key === ',') {
         setTab('explain')
         setExplainMode('contexto')
-        uiStateRef.current = { tab: 'explain', explainMode: 'contexto' } // FIX
+        uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
         return
       }
       if (e.key === '.') {
         setTab('explain')
         setExplainMode('conceptos')
-        uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' } // FIX
+        uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' }
         return
       }
-
-      const items = explanation?.sentence_explanations ?? []
       
       if (e.key === 'ArrowRight') {
-        if (items.length === 0) return // No explanations to navigate
+        // If no explanation is loaded, jump to the first paragraph's explanation
+        if (!hasExplanation) {
+          if (paragraphList[0]) {
+            e.preventDefault()
+            const first = paragraphList[0]
+            handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+          }
+          return
+        }
+
         e.preventDefault()
         if (currentIndex < items.length - 1) {
           setCurrentIndex(i => i + 1)
         } else {
-          // Cross-paragraph: Jump to next paragraph
           const curParaIdx = paragraphList.findIndex(
             b => b.flat_block_ref === activeParagraph?.flatBlockRef
           )
@@ -236,14 +255,22 @@ export default function Reader() {
           if (next) handleExplain(next.text, next.sentences, next.flat_block_ref, 0)
         }
       }
-      
+
       if (e.key === 'ArrowLeft') {
-        if (items.length === 0) return
+        // If no explanation is loaded, jump to the first paragraph's explanation
+        if (!hasExplanation) {
+          if (paragraphList[0]) {
+            e.preventDefault()
+            const first = paragraphList[0]
+            handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+          }
+          return
+        }
+
         e.preventDefault()
         if (currentIndex > 0) {
           setCurrentIndex(i => i - 1)
         } else {
-          // Cross-paragraph: Jump to previous paragraph
           const curParaIdx = paragraphList.findIndex(
             b => b.flat_block_ref === activeParagraph?.flatBlockRef
           )

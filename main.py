@@ -59,8 +59,8 @@ Debes producir DOS salidas en el MISMO JSON:
 PARTE A — "sentence_explanations" (CONCEPTOS)
 ═══════════════════════════════════════════════════════════
 
-REGLA FUNDAMENTAL — NO TRADUCIR, EXPLICAR:
-Tu trabajo NO es traducir, parafrasear ni resumir las oraciones. Tu trabajo es identificar los CONCEPTOS TÉCNICOS, ACRÓNIMOS, JERGA ESPECIALIZADA, CONTEXTO TEÓRICO IMPLÍCITO o IMPLICACIONES NO TRIVIALES que aparecen DENTRO de cada oración, y explicar QUÉ SIGNIFICAN, POR QUÉ SON RELEVANTES o QUÉ CONTEXTO ASUMEN. Si la oración es trivial y no contiene conceptos especializados, OMÍTELA.
+REGLA FUNDAMENTAL — NO TRADUCIR, APORTAR CONTEXTO PROFUNDO:
+Tu trabajo NO es traducir, parafrasear ni resumir las oraciones. Tu trabajo es identificar los CONCEPTOS TÉCNICOS, ACRÓNIMOS o JERGA ESPECIALIZADA que aparecen DENTRO de cada oración, y aportar TODO EL CONTEXTO TEÓRICO NECESARIO para entenderlos profundamente. Debes extraer información adicional valiosa que el autor asume que el lector ya sabe. Explica QUÉ SIGNIFICAN, POR QUÉ SON RELEVANTES AQUÍ y QUÉ BACKGROUND ASUMEN. Si la oración es trivial, OMÍTELA.
 
 Recorre el párrafo oración por oración. Por cada oración (o rango de oraciones) que contenga conceptos no triviales, devuelve UN ÚNICO objeto agrupando todos sus conceptos.
 
@@ -75,8 +75,7 @@ ESTRUCTURA POR OBJETO (3 campos):
 
 3. "concepts": LISTA, una por concepto técnico. Cada elemento:
    - "term": Concepto, acrónimo, jerga o frase clave. NO incluyas dos puntos finales.
-   - "explanation": Análisis técnico CONCISO en español. Máximo 3 oraciones. NO traduzcas la oración: explica el concepto subyacente.
-
+   - "explanation": Análisis profundo, VERBOSO y altamente CONTEXTUAL en español. NO te limites a dar una definición de diccionario ni a repetir/traducir lo que ya dice la oración original. Aporta información adicional de valor, trasfondo teórico o las implicaciones prácticas que ayuden al usuario a entender POR QUÉ este concepto importa en esta línea. Extiéndete lo necesario para dejar el panorama absolutamente claro y rico en detalles (usa de 3 a 6 oraciones largas y descriptivas).
 REGLAS PARTE A:
 - Múltiples conceptos en una sola oración → varios elementos en "concepts", UN solo objeto.
 - Oraciones triviales → no aparecen.
