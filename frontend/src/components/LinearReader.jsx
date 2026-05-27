@@ -281,10 +281,21 @@ const BlockCrop = memo(function BlockCrop({
   const bbH = Math.max(0, inflatedY1 - inflatedY0)
   const aspect = bbW > 0 ? bbH / bbW : 0
 
-  // Full-width detection: a figure/table whose bbox spans most of the page
-  // width almost always covers both columns of the original PDF, and should
-  // render wider than a single paragraph column. Estimate px-per-pt from the
-  // assumed single-column ratio so the natural size matches the visual feel.
+  // Uniform px-per-pt across the document. A paragraph block, by assumption,
+  // fills ~SINGLE_COL_PT_RATIO of the page width and we want it to render at
+  // displayWidth, so that ratio fixes the scale; every other block then
+  // renders at its natural size relative to that paragraph. Section headers,
+  // authors, captions, equations etc. keep their visual size relationship to
+  // body text from the original PDF instead of being stretched to fill the
+  // reading column.
+  const pxPerPt = pageDim
+    ? displayWidth / Math.max(1, pageDim.width * SINGLE_COL_PT_RATIO)
+    : null
+  const naturalPx = pxPerPt ? Math.max(1, Math.round(bbW * pxPerPt)) : displayWidth
+
+  // Full-width figures / tables are allowed to bleed beyond the column; every
+  // other block clamps to displayWidth (so a title or wide section header
+  // gets downscaled instead of overflowing).
   const canBeFullWidth = block.role === 'figure' || block.role === 'table'
   const isFullWidth = canBeFullWidth
     && pageDim
@@ -292,8 +303,7 @@ const BlockCrop = memo(function BlockCrop({
 
   let boxWidth, canvasWidth, overflowX
   if (isFullWidth) {
-    const pxPerPt = displayWidth / Math.max(1, pageDim.width * SINGLE_COL_PT_RATIO)
-    const natural = Math.max(displayWidth, Math.round(bbW * pxPerPt))
+    const natural = Math.max(displayWidth, naturalPx)
     if (natural > maxBoxWidth) {
       boxWidth = maxBoxWidth
       canvasWidth = natural
@@ -304,8 +314,9 @@ const BlockCrop = memo(function BlockCrop({
       overflowX = false
     }
   } else {
-    boxWidth = displayWidth
-    canvasWidth = displayWidth
+    const clamped = Math.min(displayWidth, naturalPx)
+    boxWidth = clamped
+    canvasWidth = clamped
     overflowX = false
   }
   const displayHeight = Math.max(1, Math.round(canvasWidth * aspect))
