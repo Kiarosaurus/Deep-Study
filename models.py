@@ -30,11 +30,28 @@ class ParagraphBlock(BaseModel):
     # with a lowercase letter). Consumers join continuations with the previous
     # paragraph instead of treating them as a separate unit.
     continuation: bool = False
+    # Sub-type of the text block. Mirrors the linear projection's role enum
+    # for the subset of types that the per-page pipeline emits as ParagraphBlock
+    # (text-derived only — figures/tables/pictures live in PageBlocks.images).
+    # Used by `_merge_continuations_pages` to skip decorative inserts (caption,
+    # equation) when chaining continuations and reset on structural breaks.
+    # Default "paragraph" preserves backward compatibility with analysis.json
+    # files generated before this field was introduced.
+    role: Literal["paragraph", "caption", "equation", "code"] = "paragraph"
 
 
 class ImageBlock(BaseModel):
     bbox: BBox
     reading_index: int = 0
+    # Sub-type: "figure" (default) or "table". Set by extraction based on the
+    # underlying Marker block type. Mirrors the linear projection's role.
+    role: Literal["figure", "table"] = "figure"
+    # Populated when `_merge_figure_captions_pages` finds an adjacent caption
+    # (Marker-tagged or paragraph matching `_CAPTION_LIKE_RE`) and absorbs it
+    # into this image. Frontend treats the union bbox as the hover region so
+    # the caption is "contained" by the image's overlay.
+    caption_text: str = ""
+    caption_bbox: BBox | None = None
 
 
 class PageBlocks(BaseModel):

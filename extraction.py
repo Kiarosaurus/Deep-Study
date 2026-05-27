@@ -201,113 +201,257 @@ def _looks_like_author_line(text: str) -> bool:
     return proper >= max(2, len(words) - 4)
 
 
-# ── Cross-page continuation detection ────────────────────────────────────────
-_TERMINAL_PUNCT = frozenset('.!?…')
+# ── Paragraph continuation detection ─────────────────────────────────────────
+
+# Debug toggle: set DEEPSTUDY_CONT_DEBUG=1 in the backend env to dump the
+# decision trace for every post-pass step (continuation linking + figure
+# caption merging) to stdout. Off by default.
+_CONT_DEBUG = os.getenv("DEEPSTUDY_CONT_DEBUG") == "1"
+
+
+def _cont_log(msg: str) -> None:
+    if _CONT_DEBUG:
+        print(f"[continuation] {msg}")
+
+
+def _snip(text: str | None, n: int = 80) -> str:
+    if not text:
+        return ""
+    t = text.replace("\n", " ")
+    return t[:n] + ("…" if len(t) > n else "")
+# Soft-break chars (hyphen / em-dash / soft hyphen). Still used by the chain
+# payload builder on the frontend side to know when joining two halves should
+# strip the trailing break instead of inserting a space — but no longer gate
+# the continuation detection itself.
+_SOFT_BREAK = frozenset('-—¬')
 
 
 def _is_continuation(prev_text: str, new_text: str) -> bool:
-    """True if `new_text` is the cross-page tail of `prev_text`."""
-    prev = prev_text.rstrip()
-    new = new_text.lstrip()
-    if not prev or not new:
+    """True iff `new_text` should be merged with `prev_text` as a continuation.
+
+    Rule (user-imposed, NO exceptions): the new block starts with a lowercase
+    letter AND a previous block exists. How the previous block ends is
+    irrelevant — punctuation, brackets, citations, terminal period: none
+    block the merge. Marker emitting a paragraph that begins in lowercase is
+    treated as a hard signal that the layout-split was spurious."""
+    new = new_text.lstrip() if new_text else ""
+    if not new:
         return False
-    if prev[-1] in _TERMINAL_PUNCT:
+    if not (prev_text and prev_text.strip()):
         return False
     first = new[0]
     return first.isalpha() and first.islower()
 
 
-# Roles that are decorative inserts between paragraphs (do not break the
-# continuation chain in the linear projection).
-_LINEAR_TRANSPARENT_ROLES = frozenset({"caption", "equation"})
-
 # Caption-like opener heuristic: catches paragraphs Marker missed tagging as
-# Caption but that clearly belong to a preceding figure/table/image, e.g.
-# "Figure 3: Architecture overview", "Table II. Results", "Fig 4 ...".
+# Caption but that clearly belong to a neighboring figure/table/image. Covers
+# English and Spanish forms, with or without a trailing number/Roman numeral:
+#   "Figure 3: Architecture overview", "Table II. Results", "Fig 4 ...",
+#   "Figura 1 — Esquema general", "Tabla 2", "Imagen 7", "Esquema 3",
+#   "Diagrama 5", "Cuadro 4".
 _CAPTION_LIKE_RE = re.compile(
-    r"^(?:figure|fig\.?|table|tab\.?|image|img\.?)\s*"
-    r"(?:[IVXLCDM]+|\d+)",
+    r"^(?:"
+    r"figure|figura|fig\.?|"
+    r"table|tabla|tab\.?|cuadro|"
+    r"image|imagen|img\.?|"
+    r"esquema|diagrama|schema|diagram|chart"
+    r")\s*"
+    r"(?:[IVXLCDM]+|\d+)?"
+    r"\b",
     re.IGNORECASE,
 )
 
 
-def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
-    """Post-pass over the per-page projection. Marks any block whose predecessor
-    ends without terminal punctuation and whose own text starts in lowercase
-    as continuation=True. Walks across page boundaries so intra-page and cross-
-    page cases are handled uniformly (the live extraction only flags cross-page)."""
-    prev_text = ""
+def _is_caption_block_pages(b: ParagraphBlock) -> bool:
+    if b.role == "caption":
+        return True
+    if b.role == "paragraph" and bool(
+        _CAPTION_LIKE_RE.match((b.text or "").lstrip())
+    ):
+        return True
+    return False
+
+
+def _union_bbox(bs: list[BBox]) -> BBox:
+    return BBox(
+        x0=min(b.x0 for b in bs),
+        y0=min(b.y0 for b in bs),
+        x1=max(b.x1 for b in bs),
+        y1=max(b.y1 for b in bs),
+    )
+
+
+def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
+    """Per-page mirror of `_merge_figure_captions_linear`. For each ImageBlock,
+    look at adjacent ParagraphBlocks (by reading_index) to find an attached
+    caption. The caption may be Marker-tagged role='caption' or a paragraph
+    matching `_CAPTION_LIKE_RE` (EN + ES forms). Direction is bidirectional:
+    prefers the block AFTER (typical figure layout) then BEFORE (typical
+    table layout). Allows up to ±2 reading_index slots to tolerate an
+    intervening image in multi-panel figures.
+
+    When merged, the caption's text/bbox is absorbed into ImageBlock and the
+    caption block is removed from `page.blocks` so the frontend overlay no
+    longer hovers it as a standalone paragraph."""
+    _cont_log(f"=== pages figure-caption merge start: {len(pages)} pages ===")
     for p in pages:
-        for b in p.blocks:
-            if prev_text and _is_continuation(prev_text, b.text):
+        block_by_ri: dict[int, ParagraphBlock] = {
+            b.reading_index: b for b in p.blocks
+        }
+        consumed_ids: set[int] = set()
+        _cont_log(f"  -- page {p.page}: {len(p.images)} images, {len(p.blocks)} blocks --")
+        for img in p.images:
+            ri = img.reading_index
+            cap: ParagraphBlock | None = None
+            found_delta = None
+            for delta in (1, -1, 2, -2):
+                neighbor = block_by_ri.get(ri + delta)
+                if neighbor is None or id(neighbor) in consumed_ids:
+                    continue
+                if _is_caption_block_pages(neighbor):
+                    cap = neighbor
+                    found_delta = delta
+                    break
+            if cap is None:
+                _cont_log(f"    image ri={ri} role={img.role}: no caption found")
+                continue
+            _cont_log(
+                f"    image ri={ri} role={img.role} merge caption from delta={found_delta} "
+                f"role={cap.role} text={_snip(cap.text)!r}"
+            )
+            img.caption_text = cap.text
+            cap_bboxes = list(cap.boxes or [])
+            if cap_bboxes:
+                cap_union = _union_bbox(cap_bboxes)
+                img.caption_bbox = cap_union
+                img.bbox = BBox(
+                    x0=min(img.bbox.x0, cap_union.x0),
+                    y0=min(img.bbox.y0, cap_union.y0),
+                    x1=max(img.bbox.x1, cap_union.x1),
+                    y1=max(img.bbox.y1, cap_union.y1),
+                )
+            consumed_ids.add(id(cap))
+        if consumed_ids:
+            p.blocks = [b for b in p.blocks if id(b) not in consumed_ids]
+    _cont_log("=== pages figure-caption merge end ===")
+
+
+def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
+    """Post-pass over the per-page projection. Mirrors `_merge_continuations_
+    linear`: walks every paragraph and checks against the most recent prior
+    paragraph, ignoring all intervening non-paragraph blocks (caption, equation,
+    code, list). Walks across page boundaries."""
+    _cont_log(f"=== pages post-pass start: {len(pages)} pages ===")
+    prev_para_text = ""
+    for p in pages:
+        _cont_log(f"  -- page {p.page}: {len(p.blocks)} blocks --")
+        for i, b in enumerate(p.blocks):
+            if b.role != "paragraph":
+                _cont_log(f"    [{i}] skip role={b.role} text={_snip(b.text)!r}")
+                continue
+            fires = bool(prev_para_text and _is_continuation(prev_para_text, b.text))
+            _cont_log(
+                f"    [{i}] check paragraph fires={fires} "
+                f"prev_end={_snip(prev_para_text[-80:] if prev_para_text else '')!r} "
+                f"next_start={_snip(b.text)!r}"
+            )
+            if fires:
                 b.continuation = True
-            prev_text = b.text
+            prev_para_text = b.text
+    _cont_log("=== pages post-pass end ===")
+
+
+def _is_caption_block_linear(b: FullBlock) -> bool:
+    """A FullBlock that visually belongs to an adjacent figure/table: either
+    Marker tagged it Caption, or it's a paragraph that opens with a caption-
+    like marker (Figure/Figura/Tabla/Imagen/Esquema/Diagrama/...)."""
+    if b.role == "caption":
+        return True
+    if b.role == "paragraph" and bool(
+        _CAPTION_LIKE_RE.match((b.text or "").lstrip())
+    ):
+        return True
+    return False
 
 
 def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
-    """Merge each figure/table with its caption (the following block) into one
-    unit. The caption may be Marker-tagged with role='caption' OR a paragraph
-    whose text starts with 'Figure N', 'Table N', 'Image N', 'Fig. N', etc.
+    """Merge each figure/table with its caption — checked BOTH directions in
+    reading order. The caption may be:
+      - Marker-tagged with role='caption', or
+      - A paragraph whose text matches `_CAPTION_LIKE_RE` (EN + ES forms,
+        with or without numbering).
+
+    Tables and schemes commonly put captions ABOVE the visual; figures usually
+    put captions BELOW. Both layouts are handled.
 
     Returns a new list with the caption block removed and its text/bbox stored
-    on the figure block as `caption_text` / `caption_bbox`. Reading_index of
-    surviving blocks stays untouched (it's a hint, not a tight invariant)."""
+    on the figure block as `caption_text` / `caption_bbox`. The figure block's
+    own `bbox` is expanded to the union so a single canvas crop on the
+    frontend renders figure + caption together (and so the explain raster
+    sent to Gemini includes the caption text alongside the image)."""
+    _cont_log(f"=== linear figure-caption merge start: {len(blocks)} blocks ===")
+    consumed: set[int] = set()
     merged: list[FullBlock] = []
-    skip_next = False
     for i, b in enumerate(blocks):
-        if skip_next:
-            skip_next = False
+        if i in consumed:
+            _cont_log(f"  [{i}] already consumed as caption")
             continue
-        if b.role in ("figure", "table") and i + 1 < len(blocks):
-            nxt = blocks[i + 1]
-            is_caption = nxt.role == "caption"
-            is_caption_like = (
-                nxt.role == "paragraph"
-                and bool(_CAPTION_LIKE_RE.match((nxt.text or "").lstrip()))
-            )
-            if is_caption or is_caption_like:
-                b.caption_text = nxt.text
-                b.caption_bbox = nxt.bbox
-                # Expand the block's primary bbox to the union of figure +
-                # caption so a single canvas crop on the frontend renders
-                # both visually (preserves the caption font/formatting that
-                # the rasterizer pulls straight from the PDF). The original
-                # image-only bbox is no longer kept — explain raster also
-                # uses this union so Gemini sees the caption alongside.
-                b.bbox = BBox(
-                    x0=min(b.bbox.x0, nxt.bbox.x0),
-                    y0=min(b.bbox.y0, nxt.bbox.y0),
-                    x1=max(b.bbox.x1, nxt.bbox.x1),
-                    y1=max(b.bbox.y1, nxt.bbox.y1),
+        if b.role in ("figure", "table"):
+            cap_idx = None
+            if i + 1 < len(blocks) and i + 1 not in consumed and _is_caption_block_linear(blocks[i + 1]):
+                cap_idx = i + 1
+            elif i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
+                cap_idx = i - 1
+                if merged and merged[-1] is blocks[i - 1]:
+                    merged.pop()
+            if cap_idx is not None:
+                cap = blocks[cap_idx]
+                _cont_log(
+                    f"  [{i}] {b.role} merge caption from [{cap_idx}] role={cap.role} "
+                    f"text={_snip(cap.text)!r}"
                 )
-                # Adopt the caption's sentence geometry so the explain UI can
-                # still highlight per-sentence quotes when explaining the
-                # figure (the model produces concept quotes from caption text).
-                if nxt.sentences:
-                    b.sentences = nxt.sentences
-                merged.append(b)
-                skip_next = True
-                continue
+                b.caption_text = cap.text
+                b.caption_bbox = cap.bbox
+                b.bbox = BBox(
+                    x0=min(b.bbox.x0, cap.bbox.x0),
+                    y0=min(b.bbox.y0, cap.bbox.y0),
+                    x1=max(b.bbox.x1, cap.bbox.x1),
+                    y1=max(b.bbox.y1, cap.bbox.y1),
+                )
+                if cap.sentences:
+                    b.sentences = cap.sentences
+                consumed.add(cap_idx)
+            else:
+                _cont_log(f"  [{i}] {b.role} no adjacent caption found")
         merged.append(b)
+    _cont_log(f"=== linear figure-caption merge end: {len(merged)} blocks ({len(consumed)} captions consumed) ===")
     return merged
 
 
 def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
-    """Post-pass over the linear projection. Same rule as `_merge_continuations_
-    pages` but role-aware: only paragraph→paragraph pairs are eligible; captions
-    and equations are treated as decorative inserts that don't break the chain;
-    every other role (section_header, title, figure, table, code, list, author)
-    resets it."""
+    """Post-pass over the linear projection. Walks every paragraph and checks
+    `_is_continuation` against the most recent prior paragraph, ignoring ALL
+    intervening non-paragraph blocks (caption, equation, figure, table, code,
+    list, section_header, title, author). The `_is_continuation` heuristic
+    itself is strict (prev must end mid-word/alnum or soft-break, next must
+    start lowercase), so the bridging behavior cannot trigger on natural
+    paragraph endings."""
+    _cont_log(f"=== linear post-pass start: {len(linear_blocks)} blocks ===")
     prev_para_text = ""
-    for b in linear_blocks:
-        if b.role == "paragraph":
-            if prev_para_text and _is_continuation(prev_para_text, b.text):
-                b.continuation = True
-            prev_para_text = b.text
-        elif b.role in _LINEAR_TRANSPARENT_ROLES:
+    for i, b in enumerate(linear_blocks):
+        if b.role != "paragraph":
+            _cont_log(f"  [{i}] skip role={b.role} text={_snip(b.text)!r}")
             continue
-        else:
-            prev_para_text = ""
+        fires = bool(prev_para_text and _is_continuation(prev_para_text, b.text))
+        _cont_log(
+            f"  [{i}] check paragraph fires={fires} "
+            f"prev_end={_snip(prev_para_text[-80:] if prev_para_text else '')!r} "
+            f"next_start={_snip(b.text)!r}"
+        )
+        if fires:
+            b.continuation = True
+        prev_para_text = b.text
+    _cont_log("=== linear post-pass end ===")
 
 
 # ── Sentence segmentation ────────────────────────────────────────────────────
@@ -497,7 +641,11 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
             bbox = _polygon_to_bbox(block.polygon)
 
             if bt in _IMAGE_TYPES:
-                images.append(ImageBlock(bbox=bbox, reading_index=reading_idx))
+                images.append(ImageBlock(
+                    bbox=bbox,
+                    reading_index=reading_idx,
+                    role=_role_for_image_block(bt),
+                ))
                 reading_idx += 1
                 continue
 
@@ -558,6 +706,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                     sentences=sentences,
                     reading_index=reading_idx,
                     continuation=is_cont,
+                    role=_role_for_text_block(bt),
                 )
             )
             reading_idx += 1
@@ -583,6 +732,7 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
     pages = _extract_pages_from_document(document)
+    _merge_figure_captions_pages(pages)
     _merge_continuations_pages(pages)
     return pages
 
@@ -789,6 +939,7 @@ def extract_both(
     pages  = _extract_pages_from_document(document, line_cache)
     linear = _extract_linear_from_document(document, line_cache)
     linear = _merge_figure_captions_linear(linear)
+    _merge_figure_captions_pages(pages)
     _merge_continuations_pages(pages)
     _merge_continuations_linear(linear)
     return pages, linear

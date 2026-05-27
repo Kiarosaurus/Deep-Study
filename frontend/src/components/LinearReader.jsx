@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { resolveSentenceIndices } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 
@@ -21,61 +21,6 @@ const SECTION_BOT_PX  = 4
 // Anything below 1 leaves visible margin on both sides via the mx-auto wrap.
 // Lower values = more breathing room; chosen by user preference.
 const DEFAULT_COLUMN_FACTOR = 0.7
-
-// Walk continuation chains forward+backward from each paragraph and emit
-// a shared { text, sentences, offset } payload for every block in the chain.
-// `text` and `sentences` are the merged values (cache-key + Gemini payload —
-// clicking ✦ on either half hits the same cache entry). `offset` is the
-// number of sentences from earlier chain members that precede this block,
-// used at render time to filter merged sentence indices back into the
-// block's own sentence array for highlight rendering.
-function buildChainPayloads(linearBlocks) {
-  const out = new Array(linearBlocks.length).fill(null)
-  for (let i = 0; i < linearBlocks.length; i++) {
-    if (out[i] !== null) continue
-    const b = linearBlocks[i]
-    if (b.role !== 'paragraph') continue
-
-    let start = i
-    while (
-      start > 0
-      && linearBlocks[start].continuation
-      && linearBlocks[start - 1].role === 'paragraph'
-    ) {
-      start--
-    }
-    let end = i
-    while (
-      end + 1 < linearBlocks.length
-      && linearBlocks[end + 1].role === 'paragraph'
-      && linearBlocks[end + 1].continuation
-    ) {
-      end++
-    }
-
-    if (start === end) {
-      out[i] = { text: b.text, sentences: b.sentences ?? [], offset: 0 }
-      continue
-    }
-
-    const head = linearBlocks[start]
-    let text = head.text ?? ''
-    const sentences = [...(head.sentences ?? [])]
-    const offsets = new Array(end - start + 1)
-    offsets[0] = 0
-    for (let k = start + 1; k <= end; k++) {
-      offsets[k - start] = sentences.length
-      const t   = text.replace(/\s+$/, '')
-      const nxt = (linearBlocks[k].text ?? '').replace(/^\s+/, '')
-      text = /[-—¬]$/.test(t) ? t.slice(0, -1) + nxt : t + ' ' + nxt
-      sentences.push(...(linearBlocks[k].sentences ?? []))
-    }
-    for (let k = start; k <= end; k++) {
-      out[k] = { text, sentences, offset: offsets[k - start] }
-    }
-  }
-  return out
-}
 
 function blockMarginTop(block, prev) {
   if (!prev) return 0
@@ -198,7 +143,7 @@ export default function LinearReader({
   const maxBoxWidth = Math.max(displayWidth, (maxBlockWidth ?? contentWidth) || 0)
 
   const chainPayloads = useMemo(
-    () => buildChainPayloads(linearBlocks),
+    () => buildContinuationPayloads(linearBlocks),
     [linearBlocks],
   )
 

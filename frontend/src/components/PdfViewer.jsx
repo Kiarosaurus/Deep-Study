@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import LinearReader from './LinearReader'
-import { resolveSentenceIndices } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -97,29 +97,34 @@ function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, 
   )
 }
 
-function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
-  const [hoveredIdx, setHoveredIdx] = useState(null)
+function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
+  const [hoveredIdx, setHoveredIdx]       = useState(null)
+  const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
-  if (!blocks || !scale) return null
+  if ((!blocks && !images?.length) || !scale) return null
 
   const allItems = explanation?.sentence_explanations ?? []
 
   return (
     <div className="absolute inset-0 z-10 pointer-events-none">
-      {blocks.map((block, i) => {
+      {(blocks ?? []).map((block, i) => {
         const paragraphBoxes = block.boxes ?? []
         if (paragraphBoxes.length === 0) return null
 
         const isHovered = hoveredIdx === i
-        // Match by text first (handles non-chain paragraphs and same-mode
-        // clicks) and fall back to flat_block_ref. The fallback covers the
-        // cross-page chain case: a ✦ click in tracking mode sends the merged
-        // chain text as `activeParagraph.text`, which never equals an
-        // individual paginated block's own text — but it always carries the
-        // clicked half's own flat ref, so the corresponding paginated half
-        // can still light up via this check.
         const ownFlatRef = flatBase + i
-        const isActive  = activeParagraph?.text === block.text
+        // Chain payload (merged text + sentences across continuation chain).
+        // Falls back to this block alone when no chain or no payload computed.
+        const payload = chainPayloads?.[ownFlatRef] ?? {
+          text: block.text ?? '',
+          sentences: block.sentences ?? [],
+          offset: 0,
+        }
+        const ownLen    = block.sentences?.length ?? 0
+        const ownOffset = payload.offset ?? 0
+        // Match by merged payload text so every block in the chain lights up
+        // together; fall back to flat_block_ref for cross-mode hand-off.
+        const isActive  = activeParagraph?.text === payload.text
                        || (activeParagraph?.flatBlockRef != null
                            && activeParagraph.flatBlockRef === ownFlatRef)
 
@@ -127,16 +132,27 @@ function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagr
         const anchorLeft = lastBox.x1 * scale
         const anchorTop  = lastBox.y1 * scale
 
-        const currentIndices = (isActive && currentExplanation && block.sentences?.length)
-          ? resolveSentenceIndices(block.sentences, currentExplanation)
+        // Localize merged-array indices back into this block's own sentence
+        // array — indices outside [ownOffset, ownOffset+ownLen) belong to
+        // other chain members and are dropped here.
+        const localizeIndices = (mergedIndices) => {
+          const out = []
+          for (const idx of mergedIndices) {
+            if (idx >= ownOffset && idx < ownOffset + ownLen) out.push(idx - ownOffset)
+          }
+          return out
+        }
+
+        const currentIndices = (isActive && currentExplanation && ownLen)
+          ? localizeIndices(resolveSentenceIndices(payload.sentences, currentExplanation))
           : []
         const currentSet = new Set(currentIndices)
 
-        const otherIndices = (isActive && allItems.length && block.sentences?.length)
+        const otherIndices = (isActive && allItems.length && ownLen)
           ? [...new Set(
               allItems
                 .filter(it => it !== currentExplanation)
-                .flatMap(it => resolveSentenceIndices(block.sentences, it))
+                .flatMap(it => localizeIndices(resolveSentenceIndices(payload.sentences, it)))
             )].filter(idx => !currentSet.has(idx))
           : []
 
@@ -219,10 +235,66 @@ function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagr
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain(block.text, block.sentences, flatBase + i)}
+              onClick={() => onExplain(payload.text, payload.sentences, ownFlatRef)}
               onMouseEnter={() => setHoveredIdx(i)}
               onMouseLeave={() => setHoveredIdx(null)}
               title="Explicar párrafo"
+            >
+              ✦
+            </button>
+          </div>
+        )
+      })}
+
+      {(images ?? []).map((img, i) => {
+        const b = img.bbox
+        if (!b) return null
+        const isHovered  = hoveredImgIdx === i
+        const left       = b.x0 * scale
+        const top        = b.y0 * scale
+        const width      = (b.x1 - b.x0) * scale
+        const height     = (b.y1 - b.y0) * scale
+        const anchorLeft = b.x1 * scale
+        const anchorTop  = b.y1 * scale
+        return (
+          <div key={`img-${i}`}>
+            <div
+              className="absolute rounded-sm transition-opacity duration-150"
+              style={{
+                left, top, width, height,
+                background: isHovered ? 'rgba(99,102,241,0.07)' : 'transparent',
+                border: isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent',
+              }}
+            />
+            <button
+              className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
+              style={{
+                left: anchorLeft,
+                top:  anchorTop,
+                background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
+                border: '1.5px solid rgba(99,102,241,0.6)',
+                color: isHovered ? 'white' : 'rgb(79,70,229)',
+                fontSize: '8px',
+                fontWeight: 700,
+                boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                transform: isHovered
+                  ? 'translate(-100%, -100%) scale(1.15)'
+                  : 'translate(-100%, -100%)',
+              }}
+              onClick={() => onExplain(
+                img.caption_text || '',
+                [],
+                null,
+                {
+                  role: img.role || 'figure',
+                  page,
+                  bbox: img.bbox,
+                  caption_text: img.caption_text || '',
+                },
+              )}
+              onMouseEnter={() => setHoveredImgIdx(i)}
+              onMouseLeave={() => setHoveredImgIdx(null)}
+              title={`Explicar ${img.role === 'table' ? 'tabla' : 'figura'}`}
             >
               ✦
             </button>
@@ -233,7 +305,7 @@ function ParagraphOverlay({ blocks, flatBase = 0, scale, onExplain, activeParagr
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, flatBase, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
+function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloads, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
   // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
   // automáticamente cuando `width` cambia por zoom o resize.
   const [originalWidth, setOriginalWidth] = useState(null)
@@ -254,7 +326,10 @@ function PdfPage({ pageNumber, width, blocks, flatBase, onExplain, activeParagra
       />
       <ParagraphOverlay
         blocks={blocks}
+        images={images}
+        page={pageNumber}
         flatBase={flatBase}
+        chainPayloads={chainPayloads}
         scale={scale}
         onExplain={onExplain}
         activeParagraph={activeParagraph}
@@ -651,6 +726,17 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
   const blocksMap = pages
     ? Object.fromEntries(pages.map(p => [p.page, p.blocks]))
     : {}
+  const imagesMap = pages
+    ? Object.fromEntries(pages.map(p => [p.page, p.images ?? []]))
+    : {}
+  // Chain payloads computed over the flat across-pages block list so a
+  // continuation chain that crosses a page boundary still resolves. Indexed
+  // by flat block ref (page-cumulative position in pages[*].blocks) — same
+  // index ParagraphOverlay uses via `flatBase + i`.
+  const paginatedChainPayloads = useMemo(() => {
+    const flat = (pages ?? []).flatMap(p => p.blocks ?? [])
+    return buildContinuationPayloads(flat)
+  }, [pages])
 
   const currentStopData = tracking ? readingSequence[currentStop] : null
 
@@ -772,7 +858,9 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
                   pageNumber={i + 1}
                   width={pageWidth}
                   blocks={blocksMap[i + 1]}
+                  images={imagesMap[i + 1]}
                   flatBase={flatBaseByPage[i + 1] ?? 0}
+                  chainPayloads={paginatedChainPayloads}
                   onExplain={onExplain}
                   activeParagraph={activeParagraph}
                   currentExplanation={currentExplanation}

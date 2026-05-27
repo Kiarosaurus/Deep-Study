@@ -95,3 +95,63 @@ export function resolveSentenceIndices(sentences, item) {
   // Tier 4
   return cleanIndices
 }
+
+
+// Groups paragraph blocks into continuation chains. Walks `blocks` left-to-
+// right; for each block with role==='paragraph', if continuation===true and a
+// chain is already open, append to it; otherwise close the previous chain
+// (flush merged payload) and open a new one with this block as head. Non-
+// paragraph blocks (caption, equation, figure, table, code, list, section_
+// header, title, author) are TRANSPARENT — they neither break nor extend the
+// chain. This mirrors the post-pass bridging in `_merge_continuations_linear`
+// / `_merge_continuations_pages` so the frontend chain reflects the same set
+// of merges the backend marked with `continuation=True`.
+//
+// Returns an array same length as `blocks`. Each entry is either:
+//   - null (non-paragraph block), or
+//   - { text, sentences, offset } where text/sentences are the MERGED chain
+//     payload (every block in the chain shares the same reference) and offset
+//     is how many sentences from earlier chain members precede this block —
+//     used at render time to translate merged-array indices back into this
+//     block's own sentence array for per-block highlighting.
+export function buildContinuationPayloads(blocks) {
+  const out = new Array(blocks.length).fill(null)
+  let chainIdxs = []
+
+  const flush = () => {
+    if (chainIdxs.length === 0) return
+    if (chainIdxs.length === 1) {
+      const b = blocks[chainIdxs[0]]
+      out[chainIdxs[0]] = { text: b.text ?? '', sentences: b.sentences ?? [], offset: 0 }
+    } else {
+      const head = blocks[chainIdxs[0]]
+      let text = head.text ?? ''
+      const sentences = [...(head.sentences ?? [])]
+      const offsets = [0]
+      for (let k = 1; k < chainIdxs.length; k++) {
+        offsets.push(sentences.length)
+        const t   = text.replace(/\s+$/, '')
+        const nxt = (blocks[chainIdxs[k]].text ?? '').replace(/^\s+/, '')
+        text = /[-—¬]$/.test(t) ? t.slice(0, -1) + nxt : t + ' ' + nxt
+        sentences.push(...(blocks[chainIdxs[k]].sentences ?? []))
+      }
+      for (let k = 0; k < chainIdxs.length; k++) {
+        out[chainIdxs[k]] = { text, sentences, offset: offsets[k] }
+      }
+    }
+    chainIdxs = []
+  }
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]
+    if (b?.role !== 'paragraph') continue
+    if (b.continuation && chainIdxs.length > 0) {
+      chainIdxs.push(i)
+    } else {
+      flush()
+      chainIdxs = [i]
+    }
+  }
+  flush()
+  return out
+}
