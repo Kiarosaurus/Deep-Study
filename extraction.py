@@ -217,6 +217,42 @@ def _is_continuation(prev_text: str, new_text: str) -> bool:
     return first.isalpha() and first.islower()
 
 
+# Roles that are decorative inserts between paragraphs (do not break the
+# continuation chain in the linear projection).
+_LINEAR_TRANSPARENT_ROLES = frozenset({"caption", "equation"})
+
+
+def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
+    """Post-pass over the per-page projection. Marks any block whose predecessor
+    ends without terminal punctuation and whose own text starts in lowercase
+    as continuation=True. Walks across page boundaries so intra-page and cross-
+    page cases are handled uniformly (the live extraction only flags cross-page)."""
+    prev_text = ""
+    for p in pages:
+        for b in p.blocks:
+            if prev_text and _is_continuation(prev_text, b.text):
+                b.continuation = True
+            prev_text = b.text
+
+
+def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
+    """Post-pass over the linear projection. Same rule as `_merge_continuations_
+    pages` but role-aware: only paragraph→paragraph pairs are eligible; captions
+    and equations are treated as decorative inserts that don't break the chain;
+    every other role (section_header, title, figure, table, code, list, author)
+    resets it."""
+    prev_para_text = ""
+    for b in linear_blocks:
+        if b.role == "paragraph":
+            if prev_para_text and _is_continuation(prev_para_text, b.text):
+                b.continuation = True
+            prev_para_text = b.text
+        elif b.role in _LINEAR_TRANSPARENT_ROLES:
+            continue
+        else:
+            prev_para_text = ""
+
+
 # ── Sentence segmentation ────────────────────────────────────────────────────
 _SENT_BOUNDARY_RE = re.compile(r'(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¿¡"\(])')
 
@@ -489,7 +525,9 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
 def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
-    return _extract_pages_from_document(document)
+    pages = _extract_pages_from_document(document)
+    _merge_continuations_pages(pages)
+    return pages
 
 
 # ── Linear (global reading-order) extraction ─────────────────────────────────
@@ -674,7 +712,9 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
 def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes)
-    return _extract_linear_from_document(document)
+    blocks = _extract_linear_from_document(document)
+    _merge_continuations_linear(blocks)
+    return blocks
 
 
 def extract_both(
@@ -688,7 +728,8 @@ def extract_both(
     """
     document = _run_marker(pdf_bytes)
     line_cache: dict[int, list[LineBlock]] = {}
-    return (
-        _extract_pages_from_document(document, line_cache),
-        _extract_linear_from_document(document, line_cache),
-    )
+    pages  = _extract_pages_from_document(document, line_cache)
+    linear = _extract_linear_from_document(document, line_cache)
+    _merge_continuations_pages(pages)
+    _merge_continuations_linear(linear)
+    return pages, linear
