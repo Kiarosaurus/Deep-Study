@@ -537,7 +537,7 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tracking, currentStop, readingSequence, userZoom, containerWidth])
 
-  // Hijack wheel + teclado en tracking mode
+  // Teclado en tracking mode. Wheel = scroll nativo (sin intercepción).
   useEffect(() => {
     if (!tracking) return
     const node = containerRef.current
@@ -551,27 +551,26 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
       setCurrentStop(s => Math.max(0, Math.min(readingSequence.length - 1, s + delta)))
     }
 
-    function onWheel(e) {
-      e.preventDefault()
-      if (e.deltaY > 0) step(1)
-      else if (e.deltaY < 0) step(-1)
-    }
     function onKey(e) {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
-      if (e.key === 'ArrowDown' || e.key === ' ' || e.key === 'PageDown') {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        node.scrollBy({ top: node.clientHeight * 0.4, behavior: 'smooth' })
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        node.scrollBy({ top: -node.clientHeight * 0.4, behavior: 'smooth' })
+      } else if (e.key === ' ' || e.key === 'PageDown') {
         e.preventDefault(); step(1)
-      } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+      } else if (e.key === 'PageUp') {
         e.preventDefault(); step(-1)
       } else if (e.key === 'Escape') {
         setTracking(false)
       }
     }
 
-    node.addEventListener('wheel', onWheel, { passive: false })
     window.addEventListener('keydown', onKey)
     return () => {
-      node.removeEventListener('wheel', onWheel)
       window.removeEventListener('keydown', onKey)
     }
   }, [tracking, readingSequence.length])
