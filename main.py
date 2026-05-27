@@ -1,7 +1,9 @@
+import io
 import json
 import os
 from pathlib import Path
 
+import pypdfium2 as pdfium
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -132,6 +134,94 @@ _EXPLAIN_CONFIG = types.GenerateContentConfig(
     response_schema=ExplainResponse,
     max_output_tokens=10240,
 )
+
+
+FIGURE_EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás una IMAGEN (figura o tabla extraída de un paper científico), opcionalmente su pie de figura/tabla, y el Mapa Global del documento.
+
+Debes producir DOS salidas en el MISMO JSON:
+
+═══════════════════════════════════════════════════════════
+PARTE A — "sentence_explanations" (CONCEPTOS DE LA IMAGEN)
+═══════════════════════════════════════════════════════════
+
+Identifica entre 2 y 6 ELEMENTOS VISUALES o CONCEPTOS TÉCNICOS clave que aparecen en la imagen (ejes, etiquetas, símbolos, escalas de color, métricas, valores numéricos destacados, nombres de métodos comparados, axiomas de la tabla, columnas/filas relevantes, anotaciones, regiones resaltadas, etc.).
+
+Por cada uno, devuelve UN objeto con:
+
+1. "sentence_indices": SIEMPRE [0] (la imagen es una sola unidad — no hay segmentación por oraciones).
+
+2. "quote": Fragmento textual EXACTO del pie de figura/tabla (si existe) que ancla este concepto. Si el concepto no está mencionado literalmente en el pie, devuelve "" (cadena vacía).
+
+3. "concepts": Lista con UN solo elemento:
+   - "term": Nombre del elemento visual o concepto (p. ej. "Eje X: SNR (dB)", "Diagonal de la matriz de confusión", "Línea azul: método propuesto", "Color: cohesión del cluster").
+   - "explanation": Análisis VERBOSO en español que explique QUÉ ES ese elemento y especialmente POR QUÉ ES IMPORTANTE conocerlo para entender la imagen. Debe quedar absolutamente claro qué aporta a la lectura visual de la figura/tabla. Aporta background teórico cuando ayude. 3 a 6 oraciones largas y descriptivas.
+
+═══════════════════════════════════════════════════════════
+PARTE B — "paragraph_context" (INTERPRETACIÓN DE LA IMAGEN)
+═══════════════════════════════════════════════════════════
+
+Interpreta la imagen como un todo — no describas oración por oración el pie de figura.
+
+1. "section_role": UNA línea (máximo 14 palabras) etiquetando QUÉ MUESTRA la figura o tabla y cómo encaja en la narrativa del paper. Ejemplos: "Compara baseline vs. método propuesto sobre conjunto de pruebas", "Visualiza arquitectura del modelo de extremo a extremo", "Muestra distribución de errores en función de SNR".
+
+2. "narrative": 3 a 5 oraciones interpretando la imagen. Responde: ¿Qué patrón visual destaca? ¿Qué conclusión quiere transmitir el autor mostrándola? ¿Cómo soporta el argumento del paper? ¿Qué debe captar el lector al primer vistazo? NO te limites a describir lo obvio: interpreta la intención.
+
+═══════════════════════════════════════════════════════════
+SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
+
+
+_FIGURE_EXPLAIN_CONFIG = types.GenerateContentConfig(
+    system_instruction=FIGURE_EXPLAIN_PROMPT,
+    response_mime_type="application/json",
+    response_schema=ExplainResponse,
+    max_output_tokens=10240,
+)
+
+
+def _render_pdf_crop(pdf_path: Path, page_idx0: int, bbox: dict, scale: float = 2.0) -> bytes:
+    """Render page `page_idx0` (0-based) of `pdf_path` at `scale`, crop to bbox
+    (PDF-point coordinates, top-left origin — same convention Marker uses), and
+    return PNG bytes. Used by the figure/table explain branch."""
+    pdf = pdfium.PdfDocument(str(pdf_path))
+    try:
+        page = pdf[page_idx0]
+        bitmap = page.render(scale=scale)
+        img = bitmap.to_pil()
+        w, h = img.size
+        box = (
+            max(0, int(bbox["x0"] * scale)),
+            max(0, int(bbox["y0"] * scale)),
+            min(w, int(bbox["x1"] * scale)),
+            min(h, int(bbox["y1"] * scale)),
+        )
+        if box[2] <= box[0] or box[3] <= box[1]:
+            raise ValueError(f"Invalid crop box after scaling: {box}")
+        crop = img.crop(box)
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        return buf.getvalue()
+    finally:
+        pdf.close()
+
+
+def _generate_json_multimodal(
+    model: str, parts: list, config: types.GenerateContentConfig
+) -> dict:
+    """Same envelope as `_generate_json` but accepts a list of Part objects
+    (mix of image inline_data and text) instead of a string."""
+    contents = [types.Content(role="user", parts=parts)]
+    response = _client.models.generate_content(model=model, contents=contents, config=config)
+    candidate = response.candidates[0] if response.candidates else None
+    finish = getattr(candidate, "finish_reason", None)
+    text = response.text
+    if not text:
+        raise RuntimeError(f"Empty response (finish_reason={finish})")
+    if finish and str(finish).rsplit(".", 1)[-1] not in ("STOP", "1"):
+        raise RuntimeError(f"Response truncated (finish_reason={finish}, bytes={len(text)})")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON (finish_reason={finish}): {e}")
 
 
 def _generate_json(model: str, contents: str, config: types.GenerateContentConfig) -> dict:
@@ -298,6 +388,9 @@ async def upload_pdf(
 
 @app.post("/explain-paragraph/")
 async def explain_paragraph(req: ExplainRequest):
+    if req.block_type in ("figure", "table"):
+        return _explain_figure(req)
+
     if not req.paragraph_sentences:
         raise HTTPException(status_code=400, detail="paragraph_sentences is empty")
 
@@ -308,5 +401,39 @@ async def explain_paragraph(req: ExplainRequest):
     )
     try:
         return _generate_json(_EXPLAIN_MODEL, prompt, _EXPLAIN_CONFIG)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
+
+
+def _explain_figure(req: ExplainRequest) -> dict:
+    if not req.filename or req.page is None or req.bbox is None:
+        raise HTTPException(
+            status_code=400,
+            detail="figure/table explain requires filename, page and bbox",
+        )
+    pdf_path = UPLOADS_DIR / req.filename
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail="Source PDF not found")
+    try:
+        png_bytes = _render_pdf_crop(
+            pdf_path,
+            page_idx0=req.page - 1,
+            bbox=req.bbox.model_dump(),
+            scale=2.0,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not rasterize figure: {str(e)}")
+
+    text_prompt = (
+        f"Mapa Global del paper:\n{json.dumps(req.global_map, ensure_ascii=False)}"
+        f"\n\nTipo de bloque: {req.block_type}"
+        f"\nPie ({'figura' if req.block_type == 'figure' else 'tabla'}):\n{req.caption_text or '(sin pie)'}"
+    )
+    parts = [
+        types.Part(inline_data=types.Blob(mime_type="image/png", data=png_bytes)),
+        types.Part(text=text_prompt),
+    ]
+    try:
+        return _generate_json_multimodal(_EXPLAIN_MODEL, parts, _FIGURE_EXPLAIN_CONFIG)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")

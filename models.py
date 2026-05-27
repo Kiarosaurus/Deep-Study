@@ -82,6 +82,12 @@ class FullBlock(BaseModel):
     # (same heuristic as ParagraphBlock.continuation). Lets the linear reader
     # render N-1 and N visually contiguous and merge them for explain payloads.
     continuation: bool = False
+    # Populated for figure/table blocks when a following caption (Marker-tagged
+    # Caption role or paragraph that begins with "Figure N" / "Table N" / etc.)
+    # was merged into this block by `_merge_figure_captions_linear`. Frontend
+    # renders the caption beneath the image and uses these for the explain flow.
+    caption_text: str = ""
+    caption_bbox: BBox | None = None
 
 
 class UploadResponse(BaseModel):
@@ -99,8 +105,17 @@ class DocumentInfo(BaseModel):
 
 
 class ExplainRequest(BaseModel):
-    paragraph_sentences: list[str]
+    paragraph_sentences: list[str] = []
     global_map: dict
+    # Fields below are only meaningful when block_type != "paragraph". For a
+    # figure/table the backend rasterizes the bbox of the source PDF, sends
+    # the image to Gemini multimodal, and uses caption_text as accompanying
+    # context.
+    block_type: Literal["paragraph", "figure", "table"] = "paragraph"
+    filename: str | None = None
+    page: int | None = None
+    bbox: BBox | None = None
+    caption_text: str = ""
 
 
 class ConceptExplanation(BaseModel):

@@ -26,29 +26,42 @@ async function postExplainWithRetry(payload, onRetry, maxAttempts = 3) {
   throw lastErr
 }
 
-function explainCacheKey(filename, text) {
+function djb2(s) {
   let h = 5381
-  for (let i = 0; i < text.length; i++) h = ((h << 5) + h) ^ text.charCodeAt(i)
-  return `deepstudy:explain:${filename}:${(h >>> 0).toString(36)}`
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i)
+  return (h >>> 0).toString(36)
 }
 
-function readCachedExplanation(filename, text, memCache) {
-  if (memCache.has(text)) return memCache.get(text)
+function explainCacheKey(filename, text, opts = {}) {
+  // Figures/tables have no representative text — key on role+page+bbox so a
+  // recropped or relocated figure invalidates correctly.
+  if (opts.role === 'figure' || opts.role === 'table') {
+    const b = opts.bbox || {}
+    const tag = `${opts.role}:${opts.page}:${b.x0},${b.y0},${b.x1},${b.y1}`
+    return `deepstudy:explain:${filename}:${djb2(tag)}`
+  }
+  return `deepstudy:explain:${filename}:${djb2(text)}`
+}
+
+function readCachedExplanation(filename, text, memCache, opts = {}) {
+  const key = explainCacheKey(filename, text, opts)
+  if (memCache.has(key)) return memCache.get(key)
   try {
-    const raw = localStorage.getItem(explainCacheKey(filename, text))
+    const raw = localStorage.getItem(key)
     if (!raw) return null
     const parsed = JSON.parse(raw)
-    memCache.set(text, parsed)
+    memCache.set(key, parsed)
     return parsed
   } catch {
     return null
   }
 }
 
-function writeCachedExplanation(filename, text, data, memCache) {
-  memCache.set(text, data)
+function writeCachedExplanation(filename, text, data, memCache, opts = {}) {
+  const key = explainCacheKey(filename, text, opts)
+  memCache.set(key, data)
   try {
-    localStorage.setItem(explainCacheKey(filename, text), JSON.stringify(data))
+    localStorage.setItem(key, JSON.stringify(data))
   } catch {
     // localStorage full or unavailable — ignore, mem cache still holds it
   }
@@ -141,12 +154,14 @@ export default function Reader() {
     [linearBlocks]
   )
 
-  const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, initialIndex = 0) => {
+  const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
+    const { initialIndex = 0, role, page, bbox, caption_text } = opts
     setActiveParagraph({ text, flatBlockRef })
     setCurrentIndex(initialIndex)
 
-    const cached = readCachedExplanation(decoded, text, explanationsCache.current)
+    const cacheOpts = { role, page, bbox }
+    const cached = readCachedExplanation(decoded, text, explanationsCache.current, cacheOpts)
     if (cached) {
       setErrorExplain(null)
       setRetryInfo(null)
@@ -158,15 +173,27 @@ export default function Reader() {
     setErrorExplain(null)
     setRetryInfo(null)
     try {
+      const isFigure = role === 'figure' || role === 'table'
+      const payload = isFigure
+        ? {
+            paragraph_sentences: [],
+            global_map: analysis.global_map,
+            block_type: role,
+            filename: decoded,
+            page,
+            bbox,
+            caption_text: caption_text || '',
+          }
+        : {
+            paragraph_sentences: (sentences ?? []).map(s => s.text),
+            global_map: analysis.global_map,
+          }
       const data = await postExplainWithRetry(
-        {
-          paragraph_sentences: (sentences ?? []).map(s => s.text),
-          global_map: analysis.global_map,
-        },
+        payload,
         (attempt, maxAttempts, delayMs) =>
           setRetryInfo({ attempt, maxAttempts, delayMs }),
       )
-      writeCachedExplanation(decoded, text, data, explanationsCache.current)
+      writeCachedExplanation(decoded, text, data, explanationsCache.current, cacheOpts)
       setExplanation(data)
     } catch (err) {
       setErrorExplain(buildExplainError(err))
@@ -196,7 +223,7 @@ export default function Reader() {
         // If no explanation is loaded, jump to the first paragraph's explanation
         if (!hasExplanation && paragraphList[0]) {
           const first = paragraphList[0]
-          handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+          handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
           setTab('explain')
           setExplainMode('contexto')
           uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
@@ -239,7 +266,7 @@ export default function Reader() {
           if (paragraphList[0]) {
             e.preventDefault()
             const first = paragraphList[0]
-            handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+            handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
           }
           return
         }
@@ -252,7 +279,7 @@ export default function Reader() {
             b => b.flat_block_ref === activeParagraph?.flatBlockRef
           )
           const next = paragraphList[curParaIdx + 1]
-          if (next) handleExplain(next.text, next.sentences, next.flat_block_ref, 0)
+          if (next) handleExplain(next.text, next.sentences, next.flat_block_ref, { initialIndex: 0 })
         }
       }
 
@@ -262,7 +289,7 @@ export default function Reader() {
           if (paragraphList[0]) {
             e.preventDefault()
             const first = paragraphList[0]
-            handleExplain(first.text, first.sentences, first.flat_block_ref, 0)
+            handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
           }
           return
         }
@@ -277,7 +304,7 @@ export default function Reader() {
           const prev = paragraphList[curParaIdx - 1]
           if (prev) {
             const lastIdx = Math.max(0, (prev.sentences?.length || 1) - 1)
-            handleExplain(prev.text, prev.sentences, prev.flat_block_ref, lastIdx)
+            handleExplain(prev.text, prev.sentences, prev.flat_block_ref, { initialIndex: lastIdx })
           }
         }
       }

@@ -376,9 +376,11 @@ const BlockCrop = memo(function BlockCrop({
   }, [visible, srcCanvas, canvasWidth, displayHeight, bbox.x0, inflatedY0, bbW, bbH])
 
   const isRendered    = visible && !!srcCanvas
-  const isInteractive = isRendered
-    && block.role === 'paragraph'
-    && (block.sentences?.length ?? 0) > 0
+  const isFigure      = block.role === 'figure' || block.role === 'table'
+  const isInteractive = isRendered && (
+    (block.role === 'paragraph' && (block.sentences?.length ?? 0) > 0)
+    || isFigure
+  )
   // Cross-page chain merged text/sentences (cache-key + Gemini payload). For
   // non-paragraph roles we fall back to block.text so the active check on
   // those still degrades gracefully (it never matches anyway). `offset` is
@@ -438,12 +440,18 @@ const BlockCrop = memo(function BlockCrop({
 
   let anchor = null
   if (isInteractive) {
-    const lastSent = block.sentences[block.sentences.length - 1]
-    const lastBox  = lastSent?.boxes?.[lastSent.boxes.length - 1]
-    if (lastBox) {
-      anchor = {
-        left: (lastBox.x1 - bbox.x0) * bboxScale,
-        top:  (lastBox.y1 - inflatedY0) * bboxScale,
+    if (isFigure) {
+      // Figures/tables: anchor at the bottom-right corner of the rendered
+      // canvas (no sentence geometry to anchor to).
+      anchor = { left: canvasWidth, top: displayHeight }
+    } else {
+      const lastSent = block.sentences[block.sentences.length - 1]
+      const lastBox  = lastSent?.boxes?.[lastSent.boxes.length - 1]
+      if (lastBox) {
+        anchor = {
+          left: (lastBox.x1 - bbox.x0) * bboxScale,
+          top:  (lastBox.y1 - inflatedY0) * bboxScale,
+        }
       }
     }
   }
@@ -533,12 +541,28 @@ const BlockCrop = memo(function BlockCrop({
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain?.(
-                payload.text,
-                payload.sentences,
-                block.flat_block_ref ?? block.paragraph_ref ?? null,
-              )}
-              title="Explicar párrafo"
+              onClick={() => {
+                if (isFigure) {
+                  onExplain?.(
+                    block.caption_text || '',
+                    [],
+                    block.flat_block_ref ?? null,
+                    {
+                      role: block.role,
+                      page: block.page,
+                      bbox: block.bbox,
+                      caption_text: block.caption_text || '',
+                    },
+                  )
+                } else {
+                  onExplain?.(
+                    payload.text,
+                    payload.sentences,
+                    block.flat_block_ref ?? block.paragraph_ref ?? null,
+                  )
+                }
+              }}
+              title={isFigure ? `Explicar ${block.role === 'table' ? 'tabla' : 'figura'}` : 'Explicar párrafo'}
             >
               ✦
             </button>

@@ -221,6 +221,15 @@ def _is_continuation(prev_text: str, new_text: str) -> bool:
 # continuation chain in the linear projection).
 _LINEAR_TRANSPARENT_ROLES = frozenset({"caption", "equation"})
 
+# Caption-like opener heuristic: catches paragraphs Marker missed tagging as
+# Caption but that clearly belong to a preceding figure/table/image, e.g.
+# "Figure 3: Architecture overview", "Table II. Results", "Fig 4 ...".
+_CAPTION_LIKE_RE = re.compile(
+    r"^(?:figure|fig\.?|table|tab\.?|image|img\.?)\s*"
+    r"(?:[IVXLCDM]+|\d+)",
+    re.IGNORECASE,
+)
+
 
 def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
     """Post-pass over the per-page projection. Marks any block whose predecessor
@@ -233,6 +242,54 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
             if prev_text and _is_continuation(prev_text, b.text):
                 b.continuation = True
             prev_text = b.text
+
+
+def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
+    """Merge each figure/table with its caption (the following block) into one
+    unit. The caption may be Marker-tagged with role='caption' OR a paragraph
+    whose text starts with 'Figure N', 'Table N', 'Image N', 'Fig. N', etc.
+
+    Returns a new list with the caption block removed and its text/bbox stored
+    on the figure block as `caption_text` / `caption_bbox`. Reading_index of
+    surviving blocks stays untouched (it's a hint, not a tight invariant)."""
+    merged: list[FullBlock] = []
+    skip_next = False
+    for i, b in enumerate(blocks):
+        if skip_next:
+            skip_next = False
+            continue
+        if b.role in ("figure", "table") and i + 1 < len(blocks):
+            nxt = blocks[i + 1]
+            is_caption = nxt.role == "caption"
+            is_caption_like = (
+                nxt.role == "paragraph"
+                and bool(_CAPTION_LIKE_RE.match((nxt.text or "").lstrip()))
+            )
+            if is_caption or is_caption_like:
+                b.caption_text = nxt.text
+                b.caption_bbox = nxt.bbox
+                # Expand the block's primary bbox to the union of figure +
+                # caption so a single canvas crop on the frontend renders
+                # both visually (preserves the caption font/formatting that
+                # the rasterizer pulls straight from the PDF). The original
+                # image-only bbox is no longer kept — explain raster also
+                # uses this union so Gemini sees the caption alongside.
+                b.bbox = BBox(
+                    x0=min(b.bbox.x0, nxt.bbox.x0),
+                    y0=min(b.bbox.y0, nxt.bbox.y0),
+                    x1=max(b.bbox.x1, nxt.bbox.x1),
+                    y1=max(b.bbox.y1, nxt.bbox.y1),
+                )
+                # Adopt the caption's sentence geometry so the explain UI can
+                # still highlight per-sentence quotes when explaining the
+                # figure (the model produces concept quotes from caption text).
+                if nxt.sentences:
+                    b.sentences = nxt.sentences
+                merged.append(b)
+                skip_next = True
+                continue
+        merged.append(b)
+    return merged
 
 
 def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
@@ -713,6 +770,7 @@ def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes)
     blocks = _extract_linear_from_document(document)
+    blocks = _merge_figure_captions_linear(blocks)
     _merge_continuations_linear(blocks)
     return blocks
 
@@ -730,6 +788,7 @@ def extract_both(
     line_cache: dict[int, list[LineBlock]] = {}
     pages  = _extract_pages_from_document(document, line_cache)
     linear = _extract_linear_from_document(document, line_cache)
+    linear = _merge_figure_captions_linear(linear)
     _merge_continuations_pages(pages)
     _merge_continuations_linear(linear)
     return pages, linear
