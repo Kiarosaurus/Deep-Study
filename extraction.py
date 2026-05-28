@@ -56,21 +56,56 @@ from models import (
 
 # ── Marker singleton ─────────────────────────────────────────────────────────
 _marker_converter = None
+_marker_converter_config_key: tuple | None = None
 _marker_lock = Lock()
 
 
-def _get_converter():
-    global _marker_converter
+def _get_converter(*, disable_ocr: bool = False):
+    """Marker converter cached per (disable_ocr,) config.
+
+    When `disable_ocr=True`, Surya recognition is skipped and the PDF's native
+    text layer is used directly. This is ~50-200× faster than running the OCR
+    transformer and is safe for any PDF whose `extract_text()` returns content
+    on every page (typical for ACM/IEEE papers).
+    """
+    global _marker_converter, _marker_converter_config_key
+    key = (bool(disable_ocr),)
     with _marker_lock:
-        if _marker_converter is None:
+        if _marker_converter is None or _marker_converter_config_key != key:
             from marker.converters.pdf import PdfConverter
             from marker.models import create_model_dict
 
+            cfg = {"disable_image_extraction": True}
+            if disable_ocr:
+                cfg["disable_ocr"] = True
+                cfg["force_ocr"] = False
             _marker_converter = PdfConverter(
                 artifact_dict=create_model_dict(),
-                config={"disable_image_extraction": True},
+                config=cfg,
             )
+            _marker_converter_config_key = key
         return _marker_converter
+
+
+def has_native_text_layer(pdf_bytes: bytes, *, min_chars_per_page: int = 50) -> bool:
+    """True if every page of the PDF has an embedded text layer above the
+    threshold. Used to skip Surya OCR entirely on text-native PDFs.
+
+    Returns False on the first page that lacks text or on any read error —
+    conservative: if in doubt, run the full OCR pipeline.
+    """
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            if doc.page_count == 0:
+                return False
+            for page in doc:
+                text = page.get_text("text") or ""
+                if len(text.strip()) < min_chars_per_page:
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 # ── Block-type buckets ───────────────────────────────────────────────────────
@@ -740,13 +775,13 @@ def _iter_layout_blocks(page):
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
-def _run_marker(pdf_bytes: bytes):
+def _run_marker(pdf_bytes: bytes, *, disable_ocr: bool = False):
     """Write pdf_bytes to a tmp file, build a Marker Document, clean up."""
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(pdf_bytes)
         tmp_path = tmp.name
     try:
-        converter = _get_converter()
+        converter = _get_converter(disable_ocr=disable_ocr)
         return converter.build_document(tmp_path)
     finally:
         try:
@@ -1067,9 +1102,9 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
     return output
 
 
-def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
+def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
-    document = _run_marker(pdf_bytes)
+    document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     blocks = _extract_linear_from_document(document)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
@@ -1079,14 +1114,20 @@ def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
 
 def extract_both(
     pdf_bytes: bytes,
+    *,
+    disable_ocr: bool = False,
 ) -> tuple[list[PageBlocks], list[FullBlock]]:
     """Run Marker once; return both the per-page and linear projections.
 
     Both pipelines walk the same blocks and need their line geometry, so a
     shared `line_cache` (keyed by `id(block)`) is threaded through to halve
     the line-collection work.
+
+    `disable_ocr=True` skips Surya text-recognition entirely and uses the
+    PDF's native text layer. Set this when the caller has already verified
+    the PDF is text-native (e.g. via `has_native_text_layer`).
     """
-    document = _run_marker(pdf_bytes)
+    document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     line_cache: dict[int, list[LineBlock]] = {}
     pages  = _extract_pages_from_document(document, line_cache)
     linear = _extract_linear_from_document(document, line_cache)

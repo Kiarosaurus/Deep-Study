@@ -31,10 +31,11 @@ def _set_batch_env(batch: int, device: str | None) -> None:
     """
     from batch_planner import env_overrides_for_batch
 
-    for key, value in env_overrides_for_batch(batch).items():
-        os.environ[key] = value
+    for key, value in env_overrides_for_batch(batch, device=device).items():
+        os.environ.setdefault(key, value)
     if device:
         os.environ["TORCH_DEVICE"] = device
+        os.environ["TORCH_DEVICE_MODEL"] = device
 
 
 def _write_status(path: str | None, payload: dict) -> None:
@@ -59,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=("cuda", "mps", "cpu"),
         help="Override torch device. Default: let torch decide.",
     )
+    parser.add_argument(
+        "--disable-ocr",
+        action="store_true",
+        help="Skip Surya OCR; use the PDF's native text layer.",
+    )
     # Back-compat alias kept so older callers passing --cpu still work.
     parser.add_argument("--cpu", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -81,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with open(args.pdf, "rb") as f:
             pdf_bytes = f.read()
-        pages, linear = extract_both(pdf_bytes)
+        pages, linear = extract_both(pdf_bytes, disable_ocr=args.disable_ocr)
         payload = {
             "pages": [p.model_dump() for p in pages],
             "linear": [b.model_dump() for b in linear],
@@ -92,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             "ok": True,
             "batch": args.batch,
             "device": device,
+            "disable_ocr": bool(args.disable_ocr),
         })
         return 0
     except MemoryError:
@@ -109,10 +116,18 @@ def main(argv: list[str] | None = None) -> int:
         # substring as a defensive fallback.
         cls_name = type(e).__name__
         msg = str(e)
+        # AcceleratorError "CUDA error: unknown error" surfaces from surya's
+        # KV-cache prefill on small GPUs when the driver kills the kernel
+        # mid-decode — functionally an OOM. Treat it as cuda_oom so the parent
+        # falls back to CPU instead of bailing as an unrecoverable error.
         is_cuda_oom = (
-            cls_name in ("OutOfMemoryError", "CUDAOutOfMemoryError")
+            cls_name in ("OutOfMemoryError", "CUDAOutOfMemoryError", "AcceleratorError")
             or "CUDA out of memory" in msg
             or "CUDA error: out of memory" in msg
+            or "CUDA error: unknown error" in msg
+            or "cudaErrorUnknown" in msg
+            or "CUBLAS_STATUS_ALLOC_FAILED" in msg
+            or "CUDNN_STATUS_NOT_INITIALIZED" in msg
         )
         _write_status(args.status, {
             "ok": False,

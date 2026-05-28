@@ -233,24 +233,38 @@ def compute_chunk_fallback_tiers(initial: int, n_pages: int) -> list[int]:
     return tiers
 
 
-def env_overrides_for_batch(batch: int) -> dict[str, str]:
+def env_overrides_for_batch(batch: int, *, device: str | None = None) -> dict[str, str]:
     """Env vars consumed by Marker/Surya at model-init time. Must be set BEFORE
     `import marker` happens in the target process.
+
+    Recognition (Surya text-line autoregressive decoder) is the dominant peak:
+    each line spawns a KV cache scaled by RECOGNITION_BATCH_SIZE. Holding it
+    proportional to the outer batch wastes VRAM on small GPUs and causes the
+    CUDA prefill-update OOM seen on 6 GB devices. Cap recognition tighter than
+    the outer batch and force fp16 by default.
 
     Names are defensive: we set both bare and `SURYA_`-prefixed variants
     because newer Surya versions migrated some of the names.
     """
     b = str(max(1, batch))
+    # Recognition cap — autoregressive decode dominates peak VRAM.
+    recog_cap = 2 if device == "cuda" else 1
+    rb = str(min(max(1, batch), recog_cap))
+    detector = str(min(max(1, batch), 2))
     return {
-        "RECOGNITION_BATCH_SIZE": b,
-        "DETECTOR_BATCH_SIZE": b,
-        "LAYOUT_BATCH_SIZE": b,
+        "RECOGNITION_BATCH_SIZE": rb,
+        "DETECTOR_BATCH_SIZE": detector,
+        "LAYOUT_BATCH_SIZE": detector,
         "ORDER_BATCH_SIZE": b,
-        "TEXIFY_BATCH_SIZE": b,
-        "TABLE_REC_BATCH_SIZE": b,
-        "OCR_ERROR_BATCH_SIZE": b,
-        "SURYA_RECOGNITION_BATCH_SIZE": b,
-        "SURYA_DETECTOR_BATCH_SIZE": b,
-        "SURYA_LAYOUT_BATCH_SIZE": b,
+        "TEXIFY_BATCH_SIZE": rb,
+        "TABLE_REC_BATCH_SIZE": detector,
+        "OCR_ERROR_BATCH_SIZE": detector,
+        "SURYA_RECOGNITION_BATCH_SIZE": rb,
+        "SURYA_DETECTOR_BATCH_SIZE": detector,
+        "SURYA_LAYOUT_BATCH_SIZE": detector,
         "SURYA_ORDER_BATCH_SIZE": b,
+        "MODEL_DTYPE": "float16" if device == "cuda" else "float32",
+        "TORCH_DTYPE": "float16" if device == "cuda" else "float32",
+        "SURYA_MODEL_DTYPE": "float16" if device == "cuda" else "float32",
+        "PDFTEXT_CPU_WORKERS": "1",
     }

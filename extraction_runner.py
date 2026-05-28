@@ -32,6 +32,7 @@ GPU vs CPU OOM are distinguished by child exit code (138 vs 137) and the
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -56,20 +57,26 @@ from runtime_metrics import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+# Tail of subprocess stderr we keep for diagnostics. Bounded so we don't
+# blow up logs / status payloads with multi-MB tracebacks.
+_STDERR_TAIL_CHARS = 4000
+
+
 class ExtractionFailed(RuntimeError):
     """Raised when every fallback tier has been exhausted."""
 
 
 def _emit(on_event, payload: dict) -> None:
-    """Fire a progress event, swallowing exceptions so a buggy listener can
-    never break extraction. Events are plain dicts; consumers (SSE, logs,
-    progress bars) decide how to render them."""
+    """Fire a progress event. Listener exceptions are logged but never
+    propagated — extraction must not die because a UI callback raised."""
     if on_event is None:
         return
     try:
         on_event(payload)
     except Exception:
-        pass
+        logger.warning("progress callback raised on payload=%r", payload, exc_info=True)
 
 
 
@@ -86,10 +93,12 @@ def _emit(on_event, payload: dict) -> None:
 # from the status file aborts retries (e.g. unparseable PDF).
 def _looks_like_oom(returncode: int, status: dict[str, Any] | None) -> bool:
     """OOM-like = retry candidate. Includes RAM OOM (137), CUDA OOM (138),
-    and any non-zero exit with no status file (likely OS hard kill)."""
+    Timeout (slow run often = memory pressure paging), HardKill (subprocess
+    died with no status file, almost always OS OOM-killer), and any non-zero
+    exit with no status file."""
     if status is not None and not status.get("ok", False):
         err = status.get("error_type", "")
-        if err in ("MemoryError", "CUDAOutOfMemoryError"):
+        if err in ("MemoryError", "CUDAOutOfMemoryError", "Timeout", "HardKill"):
             return True
         return False
     if returncode == 0:
@@ -100,9 +109,24 @@ def _looks_like_oom(returncode: int, status: dict[str, Any] | None) -> bool:
 def _is_cuda_oom(returncode: int, status: dict[str, Any] | None) -> bool:
     """Specifically a CUDA OOM — used to abandon the GPU pass early without
     further GPU retries (smaller batches usually don't help once VRAM is
-    fragmented or the model itself doesn't fit)."""
-    if status is not None and status.get("error_type") == "CUDAOutOfMemoryError":
-        return True
+    fragmented or the model itself doesn't fit).
+
+    Also matches AcceleratorError variants ("CUDA error: unknown error",
+    cudaErrorUnknown) raised by surya's KV-cache prefill on small GPUs,
+    which the driver reports as a generic kernel failure but is functionally
+    a VRAM exhaustion.
+    """
+    if status is not None:
+        if status.get("error_type") in ("CUDAOutOfMemoryError", "AcceleratorError"):
+            return True
+        msg = (status.get("error_msg") or "") + " " + (status.get("stderr_tail") or "")
+        if (
+            "CUDA error: unknown error" in msg
+            or "cudaErrorUnknown" in msg
+            or "CUDA out of memory" in msg
+            or "CUBLAS_STATUS_ALLOC_FAILED" in msg
+        ):
+            return True
     return returncode == 138
 
 
@@ -112,11 +136,17 @@ def _run_subprocess(
     *,
     device: str | None,
     timeout_s: float,
+    disable_ocr: bool = False,
 ) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
     """Run marker_worker once. Returns (returncode, status_dict, result_dict).
 
     `device` overrides the child's torch device. Pass None to let torch pick
     the default; pass 'cpu' / 'cuda' / 'mps' to force one.
+
+    On failure, the tail of child stderr is logged and injected into the
+    returned status dict (`stderr_tail`) so callers can surface real OS-level
+    causes (OOM-killer messages, CUDA driver errors, ImportError chains)
+    instead of an opaque rc.
     """
     with tempfile.TemporaryDirectory(prefix="deepstudy-extract-") as td:
         out_path = Path(td) / "out.json"
@@ -136,6 +166,13 @@ def _run_subprocess(
         ]
         if device:
             cmd.extend(["--device", device])
+        if disable_ocr:
+            cmd.append("--disable-ocr")
+        logger.info(
+            "marker_worker spawn device=%s batch=%d timeout=%.0fs pdf=%s disable_ocr=%s",
+            device, batch, timeout_s, pdf_path.name, disable_ocr,
+        )
+        stderr_text = ""
         try:
             completed = subprocess.run(
                 cmd,
@@ -145,14 +182,26 @@ def _run_subprocess(
                 stderr=subprocess.PIPE,
             )
             rc = completed.returncode
-        except subprocess.TimeoutExpired:
-            return (-1000, {"ok": False, "error_type": "Timeout"}, None)
+            stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired as e:
+            stderr_text = (e.stderr or b"").decode("utf-8", errors="replace") if e.stderr else ""
+            tail = stderr_text[-_STDERR_TAIL_CHARS:]
+            logger.warning(
+                "marker_worker TIMEOUT device=%s batch=%d after %.0fs; stderr tail:\n%s",
+                device, batch, timeout_s, tail,
+            )
+            return (
+                -1000,
+                {"ok": False, "error_type": "Timeout", "stderr_tail": tail},
+                None,
+            )
 
         status = None
         if status_path.exists():
             try:
                 status = json.loads(status_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
+                logger.warning("marker_worker wrote malformed status.json (rc=%d)", rc)
                 status = None
 
         result = None
@@ -160,7 +209,26 @@ def _run_subprocess(
             try:
                 result = json.loads(out_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
+                logger.error("marker_worker rc=0 but out.json malformed")
                 result = None
+
+        if rc != 0 or result is None:
+            tail = stderr_text[-_STDERR_TAIL_CHARS:]
+            if status is None:
+                status = {"ok": False, "error_type": "HardKill", "stderr_tail": tail}
+            else:
+                status.setdefault("stderr_tail", tail)
+            logger.warning(
+                "marker_worker FAILED device=%s batch=%d rc=%d status=%s; stderr tail:\n%s",
+                device, batch, rc,
+                {k: v for k, v in status.items() if k != "stderr_tail"},
+                tail or "(empty)",
+            )
+        else:
+            logger.info(
+                "marker_worker OK device=%s batch=%d (pdf=%s)",
+                device, batch, pdf_path.name,
+            )
         return rc, status, result
 
 
@@ -240,6 +308,7 @@ def _run_chunked(
     n_pages_total: int,
     pdf_mb_total: float,
     on_event=None,
+    disable_ocr: bool = False,
 ) -> tuple[list[PageBlocks], list[FullBlock]] | dict:
     """Run one chunked-extraction tier. Each chunk runs in its own subprocess
     at batch=1 on the given device. Returns the stitched (pages, linear) on
@@ -255,17 +324,31 @@ def _run_chunked(
         try:
             chunks = _split_pdf_into_chunks(pdf_path, chunk_size, workdir)
         except Exception as e:
+            logger.exception("chunk split failed (chunk_size=%d)", chunk_size)
             return {
                 "kind": "error",
                 "message": f"split failed: {type(e).__name__}: {e}",
             }
 
         total_chunks = len(chunks)
+        # Each chunk is a fraction of the full document, so it must finish in
+        # a fraction of the full budget — otherwise N chunks could blow N×
+        # past the caller's deadline. Floor at 60s so very small chunks still
+        # get enough wall-clock for model warmup.
+        per_chunk_timeout = max(
+            60.0,
+            timeout_s * chunk_size / max(1, n_pages_total),
+        )
+        logger.info(
+            "chunked pass device=%s chunk_size=%d total_chunks=%d per_chunk_timeout=%.0fs",
+            device, chunk_size, total_chunks, per_chunk_timeout,
+        )
         _emit(on_event, {
             "phase": "chunk_started",
             "device": device,
             "chunk_size": chunk_size,
             "total_chunks": total_chunks,
+            "per_chunk_timeout_s": round(per_chunk_timeout, 1),
             "message": f"Modo chunk activado ({chunk_size} páginas por chunk, {total_chunks} chunks)",
         })
 
@@ -283,7 +366,8 @@ def _run_chunked(
                 sub_path,
                 batch=1,
                 device=device,
-                timeout_s=timeout_s,
+                timeout_s=per_chunk_timeout,
+                disable_ocr=disable_ocr,
             )
             if rc == 0 and result is not None:
                 collected.append((result, page_offset))
@@ -329,10 +413,15 @@ def _run_chunked(
         try:
             pages, linear = _stitch_chunk_results(collected)
         except Exception as e:
+            logger.exception("chunk stitch failed (chunk_size=%d)", chunk_size)
             return {
                 "kind": "error",
                 "message": f"stitch failed: {type(e).__name__}: {e}",
             }
+        logger.info(
+            "chunked pass OK device=%s chunk_size=%d chunks=%d",
+            device, chunk_size, total_chunks,
+        )
         return pages, linear
 
 
@@ -346,6 +435,7 @@ def _run_device_pass(
     n_pages: int,
     pdf_mb: float,
     on_event=None,
+    disable_ocr: bool = False,
 ) -> tuple[list[PageBlocks], list[FullBlock]] | dict:
     """Run a full batch+chunk pass on the given device.
 
@@ -358,6 +448,10 @@ def _run_device_pass(
     """
     batch_init = pick_batch(pdf_bytes, profile, device=device)
     batch_tiers = compute_fallback_tiers(batch_init)
+    logger.info(
+        "device pass START device=%s batch_init=%d batch_tiers=%s n_pages=%d pdf_mb=%.2f",
+        device, batch_init, batch_tiers, n_pages, pdf_mb,
+    )
     _emit(on_event, {
         "phase": "device_started",
         "device": device,
@@ -384,6 +478,7 @@ def _run_device_pass(
             batch,
             device=device,
             timeout_s=timeout_s,
+            disable_ocr=disable_ocr,
         )
 
         if rc == 0 and result is not None:
@@ -470,6 +565,33 @@ def _run_device_pass(
     # Batch tiers exhausted — try chunked extraction on the same device.
     chunk_init = pick_chunk_size(pdf_bytes, profile, device=device, n_pages=n_pages)
     chunk_tiers = compute_chunk_fallback_tiers(chunk_init, n_pages)
+    logger.info(
+        "batch tiers exhausted device=%s; chunk_init=%d chunk_tiers=%s n_pages=%d",
+        device, chunk_init, chunk_tiers, n_pages,
+    )
+    if not chunk_tiers:
+        # PDF too small for chunking to be distinct from batch=1 (already
+        # tried). Surface this in the event stream so callers see *why* we
+        # skipped to the next device instead of an empty silence.
+        logger.info(
+            "chunk tier skipped device=%s — n_pages=%d too small for chunking",
+            device, n_pages,
+        )
+        _emit(on_event, {
+            "phase": "chunk_tier_skipped",
+            "device": device,
+            "n_pages": n_pages,
+            "message": (
+                f"Fallback: chunking omitido en {device} "
+                f"(PDF de {n_pages} páginas demasiado pequeño)"
+            ),
+        })
+        return {
+            "kind": "exhausted",
+            "last_error": last_error or "no chunk tiers applicable",
+            "batch_tiers": batch_tiers,
+            "chunk_tiers": chunk_tiers,
+        }
     _emit(on_event, {
         "phase": "chunk_tier_started",
         "device": device,
@@ -486,6 +608,7 @@ def _run_device_pass(
             n_pages_total=n_pages,
             pdf_mb_total=pdf_mb,
             on_event=on_event,
+            disable_ocr=disable_ocr,
         )
         if isinstance(outcome, tuple):
             append_history(
@@ -573,12 +696,30 @@ def extract_resilient(
     profile = load_profile()
     n_pages = quick_page_count(pdf_bytes)
     pdf_mb = len(pdf_bytes) / 1e6
+
+    # Pre-flight: if the PDF carries a native text layer on every page, skip
+    # Surya recognition entirely. Recognition is the dominant cost (~250 s/page
+    # on 6 GB GPUs that swap, ~45 s/page healthy); for academic PDFs it adds
+    # nothing the embedded text doesn't already have.
+    from extraction import has_native_text_layer
+    disable_ocr = has_native_text_layer(pdf_bytes)
+
+    logger.info(
+        "extract_resilient START n_pages=%d pdf_mb=%.2f default_device=%s "
+        "gpu_total_gb=%.2f total_ram_gb=%.2f force_cpu=%s timeout_s=%.0f disable_ocr=%s",
+        n_pages, pdf_mb, profile.default_device,
+        profile.gpu_total_gb, profile.total_gb, force_cpu, timeout_s, disable_ocr,
+    )
     _emit(on_event, {
         "phase": "started",
         "n_pages": n_pages,
         "pdf_mb": round(pdf_mb, 2),
         "default_device": profile.default_device,
-        "message": f"Iniciando extracción ({n_pages} páginas, {pdf_mb:.2f} MB)",
+        "disable_ocr": disable_ocr,
+        "message": (
+            f"Iniciando extracción ({n_pages} páginas, {pdf_mb:.2f} MB)"
+            + (" — texto nativo detectado, OCR omitido" if disable_ocr else "")
+        ),
     })
 
     # Stage PDF once so each retry reads from disk and the parent does not
@@ -604,6 +745,7 @@ def extract_resilient(
     if not force_cpu:
         if profile.default_device == "cuda":
             viable, reason = gpu_is_viable(profile, pdf_bytes)
+            logger.info("gpu_is_viable -> %s (%s)", viable, reason)
             if viable:
                 devices.append("cuda")
             else:
@@ -618,6 +760,7 @@ def extract_resilient(
             devices.append("mps")
     if not devices or devices[-1] != "cpu":
         devices.append("cpu")
+    logger.info("device ladder built: %s", devices)
     _emit(on_event, {
         "phase": "device_ladder",
         "devices": devices,
@@ -634,8 +777,10 @@ def extract_resilient(
                 n_pages=n_pages,
                 pdf_mb=pdf_mb,
                 on_event=on_event,
+                disable_ocr=disable_ocr,
             )
             if isinstance(outcome, tuple):
+                logger.info("extract_resilient SUCCESS on device=%s", device)
                 save_profile(profile)
                 return outcome
 
@@ -644,9 +789,18 @@ def extract_resilient(
                 f"(batch tiers={outcome['batch_tiers']}, "
                 f"chunk tiers={outcome['chunk_tiers']})"
             )
+            logger.warning(
+                "device pass END device=%s kind=%s last_error=%s batch_tiers=%s chunk_tiers=%s",
+                device, outcome["kind"], outcome["last_error"],
+                outcome["batch_tiers"], outcome["chunk_tiers"],
+            )
 
             if outcome["kind"] == "error":
                 save_profile(profile)
+                logger.error(
+                    "extract_resilient FAILED unrecoverably on device=%s: %s",
+                    device, outcome["last_error"],
+                )
                 _emit(on_event, {
                     "phase": "failed",
                     "device": device,
@@ -663,6 +817,10 @@ def extract_resilient(
             })
 
         save_profile(profile)
+        logger.error(
+            "extract_resilient EXHAUSTED all devices: %s",
+            " | ".join(last_summary),
+        )
         _emit(on_event, {
             "phase": "failed",
             "message": "Todos los fallbacks agotados",

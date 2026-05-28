@@ -1,7 +1,9 @@
 import asyncio
 import io
 import json
+import logging
 import os
+import threading
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -24,6 +26,30 @@ from models import (
 )
 
 load_dotenv()
+
+# Wire up python logging so messages from extraction_runner / batch_planner
+# / marker_worker actually surface on uvicorn's stderr. Without this the
+# library-level `logger.info(...)` calls are silently dropped because no
+# handler is attached at module import time. We use a level threshold that
+# can be overridden via DEEPSTUDY_LOG_LEVEL for verbose debugging.
+_log_level = os.getenv("DEEPSTUDY_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("deepstudy.main")
+
+# Serialise heavy extractions across concurrent uploads. Each Marker run
+# loads multi-GB of weights and saturates either VRAM (CUDA) or one CPU
+# core per Surya batch; if two uploads land at the same instant they both
+# spawn marker_worker simultaneously and the OS OOM-kills both. The
+# semaphore is a process-local queue, not a fairness primitive — order
+# follows asyncio/threadpool wakeups. Tunable via DEEPSTUDY_EXTRACT_PARALLEL
+# (default 1). Use threading.Semaphore because _run_extraction_pipeline
+# executes inside loop.run_in_executor (a thread, not a coroutine).
+_extract_parallel = max(1, int(os.getenv("DEEPSTUDY_EXTRACT_PARALLEL", "1")))
+_EXTRACTION_GATE = threading.Semaphore(_extract_parallel)
+logger.info("extraction concurrency gate sized at %d slot(s)", _extract_parallel)
 
 _api_key = os.getenv("GEMINI_API_KEY")
 if not _api_key:
@@ -381,9 +407,23 @@ def _run_extraction_pipeline(
     """
     job = JOBS.get(job_id)
     if job is None:
+        logger.warning("extraction pipeline: unknown job_id=%s, dropping", job_id)
         return
-    job.status = "running"
     dest = UPLOADS_DIR / filename
+    # Mark queued while waiting on the semaphore so the SSE stream shows the
+    # client that we are not stalled, just behind another upload.
+    if not _EXTRACTION_GATE.acquire(blocking=False):
+        logger.info(
+            "job %s (%s) queued behind concurrent extraction",
+            job_id, filename,
+        )
+        job.push_event({
+            "phase": "queued",
+            "message": "Esperando turno detrás de otra extracción en curso",
+        })
+        _EXTRACTION_GATE.acquire()
+    logger.info("job %s (%s) acquired extraction slot", job_id, filename)
+    job.status = "running"
     try:
         try:
             pages_data, linear_blocks = extract_resilient(
@@ -392,6 +432,7 @@ def _run_extraction_pipeline(
             )
         except ExtractionFailed as e:
             dest.unlink(missing_ok=True)
+            logger.error("job %s extraction exhausted fallbacks: %s", job_id, e)
             JOBS.mark_failed(
                 job_id,
                 "PDF extraction exhausted memory at every fallback. "
@@ -400,6 +441,7 @@ def _run_extraction_pipeline(
             return
         except Exception as e:
             dest.unlink(missing_ok=True)
+            logger.exception("job %s extraction crashed: %s", job_id, e)
             JOBS.mark_failed(job_id, f"Could not parse PDF: {e}")
             return
 
@@ -448,7 +490,11 @@ def _run_extraction_pipeline(
         )
         JOBS.mark_done(job_id, result.model_dump())
     except Exception as e:
+        logger.exception("job %s unexpected pipeline error", job_id)
         JOBS.mark_failed(job_id, f"Unexpected error: {e}")
+    finally:
+        _EXTRACTION_GATE.release()
+        logger.info("job %s released extraction slot", job_id)
 
 
 @app.post("/upload-pdf/")
@@ -481,19 +527,17 @@ async def upload_pdf(
     JOBS.prune()
 
     # Run extraction in a threadpool so the event loop stays responsive for
-    # the SSE endpoint. We don't await the task — its lifecycle is tracked
+    # the SSE endpoint. We don't await the future — its lifecycle is tracked
     # by the JobRegistry, not by request scope.
-    asyncio.create_task(
-        loop.run_in_executor(
-            None,
-            lambda: _run_extraction_pipeline(
-                job_id=job.id,
-                filename=file.filename,
-                contents=contents,
-                language=language,
-                keep_terms_in_english=keep_terms_in_english,
-            ),
-        )
+    loop.run_in_executor(
+        None,
+        lambda: _run_extraction_pipeline(
+            job_id=job.id,
+            filename=file.filename,
+            contents=contents,
+            language=language,
+            keep_terms_in_english=keep_terms_in_english,
+        ),
     )
 
     return JSONResponse(
