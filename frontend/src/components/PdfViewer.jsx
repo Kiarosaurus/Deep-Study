@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
@@ -97,8 +97,7 @@ function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, 
   )
 }
 
-function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, scale, onExplain, activeParagraph, currentExplanation, explanation }) {
-  const [hoveredIdx, setHoveredIdx]       = useState(null)
+function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange }) {
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
   if ((!blocks && !images?.length) || !scale) return null
@@ -111,7 +110,6 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
         const paragraphBoxes = block.boxes ?? []
         if (paragraphBoxes.length === 0) return null
 
-        const isHovered = hoveredIdx === i
         const ownFlatRef = flatBase + i
         // Chain payload (merged text + sentences across continuation chain).
         // Falls back to this block alone when no chain or no payload computed.
@@ -120,11 +118,16 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           sentences: block.sentences ?? [],
           offset: 0,
         }
+        const chainId   = chainIds?.[ownFlatRef]
+        const chainKey  = chainId != null ? `c-${chainId}` : `__b-${page}-${i}`
+        const isHovered = hoveredChain != null && chainKey === hoveredChain
         const ownLen    = block.sentences?.length ?? 0
         const ownOffset = payload.offset ?? 0
         // Match by merged payload text so every block in the chain lights up
-        // together; fall back to flat_block_ref for cross-mode hand-off.
-        const isActive  = activeParagraph?.text === payload.text
+        // together; fall back to flat_block_ref for cross-mode hand-off. Empty
+        // text never matches — figures with empty caption would otherwise
+        // light up every empty paragraph block.
+        const isActive  = (!!payload.text && activeParagraph?.text === payload.text)
                        || (activeParagraph?.flatBlockRef != null
                            && activeParagraph.flatBlockRef === ownFlatRef)
 
@@ -236,8 +239,8 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   : 'translate(-100%, -100%)',
               }}
               onClick={() => onExplain(payload.text, payload.sentences, ownFlatRef)}
-              onMouseEnter={() => setHoveredIdx(i)}
-              onMouseLeave={() => setHoveredIdx(null)}
+              onMouseEnter={() => onHoveredChainChange?.(chainKey)}
+              onMouseLeave={() => onHoveredChainChange?.(null)}
               title="Explicar párrafo"
             >
               ✦
@@ -256,16 +259,38 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
         const height     = (b.y1 - b.y0) * scale
         const anchorLeft = b.x1 * scale
         const anchorTop  = b.y1 * scale
+        const imgRole    = img.role || 'figure'
+        const isImgActive = activeParagraph?.role === imgRole
+          && activeParagraph?.page === page
+          && activeParagraph?.bbox?.x0 === b.x0
+          && activeParagraph?.bbox?.y0 === b.y0
+        const cap = isImgActive ? img.caption_bbox : null
         return (
           <div key={`img-${i}`}>
             <div
               className="absolute rounded-sm transition-opacity duration-150"
               style={{
                 left, top, width, height,
-                background: isHovered ? 'rgba(99,102,241,0.07)' : 'transparent',
-                border: isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent',
+                background: isImgActive
+                  ? 'rgba(99,102,241,0.08)'
+                  : (isHovered ? 'rgba(99,102,241,0.07)' : 'transparent'),
+                border: isImgActive
+                  ? '1px solid rgba(99,102,241,0.45)'
+                  : (isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent'),
               }}
             />
+            {cap && (
+              <div
+                className="absolute pointer-events-none rounded-sm bg-yellow-300/40 transition-all duration-300 ease-out"
+                style={{
+                  left:   cap.x0 * scale,
+                  top:    cap.y0 * scale,
+                  width:  (cap.x1 - cap.x0) * scale,
+                  height: (cap.y1 - cap.y0) * scale,
+                  mixBlendMode: 'multiply',
+                }}
+              />
+            )}
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
@@ -305,7 +330,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloads, onExplain, activeParagraph, currentExplanation, explanation, trackedBox }) {
+function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloads, chainIds, onExplain, activeParagraph, currentExplanation, explanation, trackedBox, hoveredChain, onHoveredChainChange }) {
   // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
   // automáticamente cuando `width` cambia por zoom o resize.
   const [originalWidth, setOriginalWidth] = useState(null)
@@ -330,11 +355,14 @@ function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloa
         page={pageNumber}
         flatBase={flatBase}
         chainPayloads={chainPayloads}
+        chainIds={chainIds}
         scale={scale}
         onExplain={onExplain}
         activeParagraph={activeParagraph}
         currentExplanation={currentExplanation}
         explanation={explanation}
+        hoveredChain={hoveredChain}
+        onHoveredChainChange={onHoveredChainChange}
       />
       {trackedBox && scale && (
         <div
@@ -353,8 +381,9 @@ function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloa
   )
 }
 
-export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }, ref) {
   const [numPages, setNumPages]               = useState(null)
+  const [hoveredChain, setHoveredChain]       = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
   const [tracking, setTracking]               = useState(false)
@@ -424,6 +453,173 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
 
   // pageWidth recomputado abajo; capturamos vía ref para usar en scrollToStop
   const pageWidthRef = useRef(0)
+
+  // Imperative scroll API for Reader.jsx. centerBlock(linearIdx, opts) brings
+  // a specific linearBlocks entry into view; routes to tracking or paginated
+  // logic based on current mode. onlyIfHidden skips the scroll when the block
+  // is already on screen, used for paragraph-change auto-follow.
+  useImperativeHandle(ref, () => ({
+    centerBlock(linearIdx, options = {}) {
+      const { onlyIfHidden = false, smooth = true, alternatives = null } = options
+      const container = containerRef.current
+      if (!container || linearIdx == null || !linearBlocks[linearIdx]) return
+
+      // Effective top of the viewable area — tracking toolbar overlays the
+      // container top, so blocks under it aren't really visible.
+      const effectiveTop = () => {
+        const cTop = container.getBoundingClientRect().top
+        if (tracking && trackingToolbarRef.current) {
+          const t = trackingToolbarRef.current
+          return cTop + t.offsetTop + t.offsetHeight
+        }
+        return cTop
+      }
+
+      // ≥50% of block height inside the (toolbar-adjusted) viewport.
+      const isBlockVisible = (idx) => {
+        if (idx == null || !linearBlocks[idx]) return false
+        const cRect = container.getBoundingClientRect()
+        const topClip = effectiveTop()
+        const botClip = cRect.bottom
+        let elTop, elBot
+        if (tracking) {
+          const el = container.querySelector(`[data-block-idx="${idx}"]`)
+          if (!el) return false
+          const eRect = el.getBoundingClientRect()
+          elTop = eRect.top
+          elBot = eRect.bottom
+        } else {
+          const block = linearBlocks[idx]
+          const pageEl = container.querySelector(`[data-page="${block.page}"]`)
+          if (!pageEl) return false
+          const dim = pageDims[block.page]
+          const pw  = pageWidthRef.current
+          if (!dim?.width || !pw) return false
+          const scale = pw / dim.width
+          const pRect = pageEl.getBoundingClientRect()
+          elTop = pRect.top + block.bbox.y0 * scale
+          elBot = pRect.top + block.bbox.y1 * scale
+        }
+        const overlap = Math.max(0, Math.min(elBot, botClip) - Math.max(elTop, topClip))
+        const blockH  = Math.max(1, elBot - elTop)
+        const viewH   = Math.max(1, botClip - topClip)
+        return overlap >= Math.min(blockH, viewH) * 0.5
+      }
+
+      if (onlyIfHidden) {
+        const candidates = Array.isArray(alternatives) && alternatives.length
+          ? alternatives
+          : [linearIdx]
+        if (candidates.some(isBlockVisible)) return
+      }
+
+      const cRect = container.getBoundingClientRect()
+      const topClip = effectiveTop()
+      const viewH   = Math.max(1, cRect.bottom - topClip)
+
+      let elTopAbs, elH
+      if (tracking) {
+        const el = container.querySelector(`[data-block-idx="${linearIdx}"]`)
+        if (!el) return
+        const eRect = el.getBoundingClientRect()
+        elTopAbs = eRect.top
+        elH = eRect.height
+      } else {
+        const block = linearBlocks[linearIdx]
+        const pageEl = container.querySelector(`[data-page="${block.page}"]`)
+        if (!pageEl) return
+        const dim = pageDims[block.page]
+        const pw  = pageWidthRef.current
+        if (!dim?.width || !pw) return
+        const scale = pw / dim.width
+        const pRect = pageEl.getBoundingClientRect()
+        elTopAbs = pRect.top + block.bbox.y0 * scale
+        elH = (block.bbox.y1 - block.bbox.y0) * scale
+      }
+      // Center vertically inside the toolbar-adjusted viewport. If block is
+      // taller than the viewport, align its top to the top of the area instead
+      // so the start of the content lands in view rather than the middle.
+      const offsetIntoView = elH >= viewH
+        ? 12
+        : (viewH - elH) / 2
+      const targetY = container.scrollTop
+                    + (elTopAbs - cRect.top)
+                    - (topClip - cRect.top + offsetIntoView)
+      container.scrollTo({ top: Math.max(0, targetY), behavior: smooth ? 'smooth' : 'auto' })
+    },
+
+    // Sentence-level scroll. boxes are sentence rects in PDF-point coords
+    // (same units as block.bbox). onlyIfNotFullyVisible skips when the entire
+    // sentence is already within the visible viewport.
+    centerSentence(linearIdx, boxes, options = {}) {
+      const { onlyIfNotFullyVisible = false, smooth = true } = options
+      const container = containerRef.current
+      if (!container || linearIdx == null || !linearBlocks[linearIdx] || !boxes?.length) return
+
+      const block = linearBlocks[linearIdx]
+      let bY0 = Infinity, bY1 = -Infinity
+      for (const b of boxes) {
+        if (b?.y0 != null && b.y0 < bY0) bY0 = b.y0
+        if (b?.y1 != null && b.y1 > bY1) bY1 = b.y1
+      }
+      if (bY0 === Infinity || bY1 === -Infinity) return
+
+      const effectiveTop = () => {
+        const cTop = container.getBoundingClientRect().top
+        if (tracking && trackingToolbarRef.current) {
+          const t = trackingToolbarRef.current
+          return cTop + t.offsetTop + t.offsetHeight
+        }
+        return cTop
+      }
+
+      let sTop, sBot
+      if (tracking) {
+        const el = container.querySelector(`[data-block-idx="${linearIdx}"]`)
+        if (!el) return
+        const wrapperRect = el.getBoundingClientRect()
+        // Mirror BlockCrop's inflation logic so sentence-to-canvas mapping is
+        // exact. Equations get a larger vertical pad.
+        const yInflate = block.role === 'equation' ? 4 : 2
+        const dim = pageDims[block.page]
+        const inflY0 = Math.max(0, block.bbox.y0 - yInflate)
+        const inflY1 = dim?.height
+          ? Math.min(dim.height, block.bbox.y1 + yInflate)
+          : block.bbox.y1 + yInflate
+        const bbH = Math.max(1, inflY1 - inflY0)
+        const scale = wrapperRect.height / bbH
+        sTop = wrapperRect.top + (bY0 - inflY0) * scale
+        sBot = wrapperRect.top + (bY1 - inflY0) * scale
+      } else {
+        const pageEl = container.querySelector(`[data-page="${block.page}"]`)
+        if (!pageEl) return
+        const dim = pageDims[block.page]
+        const pw  = pageWidthRef.current
+        if (!dim?.width || !pw) return
+        const scale = pw / dim.width
+        const pRect = pageEl.getBoundingClientRect()
+        sTop = pRect.top + bY0 * scale
+        sBot = pRect.top + bY1 * scale
+      }
+
+      const cRect = container.getBoundingClientRect()
+      const topClip = effectiveTop()
+      const botClip = cRect.bottom
+
+      if (onlyIfNotFullyVisible) {
+        const fully = sTop >= topClip - 1 && sBot <= botClip + 1
+        if (fully) return
+      }
+
+      const sentH = Math.max(1, sBot - sTop)
+      const viewH = Math.max(1, botClip - topClip)
+      const offsetIntoView = sentH >= viewH ? 12 : (viewH - sentH) / 2
+      const targetY = container.scrollTop
+                    + (sTop - cRect.top)
+                    - (topClip - cRect.top + offsetIntoView)
+      container.scrollTo({ top: Math.max(0, targetY), behavior: smooth ? 'smooth' : 'auto' })
+    },
+  }), [tracking, linearBlocks, pageDims])
 
   function scrollToStop(stop) {
     const container = containerRef.current
@@ -738,6 +934,25 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
     return buildContinuationPayloads(flat)
   }, [pages])
 
+  // Per-flat-block chain head index. Keyed by the inner `sentences` array
+  // reference — buildContinuationPayloads gives every chain member its OWN
+  // wrapper object (different `offset`) but the same merged `sentences`
+  // array, so the inner array is the stable identity that groups chain
+  // members together while still distinguishing separate chains with
+  // identical text.
+  const paginatedChainIds = useMemo(() => {
+    const headByPayload = new Map()
+    const ids = new Array(paginatedChainPayloads.length).fill(null)
+    for (let i = 0; i < paginatedChainPayloads.length; i++) {
+      const pay = paginatedChainPayloads[i]
+      if (!pay) continue
+      const key = pay.sentences
+      if (!headByPayload.has(key)) headByPayload.set(key, i)
+      ids[i] = headByPayload.get(key)
+    }
+    return ids
+  }, [paginatedChainPayloads])
+
   const currentStopData = tracking ? readingSequence[currentStop] : null
 
   return (
@@ -861,11 +1076,14 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
                   images={imagesMap[i + 1]}
                   flatBase={flatBaseByPage[i + 1] ?? 0}
                   chainPayloads={paginatedChainPayloads}
+                  chainIds={paginatedChainIds}
                   onExplain={onExplain}
                   activeParagraph={activeParagraph}
                   currentExplanation={currentExplanation}
                   explanation={explanation}
                   trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
+                  hoveredChain={hoveredChain}
+                  onHoveredChainChange={setHoveredChain}
                 />
               ))}
           </Document>
@@ -874,4 +1092,6 @@ export default function PdfViewer({ file, onExplain, pages, linearBlocks = [], a
       </div>
     </div>
   )
-}
+})
+
+export default PdfViewer

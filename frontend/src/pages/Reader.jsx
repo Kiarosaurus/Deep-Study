@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import PdfViewer from '../components/PdfViewer'
 import Sidebar from '../components/Sidebar'
+import { buildContinuationPayloads, resolveSentenceIndices } from '../components/highlight-utils'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -32,15 +33,19 @@ function djb2(s) {
   return (h >>> 0).toString(36)
 }
 
+// Cache key version. Bump when stored explanation shape changes so stale
+// entries from old shapes get orphaned instead of mis-deserialized.
+const EXPLAIN_CACHE_VERSION = 'v2'
+
 function explainCacheKey(filename, text, opts = {}) {
   // Figures/tables have no representative text — key on role+page+bbox so a
   // recropped or relocated figure invalidates correctly.
   if (opts.role === 'figure' || opts.role === 'table') {
     const b = opts.bbox || {}
     const tag = `${opts.role}:${opts.page}:${b.x0},${b.y0},${b.x1},${b.y1}`
-    return `deepstudy:explain:${filename}:${djb2(tag)}`
+    return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${filename}:${djb2(tag)}`
   }
-  return `deepstudy:explain:${filename}:${djb2(text)}`
+  return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${filename}:${djb2(text)}`
 }
 
 function readCachedExplanation(filename, text, memCache, opts = {}) {
@@ -127,12 +132,20 @@ export default function Reader() {
     uiStateRef.current = { tab, explainMode }
   }, [tab, explainMode])
 
-  // Auto-switch after receiving an explanation
+  // Auto-switch after receiving a real explanation. Skeleton placeholders set
+  // explanation before the fetch resolves; don't yank the user out of the
+  // global map for a loading state.
   useEffect(() => {
-    if (explanation) setTab('explain')
+    if (explanation && !explanation.__skeleton) setTab('explain')
   }, [explanation])
 
   const explanationsCache = useRef(new Map())
+  const viewerRef         = useRef(null)
+  const explainRequestId  = useRef(0)
+  const explanationRef    = useRef(null)
+  const currentIndexRef   = useRef(0)
+  useEffect(() => { explanationRef.current  = explanation  }, [explanation])
+  useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
 
@@ -148,32 +161,170 @@ export default function Reader() {
     [analysis],
   )
 
-  // Precompute list of paragraphs for easy access
-  const paragraphList = useMemo(
-    () => linearBlocks.filter(b => b.role === 'paragraph'),
-    [linearBlocks]
+  // Chain payloads — one shared object per continuation chain.
+  const chainPayloads = useMemo(
+    () => buildContinuationPayloads(linearBlocks),
+    [linearBlocks],
   )
+
+  // Navigable list — paragraphs (one entry per continuation chain) + figures/
+  // tables, in reading order. Figures carry the opts handleExplain needs.
+  const paragraphList = useMemo(() => {
+    // Single pass: text → list of paragraph linearBlocks indices sharing that
+    // chain. O(n) vs O(n²) nested scan.
+    const chainMembers = new Map()
+    for (let i = 0; i < linearBlocks.length; i++) {
+      if (linearBlocks[i].role !== 'paragraph') continue
+      const pay = chainPayloads[i]
+      if (!pay) continue
+      const list = chainMembers.get(pay.text)
+      if (list) list.push(i)
+      else chainMembers.set(pay.text, [i])
+    }
+
+    const items = []
+    const seenTexts = new Set()
+    for (let i = 0; i < linearBlocks.length; i++) {
+      const b = linearBlocks[i]
+      if (b.role === 'paragraph') {
+        const pay = chainPayloads[i]
+        if (!pay || seenTexts.has(pay.text)) continue
+        seenTexts.add(pay.text)
+        items.push({
+          kind: 'paragraph',
+          linearIdx: i,
+          linearIdxs: chainMembers.get(pay.text) ?? [i],
+          text: pay.text,
+          sentences: pay.sentences,
+          flat_block_ref: b.flat_block_ref,
+        })
+      } else if (b.role === 'figure' || b.role === 'table') {
+        items.push({
+          kind: 'figure',
+          linearIdx: i,
+          linearIdxs: [i],
+          text: b.caption_text || '',
+          sentences: [],
+          flat_block_ref: b.flat_block_ref ?? null,
+          role: b.role,
+          page: b.page,
+          bbox: b.bbox,
+          caption_text: b.caption_text || '',
+        })
+      }
+    }
+    return items
+  }, [linearBlocks, chainPayloads])
+
+
+  // Expand AI explanations into one carousel entry per original sentence: real
+  // items emitted at their first covered index, placeholders for gaps. Keeps
+  // original item shape (quote / sentence_indices / concepts) so highlighting
+  // via resolveSentenceIndices keeps working.
+  const alignExplanations = (aiData, originalSentences) => {
+    if (!originalSentences?.length) return aiData
+    if (!aiData || !Array.isArray(aiData.sentence_explanations)) return aiData
+    const raw = aiData.sentence_explanations
+    const N = originalSentences.length
+
+    const sentToItem = new Map()
+    raw.forEach((item, idx) => {
+      const idxs = Array.isArray(item?.sentence_indices) ? item.sentence_indices : []
+      for (const k of idxs) {
+        if (Number.isInteger(k) && k >= 0 && k < N && !sentToItem.has(k)) {
+          sentToItem.set(k, idx)
+        }
+      }
+    })
+
+    const aligned = []
+    const emitted = new Set()
+    for (let i = 0; i < N; i++) {
+      const itemIdx = sentToItem.get(i)
+      if (itemIdx !== undefined) {
+        if (emitted.has(itemIdx)) continue
+        emitted.add(itemIdx)
+        aligned.push(raw[itemIdx])
+      } else {
+        const sText = originalSentences[i]?.text ?? ''
+        aligned.push({
+          sentence_indices: [i],
+          quote: sText,
+          concepts: [],
+          is_placeholder: true,
+        })
+      }
+    }
+
+    // Defensive: keep items whose declared indices were all out of range so the
+    // user still sees what the LLM produced even if it mislabeled.
+    raw.forEach((item, idx) => {
+      if (emitted.has(idx)) return
+      const idxs = Array.isArray(item?.sentence_indices) ? item.sentence_indices : []
+      const hasValid = idxs.some(k => Number.isInteger(k) && k >= 0 && k < N)
+      if (!hasValid) aligned.push(item)
+    })
+
+    return { ...aiData, sentence_explanations: aligned }
+  }
+
+  // One placeholder per sentence so highlights + carousel slots show
+  // immediately, before the AI fetch resolves. Marked with __skeleton so the
+  // tab-auto-switch effect and index re-anchor logic can tell it apart from a
+  // real response.
+  const buildSkeletonExplanation = (sentences) => {
+    if (!sentences?.length) return null
+    return {
+      __skeleton: true,
+      sentence_explanations: sentences.map((s, i) => ({
+        sentence_indices: [i],
+        quote: s?.text ?? '',
+        concepts: [],
+        is_placeholder: true,
+      })),
+      paragraph_context: null,
+    }
+  }
 
   const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
     const { initialIndex = 0, role, page, bbox, caption_text } = opts
-    setActiveParagraph({ text, flatBlockRef })
-    setCurrentIndex(initialIndex)
+    const isFigure = role === 'figure' || role === 'table'
+
+    // Stamp this call so an earlier in-flight fetch can't overwrite a later
+    // user action (e.g. retry-throttled A resolving after the user clicked B).
+    const myReqId = ++explainRequestId.current
+    const isCurrent = () => myReqId === explainRequestId.current
+
+    setActiveParagraph({ text, flatBlockRef, role, page, bbox })
+    setCurrentIndex(initialIndex === 'last' ? 0 : initialIndex)
+    setErrorExplain(null)
+    setRetryInfo(null)
 
     const cacheOpts = { role, page, bbox }
     const cached = readCachedExplanation(decoded, text, explanationsCache.current, cacheOpts)
     if (cached) {
-      setErrorExplain(null)
-      setRetryInfo(null)
-      setExplanation(cached)
+      const alignedCached = alignExplanations(cached, sentences)
+      setExplanation(alignedCached)
+      if (initialIndex === 'last') {
+        setCurrentIndex(Math.max(0, (alignedCached.sentence_explanations?.length || 1) - 1))
+      }
       return
     }
 
+    // Paragraphs: seed carousel with skeleton so highlights + slots render
+    // pre-fetch. Figures have no sentence geometry → fall back to clearing.
+    if (!isFigure && sentences?.length) {
+      setExplanation(buildSkeletonExplanation(sentences))
+      if (initialIndex === 'last') {
+        setCurrentIndex(Math.max(0, sentences.length - 1))
+      }
+    } else {
+      setExplanation(null)
+    }
+
     setLoadingExplain(true)
-    setErrorExplain(null)
-    setRetryInfo(null)
     try {
-      const isFigure = role === 'figure' || role === 'table'
       const payload = isFigure
         ? {
             paragraph_sentences: [],
@@ -190,16 +341,52 @@ export default function Reader() {
           }
       const data = await postExplainWithRetry(
         payload,
-        (attempt, maxAttempts, delayMs) =>
-          setRetryInfo({ attempt, maxAttempts, delayMs }),
+        (attempt, maxAttempts, delayMs) => {
+          if (isCurrent()) setRetryInfo({ attempt, maxAttempts, delayMs })
+        },
       )
+
+      // Cache raw response unconditionally (it's still valid for this text);
+      // only commit to UI state when this call is still the latest.
       writeCachedExplanation(decoded, text, data, explanationsCache.current, cacheOpts)
-      setExplanation(data)
+      if (!isCurrent()) return
+
+      const alignedData = alignExplanations(data, sentences)
+
+      // Re-anchor currentIndex: if the user was on a skeleton slot for sentence
+      // S, jump to the aligned item that covers S — keeps cursor on the same
+      // sentence even when grouping shifts other slots around it.
+      const prevExp = explanationRef.current
+      const prevIdx = currentIndexRef.current
+      let nextIdx = (initialIndex === 'last')
+        ? Math.max(0, (alignedData.sentence_explanations?.length || 1) - 1)
+        : initialIndex
+      if (prevExp?.__skeleton && !isFigure
+          && Array.isArray(prevExp.sentence_explanations)
+          && Array.isArray(alignedData.sentence_explanations)) {
+        const prevItem = prevExp.sentence_explanations[prevIdx]
+        const prevSentenceIdx = prevItem?.sentence_indices?.[0]
+        if (Number.isInteger(prevSentenceIdx)) {
+          const found = alignedData.sentence_explanations.findIndex(it =>
+            Array.isArray(it?.sentence_indices) && it.sentence_indices.includes(prevSentenceIdx),
+          )
+          if (found >= 0) nextIdx = found
+        }
+      }
+
+      setExplanation(alignedData)
+      setCurrentIndex(nextIdx)
+
     } catch (err) {
-      setErrorExplain(buildExplainError(err))
+      if (isCurrent()) {
+        setErrorExplain(buildExplainError(err))
+        setExplanation(null)
+      }
     } finally {
-      setLoadingExplain(false)
-      setRetryInfo(null)
+      if (isCurrent()) {
+        setLoadingExplain(false)
+        setRetryInfo(null)
+      }
     }
   }, [analysis, decoded])
 
@@ -211,25 +398,122 @@ export default function Reader() {
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
-      // Find if there is an explanation already loaded
       const items = explanation?.sentence_explanations ?? []
-      const hasExplanation = items.length > 0
+
+      const dispatch = (entry, initialIndex = 0) => {
+        if (!entry) return
+        if (entry.kind === 'figure') {
+          handleExplain(entry.text, [], entry.flat_block_ref, {
+            initialIndex,
+            role: entry.role,
+            page: entry.page,
+            bbox: entry.bbox,
+            caption_text: entry.caption_text,
+          })
+        } else {
+          handleExplain(entry.text, entry.sentences, entry.flat_block_ref, { initialIndex })
+        }
+        if (entry.linearIdx != null) {
+          // 'last' lands on the trailing sentence — usually in the last chain
+          // member, not the head. Aim the scroll there so the cursor's
+          // sentence is the part centered, not the chain start on a prior page.
+          const targetIdx = (initialIndex === 'last' && Array.isArray(entry.linearIdxs) && entry.linearIdxs.length)
+            ? entry.linearIdxs[entry.linearIdxs.length - 1]
+            : entry.linearIdx
+          viewerRef.current?.centerBlock(targetIdx, {
+            onlyIfHidden: true,
+            alternatives: entry.linearIdxs,
+          })
+        }
+      }
+
+      const matchActive = (entry) => {
+        if (!entry || !activeParagraph) return false
+        if (entry.kind === 'paragraph') return entry.text === activeParagraph.text
+        return entry.kind === 'figure'
+          && activeParagraph.role === entry.role
+          && activeParagraph.page === entry.page
+          && activeParagraph.bbox?.x0 === entry.bbox?.x0
+          && activeParagraph.bbox?.y0 === entry.bbox?.y0
+      }
+
+      // Resolve the linearBlocks index + sentence boxes for the first
+      // highlighted sentence of an item. For chain paragraphs we pick the
+      // chain member covering the smallest merged sentence index — i.e. the
+      // earlier reading-order fragment when a sentence is split across blocks.
+      const sentenceTargetForItem = (item) => {
+        if (!activeParagraph) return null
+        if (activeParagraph.role === 'figure' || activeParagraph.role === 'table') {
+          for (let i = 0; i < linearBlocks.length; i++) {
+            const b = linearBlocks[i]
+            if (b.role === activeParagraph.role
+                && b.page === activeParagraph.page
+                && b.bbox?.x0 === activeParagraph.bbox?.x0
+                && b.bbox?.y0 === activeParagraph.bbox?.y0) {
+              return { idx: i, boxes: null, isFigure: true }
+            }
+          }
+          return null
+        }
+        const text = activeParagraph.text
+        if (!text) return null
+        const members = []
+        for (let i = 0; i < linearBlocks.length; i++) {
+          if (linearBlocks[i].role !== 'paragraph') continue
+          const pay = chainPayloads[i]
+          if (!pay || pay.text !== text) continue
+          members.push({
+            idx: i,
+            offset: pay.offset ?? 0,
+            length: linearBlocks[i].sentences?.length ?? 0,
+          })
+        }
+        if (members.length === 0) return null
+        if (!item) return { idx: members[0].idx, boxes: null, isFigure: false }
+        const payload = chainPayloads[members[0].idx]
+        const indices = resolveSentenceIndices(payload.sentences, item)
+        if (!indices.length) return { idx: members[0].idx, boxes: null, isFigure: false }
+        const minK = Math.min(...indices)
+        const member = members.find(m => minK >= m.offset && minK < m.offset + m.length)
+        if (!member) return { idx: members[0].idx, boxes: null, isFigure: false }
+        const localIdx = minK - member.offset
+        const block = linearBlocks[member.idx]
+        const boxes = block.sentences?.[localIdx]?.boxes ?? []
+        return { idx: member.idx, boxes, isFigure: false }
+      }
+
+      const centerForItem = (item, onlyIfNotFullyVisible) => {
+        const target = sentenceTargetForItem(item)
+        if (!target) return
+        if (target.isFigure || !target.boxes?.length) {
+          viewerRef.current?.centerBlock(target.idx, { onlyIfHidden: onlyIfNotFullyVisible })
+        } else {
+          viewerRef.current?.centerSentence(target.idx, target.boxes, { onlyIfNotFullyVisible })
+        }
+      }
+
+      if (e.key === ' ' || e.code === 'Space') {
+        const cur = items[currentIndex]
+        if (cur && activeParagraph) {
+          e.preventDefault()
+          centerForItem(cur, false)
+        }
+        return
+      }
 
       if (e.key === '<') {
-        e.preventDefault() 
+        e.preventDefault()
         const currentTab = uiStateRef.current.tab
         const currentMode = uiStateRef.current.explainMode
 
-        // If no explanation is loaded, jump to the first paragraph's explanation
-        if (!hasExplanation && paragraphList[0]) {
-          const first = paragraphList[0]
-          handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
+        if (!activeParagraph && paragraphList[0]) {
+          dispatch(paragraphList[0], 0)
           setTab('explain')
           setExplainMode('contexto')
           uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
           return
         }
-        
+
         if (currentTab === 'global') {
           setTab('explain')
           setExplainMode('contexto')
@@ -259,60 +543,52 @@ export default function Reader() {
         uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' }
         return
       }
-      
       if (e.key === 'ArrowRight') {
-        // If no explanation is loaded, jump to the first paragraph's explanation
-        if (!hasExplanation) {
+        if (!activeParagraph) {
           if (paragraphList[0]) {
             e.preventDefault()
-            const first = paragraphList[0]
-            handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
+            dispatch(paragraphList[0], 0)
           }
           return
         }
 
         e.preventDefault()
         if (currentIndex < items.length - 1) {
-          setCurrentIndex(i => i + 1)
+          const nextIdx = currentIndex + 1
+          setCurrentIndex(nextIdx)
+          centerForItem(items[nextIdx], true)
         } else {
-          const curParaIdx = paragraphList.findIndex(
-            b => b.flat_block_ref === activeParagraph?.flatBlockRef
-          )
-          const next = paragraphList[curParaIdx + 1]
-          if (next) handleExplain(next.text, next.sentences, next.flat_block_ref, { initialIndex: 0 })
+          const curIdx = paragraphList.findIndex(matchActive)
+          dispatch(paragraphList[curIdx + 1], 0)
         }
       }
 
       if (e.key === 'ArrowLeft') {
-        // If no explanation is loaded, jump to the first paragraph's explanation
-        if (!hasExplanation) {
+        if (!activeParagraph) {
           if (paragraphList[0]) {
             e.preventDefault()
-            const first = paragraphList[0]
-            handleExplain(first.text, first.sentences, first.flat_block_ref, { initialIndex: 0 })
+            dispatch(paragraphList[0], 0)
           }
           return
         }
 
         e.preventDefault()
         if (currentIndex > 0) {
-          setCurrentIndex(i => i - 1)
+          const nextIdx = currentIndex - 1
+          setCurrentIndex(nextIdx)
+          centerForItem(items[nextIdx], true)
         } else {
-          const curParaIdx = paragraphList.findIndex(
-            b => b.flat_block_ref === activeParagraph?.flatBlockRef
-          )
-          const prev = paragraphList[curParaIdx - 1]
-          if (prev) {
-            const lastIdx = Math.max(0, (prev.sentences?.length || 1) - 1)
-            handleExplain(prev.text, prev.sentences, prev.flat_block_ref, { initialIndex: lastIdx })
-          }
+          const curIdx = paragraphList.findIndex(matchActive)
+          dispatch(paragraphList[curIdx - 1], 'last')
         }
       }
     }
 
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain])
+    // Capture phase so focused Sidebar buttons don't swallow Space (their
+    // bubble-phase activation runs after our handler in capture).
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads])
 
   const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
@@ -347,6 +623,7 @@ export default function Reader() {
     <div className="flex h-screen overflow-hidden bg-white">
       <div className="relative min-w-0 overflow-hidden" style={{ flex: 7 }}>
         <PdfViewer
+          ref={viewerRef}
           file={pdfUrl}
           onExplain={handleExplain}
           pages={analysis?.pages}

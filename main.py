@@ -106,7 +106,7 @@ REGLAS PARTE B:
 SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
 
 _GLOBAL_MODEL = "gemini-3.1-flash-lite"
-_EXPLAIN_MODEL = "gemini-2.5-flash-lite"
+_EXPLAIN_MODEL = "gemini-3.1-flash-lite"
 
 
 def _build_global_config(language: str, keep_terms_in_english: bool) -> types.GenerateContentConfig:

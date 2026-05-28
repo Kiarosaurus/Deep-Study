@@ -59,7 +59,7 @@ export default function LinearReader({
   const { pageCanvases, requestPage } = usePageCache(effectiveDoc, { maxCached: 8, concurrent: 2 })
 
   const [visibleSet, setVisibleSet] = useState(() => new Set())
-  const [hoveredIdx, setHoveredIdx] = useState(null)
+  const [hoveredChain, setHoveredChain] = useState(null)
   const [observerInstance, setObserverInstance] = useState(null)
 
   const rootDivRef = useRef(null)
@@ -119,13 +119,12 @@ export default function LinearReader({
     firstVisibleLoggedRef.current = true
   }, [visibleSet])
 
-  const handleHoverChange = useCallback((idx, hover) => {
-    // Functional setter so that an out-of-order mouseLeave doesn't clear a
-    // freshly-set hoveredIdx from a sibling's mouseEnter, and an off-viewport
-    // cleanup for block A doesn't erase a hover that has since moved to B.
-    setHoveredIdx(prev => {
-      if (hover) return idx
-      return prev === idx ? null : prev
+  const handleHoverChange = useCallback((chainKey, hover) => {
+    // Functional setter so an out-of-order mouseLeave doesn't clear a
+    // freshly-set hoveredChain from a sibling's mouseEnter.
+    setHoveredChain(prev => {
+      if (hover) return chainKey
+      return prev === chainKey ? null : prev
     })
   }, [])
 
@@ -147,6 +146,25 @@ export default function LinearReader({
     [linearBlocks],
   )
 
+  // chainIds[i] = head linearBlocks index of the chain block i belongs to.
+  // Keyed by the inner `sentences` array reference — buildContinuationPayloads
+  // gives every chain member its OWN wrapper object (different `offset`) but
+  // the same merged `sentences` array, so the inner array is the stable
+  // identity that groups chain members together while still distinguishing
+  // separate chains with identical text.
+  const chainIds = useMemo(() => {
+    const headByPayload = new Map()
+    const ids = new Array(linearBlocks.length).fill(null)
+    for (let i = 0; i < linearBlocks.length; i++) {
+      const pay = chainPayloads[i]
+      if (!pay) continue
+      const key = pay.sentences
+      if (!headByPayload.has(key)) headByPayload.set(key, i)
+      ids[i] = headByPayload.get(key)
+    }
+    return ids
+  }, [linearBlocks, chainPayloads])
+
   return (
     <div
       ref={rootDivRef}
@@ -161,28 +179,32 @@ export default function LinearReader({
           alignItems: 'center',
         }}
       >
-        {linearBlocks.map((block, i) => (
-          <BlockCrop
-            key={`${block.page}-${block.reading_index}-${i}`}
-            blockIdx={i}
-            block={block}
-            prevBlock={i > 0 ? linearBlocks[i - 1] : null}
-            srcCanvas={pageCanvases[block.page]}
-            pageDim={pageDims?.[block.page]}
-            displayWidth={displayWidth}
-            maxBoxWidth={maxBoxWidth}
-            visible={visibleSet.has(i)}
-            observer={observerInstance}
-            requestPage={requestPage}
-            hovered={hoveredIdx === i}
-            onHoverChange={handleHoverChange}
-            onExplain={onExplain}
-            chainPayload={chainPayloads[i]}
-            activeParagraph={activeParagraph}
-            currentExplanation={currentExplanation}
-            explanation={explanation}
-          />
-        ))}
+        {linearBlocks.map((block, i) => {
+          const chainKey = chainIds[i] != null ? `c-${chainIds[i]}` : `__b-${i}`
+          return (
+            <BlockCrop
+              key={`${block.page}-${block.reading_index}-${i}`}
+              blockIdx={i}
+              block={block}
+              prevBlock={i > 0 ? linearBlocks[i - 1] : null}
+              srcCanvas={pageCanvases[block.page]}
+              pageDim={pageDims?.[block.page]}
+              displayWidth={displayWidth}
+              maxBoxWidth={maxBoxWidth}
+              visible={visibleSet.has(i)}
+              observer={observerInstance}
+              requestPage={requestPage}
+              hovered={hoveredChain === chainKey}
+              chainKey={chainKey}
+              onHoverChange={handleHoverChange}
+              onExplain={onExplain}
+              chainPayload={chainPayloads[i]}
+              activeParagraph={activeParagraph}
+              currentExplanation={currentExplanation}
+              explanation={explanation}
+            />
+          )
+        })}
       </div>
     </div>
   )
@@ -204,6 +226,7 @@ const BlockCrop = memo(function BlockCrop({
   observer,
   requestPage,
   hovered,
+  chainKey,
   onHoverChange,
   onExplain,
   chainPayload,
@@ -287,8 +310,8 @@ const BlockCrop = memo(function BlockCrop({
   // the wrapper still has interactive handlers; once isInteractive flips false
   // it never fires, leaving hovered=true stuck until the block re-enters.
   useEffect(() => {
-    if (!visible && hovered) onHoverChange?.(blockIdx, false)
-  }, [visible, hovered, blockIdx, onHoverChange])
+    if (!visible && hovered) onHoverChange?.(chainKey, false)
+  }, [visible, hovered, chainKey, onHoverChange])
 
   // Draw crop on visibility + cache hit. Re-draws on srcCanvas change (e.g.
   // after eviction + re-render) and on resize/zoom.
@@ -337,7 +360,14 @@ const BlockCrop = memo(function BlockCrop({
     sentences: block.sentences ?? [],
     offset: 0,
   }
-  const isActive  = isInteractive && activeParagraph?.text === payload.text
+  const isActive  = isInteractive && (
+    (!!payload.text && activeParagraph?.text === payload.text)
+    || (isFigure
+        && activeParagraph?.role === block.role
+        && activeParagraph?.page === block.page
+        && activeParagraph?.bbox?.x0 === block.bbox?.x0
+        && activeParagraph?.bbox?.y0 === block.bbox?.y0)
+  )
   const bboxScale = bbW > 0 ? canvasWidth / bbW : 0
   const ownLen    = block.sentences?.length ?? 0
   const ownOffset = payload.offset ?? 0
@@ -383,6 +413,12 @@ const BlockCrop = memo(function BlockCrop({
   const otherBoxes     = boxesFromIndices(otherIndices)
   const highlightBoxes = boxesFromIndices(currentIndices)
 
+  // When a figure/table is active and has a merged caption_bbox, highlight the
+  // caption region of the crop so the user sees what's being analyzed.
+  const captionHighlight = (isActive && isFigure && block.caption_bbox)
+    ? toLocalRect(block.caption_bbox)
+    : null
+
   let anchor = null
   if (isInteractive) {
     if (isFigure) {
@@ -408,13 +444,27 @@ const BlockCrop = memo(function BlockCrop({
       className="relative"
       style={{
         width: boxWidth,
-        height: displayHeight,
+        // `minHeight` reserves layout space matching the canvas BEFORE the
+        // image draws (avoids jump-in on cache miss). Once the canvas
+        // mounts, the wrapper grows to whatever the canvas / placeholder
+        // is, so a 1-px rounding discrepancy never produces a vertical
+        // overflow — and therefore never a phantom Y scrollbar.
+        minHeight: displayHeight,
         marginTop,
         marginBottom,
         overflowX: overflowX ? 'auto' : 'visible',
+        // CSS spec implicitly computes overflowY to `auto` when overflowX
+        // is non-visible. Pin overflowY to hidden so figures / tables only
+        // ever scroll horizontally. Since wrapper height auto-fits the
+        // canvas via the block layout, there is no real overflow to clip.
+        overflowY: overflowX ? 'hidden' : 'visible',
+        // Block any ancestor flex container from shrinking this block
+        // below its natural height (would clip the canvas without showing
+        // a scrollbar because overflowY is hidden).
+        flexShrink: 0,
       }}
-      onMouseEnter={isInteractive ? () => onHoverChange?.(blockIdx, true) : undefined}
-      onMouseLeave={isInteractive ? () => onHoverChange?.(blockIdx, false) : undefined}
+      onMouseEnter={isInteractive ? () => onHoverChange?.(chainKey, true) : undefined}
+      onMouseLeave={isInteractive ? () => onHoverChange?.(chainKey, false) : undefined}
     >
       {isRendered ? (
         <canvas
@@ -469,6 +519,13 @@ const BlockCrop = memo(function BlockCrop({
               style={{ ...box, mixBlendMode: 'multiply' }}
             />
           ))}
+
+          {captionHighlight && (
+            <div
+              className="absolute rounded-sm bg-yellow-300/40 transition-all duration-300 ease-out"
+              style={{ ...captionHighlight, mixBlendMode: 'multiply' }}
+            />
+          )}
 
           {anchor && (
             <button

@@ -146,8 +146,8 @@ export default function Home() {
   }
 
   async function startUpload(file, opts) {
+    setUploadError(null)
     flushSync(() => {
-      setUploadError(null)
       setUploading(true)
       setUploadProgress(0)
       setUploadingFile(file)
@@ -155,11 +155,12 @@ export default function Home() {
     try {
       const formData = new FormData()
       formData.append('file', file)
-      formData.append('language', opts.language)
-      formData.append('keep_terms_in_english', opts.keepTermsInEnglish)
-      if (opts.overwrite) formData.append('overwrite', 'true')
+      formData.append('language', String(opts?.language ?? 'es'))
+      formData.append('keep_terms_in_english', String(Boolean(opts?.keepTermsInEnglish)))
+      if (opts?.overwrite) formData.append('overwrite', 'true')
 
       await axios.post('/api/upload-pdf/', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (e) => {
           setUploadProgress(Math.round((e.loaded / e.total) * 99))
         },
@@ -172,7 +173,20 @@ export default function Home() {
         setOverwritePending({ file, opts })
         return
       }
-      setUploadError(err.response?.data?.detail || 'Error al subir el archivo.')
+      const detail = err.response?.data?.detail
+      let msg
+      if (Array.isArray(detail)) {
+        msg = detail.map(d => `${d.loc?.join('.') ?? ''}: ${d.msg}`).join(' | ')
+      } else if (typeof detail === 'string') {
+        msg = detail
+      } else if (err.response) {
+        msg = `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}`
+      } else if (err.request) {
+        msg = `Sin respuesta del backend (${err.message}). ¿Está corriendo?`
+      } else {
+        msg = err.message || 'Error al subir el archivo.'
+      }
+      setUploadError(msg)
       setUploading(false)
       setUploadingFile(null)
     }

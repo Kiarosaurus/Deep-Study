@@ -106,7 +106,7 @@ function GlobalMapView({ globalMap }) {
   )
 }
 
-function ConceptosPanel({ items, currentIndex, onIndexChange }) {
+function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) {
   const total = items.length
 
   if (total === 0) {
@@ -123,32 +123,52 @@ function ConceptosPanel({ items, currentIndex, onIndexChange }) {
   const concepts = current?.concepts ?? []
   const canPrev  = currentIndex > 0
   const canNext  = currentIndex < total - 1
+  const isPlaceholder = current?.is_placeholder === true
 
   return (
     <div className="flex flex-col gap-5">
       <div
         key={currentIndex}
-        className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+        className={`flex flex-col gap-4 rounded-2xl border p-5 shadow-sm ${
+          isPlaceholder ? 'border-slate-100 bg-slate-50' : 'border-slate-200 bg-white'
+        }`}
         style={{ animation: 'cardIn 0.18s ease-out' }}
       >
-        <blockquote className="border-l-[3px] border-indigo-400 pl-3 py-0.5">
+        <blockquote className={`border-l-[3px] pl-3 py-0.5 ${
+          isPlaceholder ? 'border-slate-300' : 'border-indigo-400'
+        }`}>
           <p className="text-sm italic text-slate-700 leading-snug">
             {current.quote}
           </p>
         </blockquote>
 
-        <div className="flex flex-col gap-4">
-          {concepts.map((c, idx) => (
-            <div key={idx} className="flex flex-col gap-1.5">
-              <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
-                {c.term}
-              </p>
-              <p className="text-[13px] text-slate-600 leading-relaxed">
-                {c.explanation}
-              </p>
+        {isPlaceholder ? (
+          loadingExplain ? (
+            <div className="flex flex-col gap-2 animate-pulse">
+              <div className="h-2.5 bg-slate-200 rounded w-1/3" />
+              <div className="h-2.5 bg-slate-100 rounded w-full" />
+              <div className="h-2.5 bg-slate-100 rounded w-5/6" />
+              <div className="h-2.5 bg-slate-100 rounded w-4/6" />
             </div>
-          ))}
-        </div>
+          ) : (
+            <p className="text-[12px] text-slate-400 italic leading-relaxed">
+              Esta oración no contiene conceptos técnicos que requieran explicación adicional.
+            </p>
+          )
+        ) : (
+          <div className="flex flex-col gap-4">
+            {concepts.map((c, idx) => (
+              <div key={idx} className="flex flex-col gap-1.5">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
+                  {c.term}
+                </p>
+                <p className="text-[13px] text-slate-600 leading-relaxed">
+                  {c.explanation}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
@@ -178,8 +198,23 @@ function ConceptosPanel({ items, currentIndex, onIndexChange }) {
   )
 }
 
-function ContextoPanel({ context }) {
+function ContextoPanel({ context, loadingExplain }) {
   if (!context) {
+    if (loadingExplain) {
+      return (
+        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm animate-pulse">
+          <div className="flex flex-col gap-1.5">
+            <div className="h-2.5 bg-slate-200 rounded w-1/3" />
+            <div className="h-2.5 bg-slate-100 rounded w-5/6" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="h-2.5 bg-slate-200 rounded w-1/3" />
+            <div className="h-2.5 bg-slate-100 rounded w-full" />
+            <div className="h-2.5 bg-slate-100 rounded w-4/6" />
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="mt-6 px-4 py-5 rounded-2xl border border-slate-100 bg-slate-50 text-center">
         <p className="text-xs text-slate-400 leading-relaxed italic">
@@ -215,7 +250,7 @@ function ContextoPanel({ context }) {
   )
 }
 
-function ExplainView({ explanation, error, currentIndex, onIndexChange, explainMode, onExplainModeChange }) {
+function ExplainView({ explanation, error, currentIndex, onIndexChange, explainMode, onExplainModeChange, loadingExplain, retryInfo }) {
   if (error) {
     return (
       <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
@@ -237,6 +272,11 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
 
   return (
     <div className="flex flex-col gap-4">
+      {loadingExplain && retryInfo && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+          Reintentando ({retryInfo.attempt}/{retryInfo.maxAttempts - 1}) en {Math.round(retryInfo.delayMs / 1000)}s — error transitorio del modelo.
+        </div>
+      )}
       <div className="flex p-0.5 bg-slate-100 rounded-lg">
         {[
           { id: 'contexto',  label: 'Contexto'  },
@@ -257,8 +297,8 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
       </div>
 
       {explainMode === 'conceptos'
-        ? <ConceptosPanel items={items} currentIndex={currentIndex} onIndexChange={onIndexChange} />
-        : <ContextoPanel context={context} />
+        ? <ConceptosPanel items={items} currentIndex={currentIndex} onIndexChange={onIndexChange} loadingExplain={loadingExplain} />
+        : <ContextoPanel context={context} loadingExplain={loadingExplain} />
       }
     </div>
   )
@@ -310,15 +350,18 @@ export default function Sidebar({
             : <GlobalMapView globalMap={globalMap} />
         )}
         {tab === 'explain' && (
-          loadingExplain ? <SkeletonExplain retryInfo={retryInfo} /> :
-          <ExplainView
-            explanation={explanation}
-            error={errorExplain}
-            currentIndex={currentIndex}
-            onIndexChange={onIndexChange}
-            explainMode={explainMode}
-            onExplainModeChange={onExplainModeChange}
-          />
+          (loadingExplain && !explanation)
+            ? <SkeletonExplain retryInfo={retryInfo} />
+            : <ExplainView
+                explanation={explanation}
+                error={errorExplain}
+                currentIndex={currentIndex}
+                onIndexChange={onIndexChange}
+                explainMode={explainMode}
+                onExplainModeChange={onExplainModeChange}
+                loadingExplain={loadingExplain}
+                retryInfo={retryInfo}
+              />
         )}
       </div>
     </div>
