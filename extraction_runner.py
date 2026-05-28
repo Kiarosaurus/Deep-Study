@@ -13,10 +13,16 @@ parent cannot change them between requests once it has imported marker. Each
 retry spawns a fresh interpreter so the new env values take effect.
 
 Fallback ladder (top tier first):
-    1. Adaptive batch tier sequence (e.g. [4, 2, 1]).
-    2. Chunked extraction at decreasing chunk sizes (e.g. [5, 2]), all
-       with batch=1. Each chunk runs in its own subprocess so a single huge
-       page that still OOMs at chunk=1 surfaces as ExtractionFailed.
+    1. Adaptive batch tier sequence (e.g. [4, 2, 1]) on the host's default
+       torch device (CUDA / MPS / CPU as detected at install time).
+    2. Chunked extraction at decreasing chunk sizes (e.g. [13, 6, 3, 2]),
+       all with batch=1, default torch device. Each chunk runs in its own
+       subprocess.
+    3. Chunked extraction repeated with TORCH_DEVICE=cpu forced. Only used
+       when the detected device is not already CPU. Slower but eliminates
+       GPU / MPS context overhead, useful when VRAM shares system RAM
+       (integrated GPU, Apple unified memory).
+    4. ExtractionFailed.
 """
 
 from __future__ import annotations
@@ -338,32 +344,47 @@ def extract_resilient(
         # subsequent failure down to `_MIN_CHUNK`.
         initial_chunk = pick_chunk_size(pdf_bytes, profile, n_pages=n_pages)
         chunk_tiers = compute_chunk_fallback_tiers(initial_chunk, n_pages)
-        for chunk_size in chunk_tiers:
-            outcome = _run_chunked(
-                pdf_path,
-                chunk_size,
-                force_cpu=force_cpu,
-                timeout_s=timeout_s,
-                profile=profile,
-                n_pages_total=n_pages,
-                pdf_mb_total=pdf_mb,
-            )
-            if isinstance(outcome, tuple):
-                append_history(
-                    profile,
-                    pdf_pages=n_pages,
-                    pdf_mb=pdf_mb,
-                    batch_tried=1,
-                    result=f"chunked ok (chunk_size={chunk_size})",
+
+        # Device-tier loop: first pass on the detected default device, then
+        # (if not already CPU and not caller-forced) a second pass forcing
+        # TORCH_DEVICE=cpu. CPU mode is the slowest fallback but removes
+        # GPU/MPS context overhead, which can be the actual blocker on
+        # hosts with integrated GPUs sharing system RAM.
+        device_passes: list[tuple[bool, str]] = [(force_cpu, "default")]
+        if not force_cpu and profile.default_device != "cpu":
+            device_passes.append((True, "force-cpu"))
+
+        for use_cpu, pass_label in device_passes:
+            for chunk_size in chunk_tiers:
+                outcome = _run_chunked(
+                    pdf_path,
+                    chunk_size,
+                    force_cpu=use_cpu,
+                    timeout_s=timeout_s,
+                    profile=profile,
+                    n_pages_total=n_pages,
+                    pdf_mb_total=pdf_mb,
                 )
-                save_profile(profile)
-                return outcome
-            last_error = outcome
+                if isinstance(outcome, tuple):
+                    append_history(
+                        profile,
+                        pdf_pages=n_pages,
+                        pdf_mb=pdf_mb,
+                        batch_tried=1,
+                        result=f"chunked ok (chunk_size={chunk_size}, {pass_label})",
+                    )
+                    save_profile(profile)
+                    return outcome
+                last_error = f"{pass_label}: {outcome}"
 
         save_profile(profile)
+        device_summary = (
+            f"default={profile.default_device}"
+            + (", +force-cpu" if len(device_passes) == 2 else "")
+        )
         raise ExtractionFailed(
             f"All fallback tiers exhausted "
-            f"(batch tiers={tiers}, chunk tiers={chunk_tiers}). "
+            f"(batch tiers={tiers}, chunk tiers={chunk_tiers}, {device_summary}). "
             f"Last: {last_error}"
         )
     finally:

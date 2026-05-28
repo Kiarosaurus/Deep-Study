@@ -32,6 +32,7 @@ class MachineProfile:
     per_slot_gb_density: float  # multiplier on density (MB/page) for per-slot cost
     chunk_per_page_gb_base: float = 0.15  # extra RAM per page when chunking, base
     chunk_per_page_gb_density: float = 0.4  # density multiplier for chunk page cost
+    default_device: str = "cpu"  # 'cuda' | 'mps' | 'cpu' — used to skip CPU fallback when already on CPU
     history: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -120,6 +121,44 @@ def get_available_ram_gb() -> float:
     return 0.0
 
 
+def _probe_torch_device() -> str:
+    """Detect whether torch will use CUDA, MPS, or CPU on this host.
+
+    Done in a subprocess so the parent never loads torch into its own
+    interpreter (torch is heavy, and we want the FastAPI process to stay
+    slim). On any failure we conservatively report 'cpu'.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "    if torch.cuda.is_available():\n"
+        "        print('cuda')\n"
+        "    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():\n"
+        "        print('mps')\n"
+        "    else:\n"
+        "        print('cpu')\n"
+        "except Exception:\n"
+        "    print('cpu')\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        device = (result.stdout or "").strip()
+        if device in ("cuda", "mps", "cpu"):
+            return device
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return "cpu"
+
+
 def _default_profile() -> MachineProfile:
     """Build a fresh profile by probing the host."""
     total = _get_total_ram_gb()
@@ -137,16 +176,30 @@ def _default_profile() -> MachineProfile:
         per_slot_gb_density=0.35,
         chunk_per_page_gb_base=0.15,
         chunk_per_page_gb_density=0.4,
+        default_device=_probe_torch_device(),
         history=[],
     )
 
 
 def load_profile() -> MachineProfile:
-    """Read profile from disk; create a new one on first run."""
+    """Read profile from disk; create a new one on first run.
+
+    Performs a light migration: drops unknown keys (forward-incompatible
+    profiles from a future version) and re-probes `default_device` whenever
+    it is absent from an older profile written before the field existed.
+    """
     try:
         if _PROFILE_PATH.exists():
             data = json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
-            return MachineProfile(**data)
+            valid_keys = {f.name for f in MachineProfile.__dataclass_fields__.values()}
+            filtered = {k: v for k, v in data.items() if k in valid_keys}
+            if "default_device" not in filtered:
+                filtered["default_device"] = _probe_torch_device()
+            profile = MachineProfile(**filtered)
+            # Persist any migration so we don't redo the probe each load.
+            if filtered != data:
+                save_profile(profile)
+            return profile
     except (json.JSONDecodeError, TypeError, OSError):
         pass
     profile = _default_profile()
