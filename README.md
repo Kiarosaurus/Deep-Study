@@ -8,7 +8,7 @@ The pipeline applies the following filters automatically: the document title, au
 
 - **Backend:** Python 3.12, FastAPI, Uvicorn, Marker (`marker-pdf`, Surya models), google-genai
 - **Frontend:** React 19, Vite 8, TailwindCSS 4, axios, react-pdf, react-router-dom
-- **AI:** Gemini (`gemini-3.1-flash-lite` for global mapping, `gemini-2.5-flash-lite` for explanations)
+- **AI:** Gemini `gemini-3.1-flash-lite` (used for both global mapping and per-paragraph explanations)
 
 ## Requirements
 
