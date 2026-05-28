@@ -24,15 +24,17 @@ import sys
 import traceback
 
 
-def _set_batch_env(batch: int, force_cpu: bool) -> None:
-    """Set Marker/Surya batch env vars BEFORE any marker import."""
-    # Local import to avoid pulling extraction stack before env is configured.
+def _set_batch_env(batch: int, device: str | None) -> None:
+    """Set Marker/Surya batch env vars and torch device BEFORE marker import.
+
+    `device` accepts 'cuda', 'mps', 'cpu', or None (let torch decide).
+    """
     from batch_planner import env_overrides_for_batch
 
     for key, value in env_overrides_for_batch(batch).items():
         os.environ[key] = value
-    if force_cpu:
-        os.environ["TORCH_DEVICE"] = "cpu"
+    if device:
+        os.environ["TORCH_DEVICE"] = device
 
 
 def _write_status(path: str | None, payload: dict) -> None:
@@ -52,13 +54,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Result JSON path.")
     parser.add_argument("--status", default=None, help="Status JSON path.")
     parser.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Force TORCH_DEVICE=cpu (useful when iGPU shares system RAM).",
+        "--device",
+        default=None,
+        choices=("cuda", "mps", "cpu"),
+        help="Override torch device. Default: let torch decide.",
     )
+    # Back-compat alias kept so older callers passing --cpu still work.
+    parser.add_argument("--cpu", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    _set_batch_env(args.batch, args.cpu)
+    device = args.device or ("cpu" if args.cpu else None)
+    _set_batch_env(args.batch, device)
 
     try:
         # Import here, AFTER env vars, so Marker reads our batch sizes.
@@ -85,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         _write_status(args.status, {
             "ok": True,
             "batch": args.batch,
+            "device": device,
         })
         return 0
     except MemoryError:
@@ -93,18 +100,30 @@ def main(argv: list[str] | None = None) -> int:
             "phase": "extract",
             "error_type": "MemoryError",
             "batch": args.batch,
+            "device": device,
         })
-        return 137  # convention: OOM-like
+        return 137  # convention: system RAM OOM
     except Exception as e:
+        # CUDA OOM is its own torch exception type. We detect it both by
+        # class name (avoids importing torch in this branch) and by message
+        # substring as a defensive fallback.
+        cls_name = type(e).__name__
+        msg = str(e)
+        is_cuda_oom = (
+            cls_name in ("OutOfMemoryError", "CUDAOutOfMemoryError")
+            or "CUDA out of memory" in msg
+            or "CUDA error: out of memory" in msg
+        )
         _write_status(args.status, {
             "ok": False,
             "phase": "extract",
-            "error_type": type(e).__name__,
-            "error_msg": str(e),
+            "error_type": "CUDAOutOfMemoryError" if is_cuda_oom else cls_name,
+            "error_msg": msg,
             "trace": traceback.format_exc(),
             "batch": args.batch,
+            "device": device,
         })
-        return 3
+        return 138 if is_cuda_oom else 3
 
 
 if __name__ == "__main__":

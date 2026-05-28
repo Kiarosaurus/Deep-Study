@@ -13,7 +13,11 @@ from __future__ import annotations
 import io
 from typing import Iterable
 
-from runtime_metrics import MachineProfile, get_available_ram_gb
+from runtime_metrics import (
+    MachineProfile,
+    get_available_ram_gb,
+    get_available_vram_gb,
+)
 
 
 _MIN_BATCH = 1
@@ -42,32 +46,107 @@ def estimate_density_mb_per_page(pdf_bytes: bytes, n_pages: int) -> float:
     return size_mb / max(1, n_pages)
 
 
+def gpu_is_viable(
+    profile: MachineProfile,
+    pdf_bytes: bytes | None = None,
+) -> tuple[bool, str]:
+    """Pre-flight check: is the detected GPU worth trying at all?
+
+    Returns (viable, reason). Viable means VRAM is large enough to hold
+    Marker's base footprint plus at least one batch slot — otherwise the
+    very first GPU attempt would CUDA-OOM and we would just have to fall
+    back to CPU after wasting time.
+
+    Thresholds use the profile's estimated coefficients; when `pdf_bytes`
+    is provided we factor in the actual page density, which makes very
+    image-heavy PDFs require more VRAM than text-only ones.
+    """
+    if profile.default_device != "cuda" or profile.gpu_total_gb <= 0:
+        return False, f"no CUDA device detected (device={profile.default_device!r})"
+
+    avail = get_available_vram_gb(profile)
+    fixed_overhead = _SAFETY_CUSHION_GB + profile.gpu_marker_base_gb
+    if avail <= fixed_overhead:
+        return (
+            False,
+            f"VRAM too small for Marker base "
+            f"(available≈{avail:.2f} GB, need >{fixed_overhead:.2f} GB)",
+        )
+
+    if pdf_bytes is not None:
+        n_pages = quick_page_count(pdf_bytes)
+        density = estimate_density_mb_per_page(pdf_bytes, n_pages)
+    else:
+        density = 0.0
+    per_slot = profile.gpu_per_slot_gb_base + density * profile.gpu_per_slot_gb_density
+    headroom = avail - fixed_overhead
+    if headroom < per_slot:
+        return (
+            False,
+            f"VRAM cannot fit one batch slot "
+            f"(headroom={headroom:.2f} GB, per_slot≈{per_slot:.2f} GB)",
+        )
+
+    return True, (
+        f"GPU viable: avail≈{avail:.2f} GB, headroom={headroom:.2f} GB, "
+        f"per_slot≈{per_slot:.2f} GB"
+    )
+
+
+def _budget_for_device(
+    profile: MachineProfile,
+    device: str,
+    available_gb: float | None,
+) -> tuple[float, float, float, float]:
+    """Return (available, marker_base, per_slot_base, per_slot_density)
+    for the given device. Device 'cuda' draws from the VRAM budget; 'mps'
+    and 'cpu' share the system-RAM budget (MPS uses unified memory)."""
+    if device == "cuda":
+        avail = available_gb if available_gb is not None else get_available_vram_gb(profile)
+        return (
+            avail,
+            profile.gpu_marker_base_gb,
+            profile.gpu_per_slot_gb_base,
+            profile.gpu_per_slot_gb_density,
+        )
+    avail = available_gb if available_gb is not None else get_available_ram_gb()
+    return (
+        avail,
+        profile.marker_base_gb,
+        profile.per_slot_gb_base,
+        profile.per_slot_gb_density,
+    )
+
+
 def pick_batch(
     pdf_bytes: bytes,
     profile: MachineProfile,
     *,
+    device: str | None = None,
     available_gb: float | None = None,
 ) -> int:
-    """Pick an initial batch size for this PDF + current free RAM.
+    """Pick an initial batch size for this PDF + current free memory.
 
     Args:
         pdf_bytes: raw PDF (used for size + page count).
         profile: persisted machine profile.
-        available_gb: override (mainly for testing). Defaults to live psutil read.
+        device: 'cuda' / 'mps' / 'cpu'. Defaults to `profile.default_device`.
+            Selects which memory pool (VRAM vs system RAM) is used as budget.
+        available_gb: override (mainly for testing). Defaults to live probe.
     """
-    if available_gb is None:
-        available_gb = get_available_ram_gb()
+    if device is None:
+        device = profile.default_device
+    avail, marker_base, slot_base, slot_density = _budget_for_device(
+        profile, device, available_gb
+    )
     n_pages = quick_page_count(pdf_bytes)
     density = estimate_density_mb_per_page(pdf_bytes, n_pages)
 
-    # Headroom = what is free now, minus the safety cushion, minus the cost of
-    # loading Marker itself (only relevant on first run of a subprocess — but
-    # since each retry spawns fresh, we always pay this cost).
-    headroom = available_gb - _SAFETY_CUSHION_GB - profile.marker_base_gb
+    headroom = avail - _SAFETY_CUSHION_GB - marker_base
     if headroom <= 0:
         return _MIN_BATCH
 
-    per_slot = profile.per_slot_gb_base + density * profile.per_slot_gb_density
+    per_slot = slot_base + density * slot_density
     if per_slot <= 0:
         return _MAX_BATCH
 
@@ -96,6 +175,7 @@ def pick_chunk_size(
     pdf_bytes: bytes,
     profile: MachineProfile,
     *,
+    device: str | None = None,
     available_gb: float | None = None,
     n_pages: int | None = None,
 ) -> int:
@@ -103,23 +183,33 @@ def pick_chunk_size(
     fallback tier. Uses the same headroom model as `pick_batch` but applied
     to per-page intermediate cost when Marker processes a sub-PDF at batch=1.
     """
-    if available_gb is None:
-        available_gb = get_available_ram_gb()
+    if device is None:
+        device = profile.default_device
+    if device == "cuda":
+        avail = available_gb if available_gb is not None else get_available_vram_gb(profile)
+        marker_base = profile.gpu_marker_base_gb
+        page_base = profile.gpu_chunk_per_page_gb_base
+        page_density = profile.gpu_chunk_per_page_gb_density
+    else:
+        avail = available_gb if available_gb is not None else get_available_ram_gb()
+        marker_base = profile.marker_base_gb
+        page_base = profile.chunk_per_page_gb_base
+        page_density = profile.chunk_per_page_gb_density
+
     if n_pages is None:
         n_pages = quick_page_count(pdf_bytes)
     density = estimate_density_mb_per_page(pdf_bytes, n_pages)
 
-    headroom = available_gb - _SAFETY_CUSHION_GB - profile.marker_base_gb
+    headroom = avail - _SAFETY_CUSHION_GB - marker_base
     if headroom <= 0:
         return _MIN_CHUNK
 
-    per_page = profile.chunk_per_page_gb_base + density * profile.chunk_per_page_gb_density
+    per_page = page_base + density * page_density
     if per_page <= 0:
         return min(_MAX_CHUNK, n_pages)
 
     chunk = int(headroom / per_page)
     chunk = max(_MIN_CHUNK, min(_MAX_CHUNK, chunk))
-    # Never produce a chunk larger than the document itself.
     chunk = min(chunk, max(_MIN_CHUNK, n_pages))
     return chunk
 

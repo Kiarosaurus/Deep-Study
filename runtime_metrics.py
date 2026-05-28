@@ -27,12 +27,25 @@ class MachineProfile:
     total_gb: float
     cores: int
     reserved_gb: float          # estimated baseline used by OS + other apps
-    marker_base_gb: float       # cost of Marker singleton once loaded
-    per_slot_gb_base: float     # additive cost per +1 batch slot, before density
-    per_slot_gb_density: float  # multiplier on density (MB/page) for per-slot cost
-    chunk_per_page_gb_base: float = 0.15  # extra RAM per page when chunking, base
-    chunk_per_page_gb_density: float = 0.4  # density multiplier for chunk page cost
-    default_device: str = "cpu"  # 'cuda' | 'mps' | 'cpu' — used to skip CPU fallback when already on CPU
+    marker_base_gb: float       # cost of Marker singleton once loaded (CPU/RAM path)
+    per_slot_gb_base: float     # additive cost per +1 batch slot, before density (RAM)
+    per_slot_gb_density: float  # multiplier on density (MB/page) for per-slot cost (RAM)
+    chunk_per_page_gb_base: float = 0.15
+    chunk_per_page_gb_density: float = 0.4
+    default_device: str = "cpu"     # 'cuda' | 'mps' | 'cpu' — picked by torch on this host
+    # GPU-side metrics. Populated when default_device == 'cuda'. MPS hosts use
+    # unified memory so VRAM == system RAM and these stay zeroed (the planner
+    # falls back to the RAM budget for MPS).
+    gpu_total_gb: float = 0.0
+    gpu_name: str = ""
+    gpu_available_frac: float = 0.85  # assumed free fraction of VRAM at job start
+    # Educated-guess cost coefficients on GPU. Cheaper per slot than CPU
+    # because VRAM holds only tensor working sets, not Python objects.
+    gpu_marker_base_gb: float = 2.0
+    gpu_per_slot_gb_base: float = 0.35
+    gpu_per_slot_gb_density: float = 0.25
+    gpu_chunk_per_page_gb_base: float = 0.1
+    gpu_chunk_per_page_gb_density: float = 0.3
     history: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -121,42 +134,79 @@ def get_available_ram_gb() -> float:
     return 0.0
 
 
-def _probe_torch_device() -> str:
-    """Detect whether torch will use CUDA, MPS, or CPU on this host.
+def _probe_torch_device_and_vram() -> tuple[str, float, str]:
+    """Detect torch device + total VRAM + GPU name in a subprocess.
 
-    Done in a subprocess so the parent never loads torch into its own
-    interpreter (torch is heavy, and we want the FastAPI process to stay
-    slim). On any failure we conservatively report 'cpu'.
+    Returns ``(device, gpu_total_gb, gpu_name)``.
+
+    Done out-of-process so the parent never loads torch (heavy import).
+    For CUDA, reads `torch.cuda.get_device_properties(0).total_memory` to
+    learn how much VRAM the planner can budget against. For MPS, we don't
+    expose a separate VRAM number because Apple unified memory means VRAM
+    == system RAM — the planner detects this and falls back to the RAM
+    budget for MPS. CPU hosts return ``("cpu", 0.0, "")``.
     """
     import subprocess
     import sys
 
     code = (
-        "import sys\n"
+        "import json\n"
+        "out = {'device': 'cpu', 'vram_gb': 0.0, 'name': ''}\n"
         "try:\n"
         "    import torch\n"
         "    if torch.cuda.is_available():\n"
-        "        print('cuda')\n"
+        "        idx = 0\n"
+        "        props = torch.cuda.get_device_properties(idx)\n"
+        "        out['device'] = 'cuda'\n"
+        "        out['vram_gb'] = props.total_memory / 1e9\n"
+        "        out['name'] = props.name\n"
         "    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():\n"
-        "        print('mps')\n"
-        "    else:\n"
-        "        print('cpu')\n"
+        "        out['device'] = 'mps'\n"
+        "        # MPS uses unified memory; do not duplicate the RAM number.\n"
+        "        out['name'] = 'Apple MPS'\n"
         "except Exception:\n"
-        "    print('cpu')\n"
+        "    pass\n"
+        "print(json.dumps(out))\n"
     )
     try:
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=25,
         )
-        device = (result.stdout or "").strip()
-        if device in ("cuda", "mps", "cpu"):
-            return device
-    except (subprocess.TimeoutExpired, OSError):
+        text = (result.stdout or "").strip().splitlines()
+        if text:
+            payload = json.loads(text[-1])
+            device = payload.get("device", "cpu")
+            vram = float(payload.get("vram_gb", 0.0) or 0.0)
+            name = payload.get("name", "") or ""
+            if device in ("cuda", "mps", "cpu"):
+                return device, round(vram, 2), name
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError, ValueError):
         pass
-    return "cpu"
+    return "cpu", 0.0, ""
+
+
+def _probe_torch_device() -> str:
+    """Back-compat wrapper for the device-only probe used by load_profile
+    migration of older profiles that did not yet store VRAM metrics."""
+    return _probe_torch_device_and_vram()[0]
+
+
+def get_available_vram_gb(profile: MachineProfile) -> float:
+    """Conservative estimate of currently-free VRAM.
+
+    We do not re-probe `torch.cuda.mem_get_info()` here because that would
+    require loading torch in the parent (or another subprocess per call).
+    Instead we assume `gpu_available_frac` of `gpu_total_gb` is free — a
+    safe lower bound when no other GPU workload is running. Real OOM events
+    feed back into history so the fraction can be refined. Returns 0 when
+    no GPU was detected.
+    """
+    if profile.gpu_total_gb <= 0:
+        return 0.0
+    return profile.gpu_total_gb * profile.gpu_available_frac
 
 
 def _default_profile() -> MachineProfile:
@@ -165,6 +215,7 @@ def _default_profile() -> MachineProfile:
     system = platform.system()
     # Windows reserves more for OS + Defender + Explorer than typical Linux.
     reserved = 3.5 if system == "Windows" else 2.0
+    device, gpu_gb, gpu_name = _probe_torch_device_and_vram()
     return MachineProfile(
         detected_at=time.time(),
         os=system,
@@ -176,7 +227,9 @@ def _default_profile() -> MachineProfile:
         per_slot_gb_density=0.35,
         chunk_per_page_gb_base=0.15,
         chunk_per_page_gb_density=0.4,
-        default_device=_probe_torch_device(),
+        default_device=device,
+        gpu_total_gb=gpu_gb,
+        gpu_name=gpu_name,
         history=[],
     )
 
@@ -193,8 +246,11 @@ def load_profile() -> MachineProfile:
             data = json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
             valid_keys = {f.name for f in MachineProfile.__dataclass_fields__.values()}
             filtered = {k: v for k, v in data.items() if k in valid_keys}
-            if "default_device" not in filtered:
-                filtered["default_device"] = _probe_torch_device()
+            if "default_device" not in filtered or "gpu_total_gb" not in filtered:
+                device, gpu_gb, gpu_name = _probe_torch_device_and_vram()
+                filtered.setdefault("default_device", device)
+                filtered.setdefault("gpu_total_gb", gpu_gb)
+                filtered.setdefault("gpu_name", gpu_name)
             profile = MachineProfile(**filtered)
             # Persist any migration so we don't redo the probe each load.
             if filtered != data:

@@ -13,16 +13,20 @@ parent cannot change them between requests once it has imported marker. Each
 retry spawns a fresh interpreter so the new env values take effect.
 
 Fallback ladder (top tier first):
-    1. Adaptive batch tier sequence (e.g. [4, 2, 1]) on the host's default
-       torch device (CUDA / MPS / CPU as detected at install time).
-    2. Chunked extraction at decreasing chunk sizes (e.g. [13, 6, 3, 2]),
-       all with batch=1, default torch device. Each chunk runs in its own
-       subprocess.
-    3. Chunked extraction repeated with TORCH_DEVICE=cpu forced. Only used
-       when the detected device is not already CPU. Slower but eliminates
-       GPU / MPS context overhead, useful when VRAM shares system RAM
-       (integrated GPU, Apple unified memory).
-    4. ExtractionFailed.
+    0. Pre-flight: drop CUDA from the ladder if VRAM cannot fit Marker's
+       base footprint plus one batch slot. Avoids paying 10-30s of GPU
+       cold-start only to CUDA-OOM on the first attempt.
+    1. GPU pass (only if CUDA/MPS detected AND the pre-flight check
+       passed): adaptive batch tiers sized against VRAM, then chunked tiers
+       sized against VRAM. The first CUDA OOM during the pass abandons
+       this device immediately (smaller batch on the same VRAM doesn't
+       help when the model itself doesn't fit).
+    2. CPU pass: adaptive batch tiers sized against system RAM, then
+       chunked tiers sized against system RAM. Safety net.
+    3. ExtractionFailed.
+
+GPU vs CPU OOM are distinguished by child exit code (138 vs 137) and the
+`error_type` field of the status JSON.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from typing import Any
 from batch_planner import (
     compute_chunk_fallback_tiers,
     compute_fallback_tiers,
+    gpu_is_viable,
     pick_batch,
     pick_chunk_size,
     quick_page_count,
@@ -68,25 +73,39 @@ class ExtractionFailed(RuntimeError):
 # and retried at a lower tier. A clean error_type other than MemoryError
 # from the status file aborts retries (e.g. unparseable PDF).
 def _looks_like_oom(returncode: int, status: dict[str, Any] | None) -> bool:
+    """OOM-like = retry candidate. Includes RAM OOM (137), CUDA OOM (138),
+    and any non-zero exit with no status file (likely OS hard kill)."""
     if status is not None and not status.get("ok", False):
         err = status.get("error_type", "")
-        if err == "MemoryError":
+        if err in ("MemoryError", "CUDAOutOfMemoryError"):
             return True
-        # Any other clean error from the child is a real bug, not OOM.
         return False
     if returncode == 0:
         return False
-    return True  # non-zero with no status file → likely hard kill
+    return True
+
+
+def _is_cuda_oom(returncode: int, status: dict[str, Any] | None) -> bool:
+    """Specifically a CUDA OOM — used to abandon the GPU pass early without
+    further GPU retries (smaller batches usually don't help once VRAM is
+    fragmented or the model itself doesn't fit)."""
+    if status is not None and status.get("error_type") == "CUDAOutOfMemoryError":
+        return True
+    return returncode == 138
 
 
 def _run_subprocess(
     pdf_path: Path,
     batch: int,
     *,
-    force_cpu: bool,
+    device: str | None,
     timeout_s: float,
 ) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
-    """Run marker_worker once. Returns (returncode, status_dict, result_dict)."""
+    """Run marker_worker once. Returns (returncode, status_dict, result_dict).
+
+    `device` overrides the child's torch device. Pass None to let torch pick
+    the default; pass 'cpu' / 'cuda' / 'mps' to force one.
+    """
     with tempfile.TemporaryDirectory(prefix="deepstudy-extract-") as td:
         out_path = Path(td) / "out.json"
         status_path = Path(td) / "status.json"
@@ -103,8 +122,8 @@ def _run_subprocess(
             "--status",
             str(status_path),
         ]
-        if force_cpu:
-            cmd.append("--cpu")
+        if device:
+            cmd.extend(["--device", device])
         try:
             completed = subprocess.run(
                 cmd,
@@ -203,15 +222,16 @@ def _run_chunked(
     pdf_path: Path,
     chunk_size: int,
     *,
-    force_cpu: bool,
+    device: str | None,
     timeout_s: float,
     profile: MachineProfile,
     n_pages_total: int,
     pdf_mb_total: float,
 ) -> tuple[list[PageBlocks], list[FullBlock]] | str:
     """Run one chunked-extraction tier. Each chunk runs in its own subprocess
-    at batch=1. Returns the stitched (pages, linear) on success, or a string
-    reason on failure (OOM-like or clean error in any chunk)."""
+    at batch=1 on the given device. Returns the stitched (pages, linear) on
+    success, or a string reason on failure (OOM-like or clean error in any
+    chunk)."""
     with tempfile.TemporaryDirectory(prefix="deepstudy-chunked-") as td:
         workdir = Path(td)
         try:
@@ -224,7 +244,7 @@ def _run_chunked(
             rc, status, result = _run_subprocess(
                 sub_path,
                 batch=1,
-                force_cpu=force_cpu,
+                device=device,
                 timeout_s=timeout_s,
             )
             if rc == 0 and result is not None:
@@ -257,27 +277,146 @@ def _run_chunked(
         return pages, linear
 
 
+def _run_device_pass(
+    pdf_path: Path,
+    pdf_bytes: bytes,
+    *,
+    device: str,
+    profile: MachineProfile,
+    timeout_s: float,
+    n_pages: int,
+    pdf_mb: float,
+) -> tuple[list[PageBlocks], list[FullBlock]] | dict:
+    """Run a full batch+chunk pass on the given device.
+
+    Returns (pages, linear) on success, or a dict with:
+        - 'kind': 'cuda_oom' | 'oom' | 'error' | 'exhausted'
+        - 'last_error': str
+        - 'batch_tiers': list[int]
+        - 'chunk_tiers': list[int]
+    so the caller can decide whether to move to the next device.
+    """
+    batch_init = pick_batch(pdf_bytes, profile, device=device)
+    batch_tiers = compute_fallback_tiers(batch_init)
+
+    last_error: str | None = None
+    for batch in batch_tiers:
+        rc, status, result = _run_subprocess(
+            pdf_path,
+            batch,
+            device=device,
+            timeout_s=timeout_s,
+        )
+
+        if rc == 0 and result is not None:
+            append_history(
+                profile,
+                pdf_pages=n_pages,
+                pdf_mb=pdf_mb,
+                batch_tried=batch,
+                result=f"ok ({device})",
+            )
+            pages = [PageBlocks(**p) for p in result["pages"]]
+            linear = [FullBlock(**b) for b in result["linear"]]
+            return pages, linear
+
+        if _is_cuda_oom(rc, status):
+            # CUDA OOM never benefits from smaller batches in the same VRAM —
+            # abandon this device immediately so the caller can fall back to
+            # CPU (which has a different memory pool).
+            append_history(
+                profile,
+                pdf_pages=n_pages,
+                pdf_mb=pdf_mb,
+                batch_tried=batch,
+                result=f"cuda_oom ({device}, batch={batch})",
+            )
+            return {
+                "kind": "cuda_oom",
+                "last_error": f"CUDA OOM at batch={batch}",
+                "batch_tiers": batch_tiers,
+                "chunk_tiers": [],
+            }
+
+        if _looks_like_oom(rc, status):
+            append_history(
+                profile,
+                pdf_pages=n_pages,
+                pdf_mb=pdf_mb,
+                batch_tried=batch,
+                result=f"oom ({device}, batch={batch}, rc={rc})",
+            )
+            last_error = f"OOM at batch={batch} on {device} (rc={rc})"
+            continue
+
+        err_type = (status or {}).get("error_type", "UnknownError")
+        err_msg = (status or {}).get("error_msg", "")
+        append_history(
+            profile,
+            pdf_pages=n_pages,
+            pdf_mb=pdf_mb,
+            batch_tried=batch,
+            result=f"error:{err_type} ({device})",
+        )
+        return {
+            "kind": "error",
+            "last_error": f"{err_type}: {err_msg}",
+            "batch_tiers": batch_tiers,
+            "chunk_tiers": [],
+        }
+
+    # Batch tiers exhausted — try chunked extraction on the same device.
+    chunk_init = pick_chunk_size(pdf_bytes, profile, device=device, n_pages=n_pages)
+    chunk_tiers = compute_chunk_fallback_tiers(chunk_init, n_pages)
+    for chunk_size in chunk_tiers:
+        outcome = _run_chunked(
+            pdf_path,
+            chunk_size,
+            device=device,
+            timeout_s=timeout_s,
+            profile=profile,
+            n_pages_total=n_pages,
+            pdf_mb_total=pdf_mb,
+        )
+        if isinstance(outcome, tuple):
+            append_history(
+                profile,
+                pdf_pages=n_pages,
+                pdf_mb=pdf_mb,
+                batch_tried=1,
+                result=f"chunked ok (chunk_size={chunk_size}, {device})",
+            )
+            return outcome
+        last_error = f"{device} chunked: {outcome}"
+
+    return {
+        "kind": "exhausted",
+        "last_error": last_error or "no attempts",
+        "batch_tiers": batch_tiers,
+        "chunk_tiers": chunk_tiers,
+    }
+
+
 def extract_resilient(
     pdf_bytes: bytes,
     *,
     force_cpu: bool = False,
     timeout_s: float = 600.0,
 ) -> tuple[list[PageBlocks], list[FullBlock]]:
-    """Run extraction in a subprocess, retrying with smaller batches on OOM.
+    """Run extraction with full GPU-then-CPU device fallback.
 
-    Each retry spawns a fresh interpreter so that Marker re-reads its batch
-    env vars. The fallback sequence is derived from the host's current free
-    RAM and the PDF's size + page count, then halved on each failure down to
-    batch=1. If batch=1 still OOMs, raises `ExtractionFailed`.
+    Each device runs its own batch + chunk tier sequence in fresh subprocesses
+    so Marker / Surya re-read their env vars per attempt. If the host has a
+    CUDA device, we try GPU first (sized against VRAM); on CUDA OOM or any
+    GPU-side OOM we fall through to a CPU pass (sized against system RAM).
+    `force_cpu=True` skips the GPU pass entirely.
     """
     profile = load_profile()
-    initial = pick_batch(pdf_bytes, profile)
-    tiers = compute_fallback_tiers(initial)
     n_pages = quick_page_count(pdf_bytes)
     pdf_mb = len(pdf_bytes) / 1e6
 
-    # Stage the PDF on disk once so each retry can read it without holding
-    # multi-MB buffers in the parent.
+    # Stage PDF once so each retry reads from disk and the parent does not
+    # keep the multi-MB buffer alive while a child runs.
     with tempfile.NamedTemporaryFile(
         mode="wb",
         suffix=".pdf",
@@ -287,105 +426,59 @@ def extract_resilient(
         f.write(pdf_bytes)
         pdf_path = Path(f.name)
 
-    last_error: str | None = None
+    # Build device sequence. CUDA only enters the ladder when it passes the
+    # pre-flight VRAM-viability check — if the GPU is too small to fit
+    # Marker's base plus a single batch slot, trying it would always CUDA-OOM
+    # on the first attempt and waste 10-30s of cold-start. Skipping it
+    # outright keeps the ladder strictly "try things that might work".
+    # MPS is treated as a distinct tier so torch can use Metal even though
+    # the memory budget is shared with system RAM.
+    devices: list[str] = []
+    last_summary: list[str] = []
+    if not force_cpu:
+        if profile.default_device == "cuda":
+            viable, reason = gpu_is_viable(profile, pdf_bytes)
+            if viable:
+                devices.append("cuda")
+            else:
+                last_summary.append(f"cuda[skipped]: {reason}")
+        elif profile.default_device == "mps":
+            devices.append("mps")
+    if not devices or devices[-1] != "cpu":
+        devices.append("cpu")
     try:
-        for batch in tiers:
-            rc, status, result = _run_subprocess(
+        for device in devices:
+            outcome = _run_device_pass(
                 pdf_path,
-                batch,
-                force_cpu=force_cpu,
+                pdf_bytes,
+                device=device,
+                profile=profile,
                 timeout_s=timeout_s,
-            )
-
-            if rc == 0 and result is not None:
-                append_history(
-                    profile,
-                    pdf_pages=n_pages,
-                    pdf_mb=pdf_mb,
-                    batch_tried=batch,
-                    result="ok",
-                )
-                save_profile(profile)
-                pages = [PageBlocks(**p) for p in result["pages"]]
-                linear = [FullBlock(**b) for b in result["linear"]]
-                return pages, linear
-
-            if _looks_like_oom(rc, status):
-                append_history(
-                    profile,
-                    pdf_pages=n_pages,
-                    pdf_mb=pdf_mb,
-                    batch_tried=batch,
-                    result=f"oom (rc={rc})",
-                )
-                last_error = f"OOM-like exit (rc={rc}) at batch={batch}"
-                continue
-
-            # Clean non-OOM error from child — don't bother retrying.
-            err_type = (status or {}).get("error_type", "UnknownError")
-            err_msg = (status or {}).get("error_msg", "")
-            append_history(
-                profile,
-                pdf_pages=n_pages,
+                n_pages=n_pages,
                 pdf_mb=pdf_mb,
-                batch_tried=batch,
-                result=f"error:{err_type}",
             )
-            save_profile(profile)
-            raise ExtractionFailed(
-                f"Extraction failed in child: {err_type}: {err_msg}"
+            if isinstance(outcome, tuple):
+                save_profile(profile)
+                return outcome
+
+            last_summary.append(
+                f"{device}[{outcome['kind']}]: {outcome['last_error']} "
+                f"(batch tiers={outcome['batch_tiers']}, "
+                f"chunk tiers={outcome['chunk_tiers']})"
             )
 
-        # Batch tiers exhausted. Try chunked extraction: split the PDF into
-        # smaller sub-PDFs so per-chunk peak RAM is bounded even when a single
-        # whole-document run cannot fit at batch=1. The initial chunk size is
-        # derived from current available RAM + per-page intermediate cost
-        # coefficients in the machine profile; it then halves on each
-        # subsequent failure down to `_MIN_CHUNK`.
-        initial_chunk = pick_chunk_size(pdf_bytes, profile, n_pages=n_pages)
-        chunk_tiers = compute_chunk_fallback_tiers(initial_chunk, n_pages)
-
-        # Device-tier loop: first pass on the detected default device, then
-        # (if not already CPU and not caller-forced) a second pass forcing
-        # TORCH_DEVICE=cpu. CPU mode is the slowest fallback but removes
-        # GPU/MPS context overhead, which can be the actual blocker on
-        # hosts with integrated GPUs sharing system RAM.
-        device_passes: list[tuple[bool, str]] = [(force_cpu, "default")]
-        if not force_cpu and profile.default_device != "cpu":
-            device_passes.append((True, "force-cpu"))
-
-        for use_cpu, pass_label in device_passes:
-            for chunk_size in chunk_tiers:
-                outcome = _run_chunked(
-                    pdf_path,
-                    chunk_size,
-                    force_cpu=use_cpu,
-                    timeout_s=timeout_s,
-                    profile=profile,
-                    n_pages_total=n_pages,
-                    pdf_mb_total=pdf_mb,
+            # Clean non-OOM child error → don't waste time on more devices.
+            if outcome["kind"] == "error":
+                save_profile(profile)
+                raise ExtractionFailed(
+                    f"Extraction failed in child on {device}: "
+                    f"{outcome['last_error']}"
                 )
-                if isinstance(outcome, tuple):
-                    append_history(
-                        profile,
-                        pdf_pages=n_pages,
-                        pdf_mb=pdf_mb,
-                        batch_tried=1,
-                        result=f"chunked ok (chunk_size={chunk_size}, {pass_label})",
-                    )
-                    save_profile(profile)
-                    return outcome
-                last_error = f"{pass_label}: {outcome}"
 
         save_profile(profile)
-        device_summary = (
-            f"default={profile.default_device}"
-            + (", +force-cpu" if len(device_passes) == 2 else "")
-        )
         raise ExtractionFailed(
-            f"All fallback tiers exhausted "
-            f"(batch tiers={tiers}, chunk tiers={chunk_tiers}, {device_summary}). "
-            f"Last: {last_error}"
+            "All fallback tiers exhausted across devices "
+            f"({' | '.join(last_summary)})"
         )
     finally:
         try:
