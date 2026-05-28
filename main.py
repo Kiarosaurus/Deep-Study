@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from extraction import extract_both
+from extraction_runner import ExtractionFailed, extract_resilient
 from models import (
     DocumentInfo,
     ExplainRequest,
@@ -382,7 +382,16 @@ async def upload_pdf(
     dest.write_bytes(contents)
 
     try:
-        pages_data, linear_blocks = extract_both(contents)
+        pages_data, linear_blocks = extract_resilient(contents)
+    except ExtractionFailed as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                "PDF extraction exhausted memory at every fallback batch size. "
+                f"Close other applications and retry. Detail: {e}"
+            ),
+        )
     except Exception as e:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
