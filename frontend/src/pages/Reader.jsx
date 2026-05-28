@@ -40,7 +40,7 @@ const EXPLAIN_CACHE_VERSION = 'v2'
 function explainCacheKey(filename, text, opts = {}) {
   // Figures/tables have no representative text — key on role+page+bbox so a
   // recropped or relocated figure invalidates correctly.
-  if (opts.role === 'figure' || opts.role === 'table') {
+  if (opts.role === 'figure' || opts.role === 'table' || opts.role === 'algorithm') {
     const b = opts.bbox || {}
     const tag = `${opts.role}:${opts.page}:${b.x0},${b.y0},${b.x1},${b.y1}`
     return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${filename}:${djb2(tag)}`
@@ -198,7 +198,7 @@ export default function Reader() {
           sentences: pay.mergedSentences ?? pay.sentences,
           flat_block_ref: b.flat_block_ref,
         })
-      } else if (b.role === 'figure' || b.role === 'table') {
+      } else if (b.role === 'figure' || b.role === 'table' || b.role === 'algorithm') {
         items.push({
           kind: 'figure',
           linearIdx: i,
@@ -289,7 +289,7 @@ export default function Reader() {
   const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
     const { initialIndex = 0, role, page, bbox, caption_text } = opts
-    const isFigure = role === 'figure' || role === 'table'
+    const isFigure = role === 'figure' || role === 'table' || role === 'algorithm'
 
     // Stamp this call so an earlier in-flight fetch can't overwrite a later
     // user action (e.g. retry-throttled A resolving after the user clicked B).
@@ -443,7 +443,7 @@ export default function Reader() {
       // earlier reading-order fragment when a sentence is split across blocks.
       const sentenceTargetForItem = (item) => {
         if (!activeParagraph) return null
-        if (activeParagraph.role === 'figure' || activeParagraph.role === 'table') {
+        if (activeParagraph.role === 'figure' || activeParagraph.role === 'table' || activeParagraph.role === 'algorithm') {
           for (let i = 0; i < linearBlocks.length; i++) {
             const b = linearBlocks[i]
             if (b.role === activeParagraph.role

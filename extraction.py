@@ -428,6 +428,156 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     return merged
 
 
+# ── Algorithm-box detection ──────────────────────────────────────────────────
+# Algorithm environments in IEEE/ACM/LaTeX papers carry a stable header like
+# "Algorithm 1 Min-Max Decomposition" or "Algorithm 2: Foo". Marker decomposes
+# the box into a mix of Text / ListItem / Equation / Code blocks because it
+# lacks a native Algorithm block type, so we re-stitch them here by detecting
+# the header and greedily absorbing visually contiguous blocks.
+_ALGORITHM_HEADER_RE = re.compile(r"^\s*Algorithm\s+\d+\b", re.IGNORECASE)
+_ALGORITHM_GAP_FACTOR = 1.8        # max y-gap as multiple of header line height
+_ALGORITHM_HOVERLAP_MIN = 0.55     # min horizontal overlap fraction
+
+
+def _hoverlap(a: BBox, b: BBox) -> float:
+    inter = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+    width = max(1e-6, min(a.x1 - a.x0, b.x1 - b.x0))
+    return inter / width
+
+
+def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
+    """Detect 'Algorithm N ...' regions and collapse them into a single
+    role='algorithm' FullBlock. Greedy absorption from the header forward:
+    keep eating blocks that overlap horizontally with the running bbox and
+    sit within a small vertical gap. Stop on structural breaks (section
+    header, title, author, figure, table) or another algorithm header."""
+    out: list[FullBlock] = []
+    i = 0
+    while i < len(blocks):
+        b = blocks[i]
+        text = (b.text or "").lstrip()
+        if (
+            b.role in ("paragraph", "code", "caption")
+            and b.page is not None
+            and _ALGORITHM_HEADER_RE.match(text)
+        ):
+            header = b
+            header_h = max(1.0, header.bbox.y1 - header.bbox.y0)
+            union = BBox(**header.bbox.model_dump())
+            parts_text: list[str] = [header.text or ""]
+            consumed = [i]
+            j = i + 1
+            while j < len(blocks):
+                nb = blocks[j]
+                if nb.page != header.page:
+                    break
+                if nb.role in ("section_header", "title", "author", "figure", "table"):
+                    break
+                if _ALGORITHM_HEADER_RE.match((nb.text or "").lstrip()):
+                    break
+                gap = nb.bbox.y0 - union.y1
+                if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                    break
+                if _hoverlap(union, nb.bbox) < _ALGORITHM_HOVERLAP_MIN:
+                    break
+                union = BBox(
+                    x0=min(union.x0, nb.bbox.x0),
+                    y0=min(union.y0, nb.bbox.y0),
+                    x1=max(union.x1, nb.bbox.x1),
+                    y1=max(union.y1, nb.bbox.y1),
+                )
+                parts_text.append(nb.text or "")
+                consumed.append(j)
+                j += 1
+            if len(consumed) >= 2:
+                header_line = (header.text or "").splitlines()[0].strip()
+                out.append(FullBlock(
+                    role="algorithm",
+                    text="\n".join(p for p in parts_text if p),
+                    page=header.page,
+                    bbox=union,
+                    reading_index=header.reading_index,
+                    sentences=[],
+                    flat_block_ref=header.flat_block_ref,
+                    continuation=False,
+                    caption_text=header_line,
+                    caption_bbox=header.bbox,
+                ))
+                i = j
+                continue
+        out.append(b)
+        i += 1
+    return out
+
+
+def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
+    """Per-page mirror. Detects algorithm regions inside `blocks` (paragraph
+    list) and lifts them into `images` as ImageBlock(role='algorithm') so the
+    paginated PdfViewer treats them like a figure/table crop."""
+    for pg in pages:
+        kept: list[ParagraphBlock] = []
+        i = 0
+        while i < len(pg.blocks):
+            b = pg.blocks[i]
+            text = (b.text or "").lstrip()
+            if b.role in ("paragraph", "code", "caption") and _ALGORITHM_HEADER_RE.match(text):
+                # Block-level bbox from paragraph.boxes union (ParagraphBlock has
+                # no single bbox attribute — derive it).
+                def pbbox(p: ParagraphBlock) -> BBox | None:
+                    if not p.boxes:
+                        return None
+                    xs0 = min(bx.x0 for bx in p.boxes)
+                    ys0 = min(bx.y0 for bx in p.boxes)
+                    xs1 = max(bx.x1 for bx in p.boxes)
+                    ys1 = max(bx.y1 for bx in p.boxes)
+                    return BBox(x0=xs0, y0=ys0, x1=xs1, y1=ys1)
+                hbb = pbbox(b)
+                if hbb is None:
+                    kept.append(b)
+                    i += 1
+                    continue
+                union = BBox(**hbb.model_dump())
+                header_h = max(1.0, hbb.y1 - hbb.y0)
+                header_line = (b.text or "").splitlines()[0].strip()
+                consumed = 1
+                j = i + 1
+                while j < len(pg.blocks):
+                    nb = pg.blocks[j]
+                    if nb.role in ("section_header", "title", "author"):
+                        break
+                    if _ALGORITHM_HEADER_RE.match((nb.text or "").lstrip()):
+                        break
+                    nbb = pbbox(nb)
+                    if nbb is None:
+                        break
+                    gap = nbb.y0 - union.y1
+                    if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                        break
+                    if _hoverlap(union, nbb) < _ALGORITHM_HOVERLAP_MIN:
+                        break
+                    union = BBox(
+                        x0=min(union.x0, nbb.x0),
+                        y0=min(union.y0, nbb.y0),
+                        x1=max(union.x1, nbb.x1),
+                        y1=max(union.y1, nbb.y1),
+                    )
+                    consumed += 1
+                    j += 1
+                if consumed >= 2:
+                    pg.images.append(ImageBlock(
+                        bbox=union,
+                        reading_index=b.reading_index,
+                        role="algorithm",
+                        caption_text=header_line,
+                        caption_bbox=hbb,
+                    ))
+                    i = j
+                    continue
+            kept.append(b)
+            i += 1
+        pg.blocks = kept
+
+
 def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
     """Post-pass over the linear projection. Walks every paragraph and checks
     `_is_continuation` against the most recent prior paragraph, ignoring ALL
@@ -733,6 +883,7 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     document = _run_marker(pdf_bytes)
     pages = _extract_pages_from_document(document)
     _merge_figure_captions_pages(pages)
+    _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
     return pages
 
@@ -921,6 +1072,7 @@ def extract_linear_blocks(pdf_bytes: bytes) -> list[FullBlock]:
     document = _run_marker(pdf_bytes)
     blocks = _extract_linear_from_document(document)
     blocks = _merge_figure_captions_linear(blocks)
+    blocks = _merge_algorithms_linear(blocks)
     _merge_continuations_linear(blocks)
     return blocks
 
@@ -939,7 +1091,9 @@ def extract_both(
     pages  = _extract_pages_from_document(document, line_cache)
     linear = _extract_linear_from_document(document, line_cache)
     linear = _merge_figure_captions_linear(linear)
+    linear = _merge_algorithms_linear(linear)
     _merge_figure_captions_pages(pages)
+    _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
     _merge_continuations_linear(linear)
     return pages, linear

@@ -45,7 +45,7 @@ class ImageBlock(BaseModel):
     reading_index: int = 0
     # Sub-type: "figure" (default) or "table". Set by extraction based on the
     # underlying Marker block type. Mirrors the linear projection's role.
-    role: Literal["figure", "table"] = "figure"
+    role: Literal["figure", "table", "algorithm"] = "figure"
     # Populated when `_merge_figure_captions_pages` finds an adjacent caption
     # (Marker-tagged or paragraph matching `_CAPTION_LIKE_RE`) and absorbs it
     # into this image. Frontend treats the union bbox as the hover region so
@@ -84,6 +84,7 @@ FullBlockRole = Literal[
     "equation",
     "code",
     "list",
+    "algorithm",
 ]
 
 
@@ -128,7 +129,7 @@ class ExplainRequest(BaseModel):
     # figure/table the backend rasterizes the bbox of the source PDF, sends
     # the image to Gemini multimodal, and uses caption_text as accompanying
     # context.
-    block_type: Literal["paragraph", "figure", "table"] = "paragraph"
+    block_type: Literal["paragraph", "figure", "table", "algorithm"] = "paragraph"
     filename: str | None = None
     page: int | None = None
     bbox: BBox | None = None

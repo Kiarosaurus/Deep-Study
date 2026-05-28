@@ -331,7 +331,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               )}
               onMouseEnter={() => setHoveredImgIdx(i)}
               onMouseLeave={() => setHoveredImgIdx(null)}
-              title={`Explicar ${img.role === 'table' ? 'tabla' : 'figura'}`}
+              title={`Explicar ${img.role === 'table' ? 'tabla' : img.role === 'algorithm' ? 'algoritmo' : 'figura'}`}
             >
               ✦
             </button>

@@ -264,7 +264,7 @@ const BlockCrop = memo(function BlockCrop({
   // Full-width figures / tables are allowed to bleed beyond the column; every
   // other block clamps to displayWidth (so a title or wide section header
   // gets downscaled instead of overflowing).
-  const canBeFullWidth = block.role === 'figure' || block.role === 'table'
+  const canBeFullWidth = block.role === 'figure' || block.role === 'table' || block.role === 'algorithm'
   const isFullWidth = canBeFullWidth
     && pageDim
     && bbW > pageDim.width * FULL_WIDTH_PT_FRACTION
@@ -344,7 +344,7 @@ const BlockCrop = memo(function BlockCrop({
   }, [visible, srcCanvas, canvasWidth, displayHeight, bbox.x0, inflatedY0, bbW, bbH])
 
   const isRendered    = visible && !!srcCanvas
-  const isFigure      = block.role === 'figure' || block.role === 'table'
+  const isFigure      = block.role === 'figure' || block.role === 'table' || block.role === 'algorithm'
   const isInteractive = isRendered && (
     (block.role === 'paragraph' && (block.sentences?.length ?? 0) > 0)
     || isFigure
@@ -576,7 +576,7 @@ const BlockCrop = memo(function BlockCrop({
                   )
                 }
               }}
-              title={isFigure ? `Explicar ${block.role === 'table' ? 'tabla' : 'figura'}` : 'Explicar párrafo'}
+              title={isFigure ? `Explicar ${block.role === 'table' ? 'tabla' : block.role === 'algorithm' ? 'algoritmo' : 'figura'}` : 'Explicar párrafo'}
             >
               ✦
             </button>

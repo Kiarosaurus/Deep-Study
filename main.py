@@ -178,6 +178,48 @@ _FIGURE_EXPLAIN_CONFIG = types.GenerateContentConfig(
 )
 
 
+ALGORITHM_EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás una IMAGEN que muestra un ALGORITMO (pseudocódigo numerado por pasos) extraído de un paper científico, su cabecera (p. ej. "Algorithm 1 Min-Max Decomposition"), y el Mapa Global del documento.
+
+Debes producir DOS salidas en el MISMO JSON:
+
+═══════════════════════════════════════════════════════════
+PARTE A — "sentence_explanations" (CONCEPTOS / PASOS DEL ALGORITMO)
+═══════════════════════════════════════════════════════════
+
+Identifica entre 2 y 8 elementos clave del algoritmo: variables de entrada (Require), variables auxiliares inicializadas, pasos numerados que ejecuten una operación no trivial, expresiones matemáticas con definiciones por casos, condiciones de parada / bucles, e invariantes implícitas.
+
+Por cada uno, devuelve UN objeto con:
+
+1. "sentence_indices": SIEMPRE [0] (el algoritmo es una sola unidad — no hay segmentación por oraciones).
+
+2. "quote": Fragmento textual EXACTO del algoritmo que ancla este elemento (p. ej. "1: inf ← a large number", "wij = Tij/(Dij+1) if Dij ≥ 1", "If k = r, STOP"). Si no hay literal claro, devuelve "" (cadena vacía).
+
+3. "concepts": Lista con UN solo elemento:
+   - "term": Nombre del paso o concepto (p. ej. "Inicialización de inf como cota superior", "Paso 3: construcción del grafo bipartito ponderado", "Definición por casos de wij", "Condición de terminación k = r").
+   - "explanation": Análisis VERBOSO en español. Explica QUÉ HACE ese paso, POR QUÉ se hace (rol algorítmico), y qué efecto tiene sobre las estructuras de datos del algoritmo. Aporta contexto teórico cuando ayude (complejidad, garantía de convergencia, semántica de operadores como ← o ⊕). 3 a 6 oraciones largas y descriptivas.
+
+═══════════════════════════════════════════════════════════
+PARTE B — "paragraph_context" (INTERPRETACIÓN GLOBAL DEL ALGORITMO)
+═══════════════════════════════════════════════════════════
+
+Interpreta el algoritmo como un todo — no expliques paso por paso.
+
+1. "section_role": UNA línea (máximo 14 palabras) etiquetando QUÉ resuelve el algoritmo y cómo encaja en la narrativa del paper. Ejemplos: "Descompone matriz en sub-asignaciones mediante matching iterativo", "Computa coreset disperso vía muestreo ponderado".
+
+2. "narrative": 3 a 5 oraciones interpretando el algoritmo. Responde: ¿Cuál es la idea central? ¿Qué bucle o invariante lo gobierna? ¿Cuándo termina y por qué? ¿Qué propiedad / garantía sostiene el autor con él? NO repitas los pasos literalmente: interpreta la estrategia.
+
+═══════════════════════════════════════════════════════════
+SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
+
+
+_ALGORITHM_EXPLAIN_CONFIG = types.GenerateContentConfig(
+    system_instruction=ALGORITHM_EXPLAIN_PROMPT,
+    response_mime_type="application/json",
+    response_schema=ExplainResponse,
+    max_output_tokens=10240,
+)
+
+
 def _render_pdf_crop(pdf_path: Path, page_idx0: int, bbox: dict, scale: float = 2.0) -> bytes:
     """Render page `page_idx0` (0-based) of `pdf_path` at `scale`, crop to bbox
     (PDF-point coordinates, top-left origin — same convention Marker uses), and
@@ -388,7 +430,7 @@ async def upload_pdf(
 
 @app.post("/explain-paragraph/")
 async def explain_paragraph(req: ExplainRequest):
-    if req.block_type in ("figure", "table"):
+    if req.block_type in ("figure", "table", "algorithm"):
         return _explain_figure(req)
 
     if not req.paragraph_sentences:
@@ -409,7 +451,7 @@ def _explain_figure(req: ExplainRequest) -> dict:
     if not req.filename or req.page is None or req.bbox is None:
         raise HTTPException(
             status_code=400,
-            detail="figure/table explain requires filename, page and bbox",
+            detail="figure/table/algorithm explain requires filename, page and bbox",
         )
     pdf_path = UPLOADS_DIR / req.filename
     if not pdf_path.exists():
@@ -424,16 +466,20 @@ def _explain_figure(req: ExplainRequest) -> dict:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Could not rasterize figure: {str(e)}")
 
+    is_algorithm = req.block_type == "algorithm"
+    label = {"figure": "figura", "table": "tabla", "algorithm": "algoritmo"}.get(req.block_type, req.block_type)
+    caption_label = "Cabecera" if is_algorithm else "Pie"
     text_prompt = (
         f"Mapa Global del paper:\n{json.dumps(req.global_map, ensure_ascii=False)}"
         f"\n\nTipo de bloque: {req.block_type}"
-        f"\nPie ({'figura' if req.block_type == 'figure' else 'tabla'}):\n{req.caption_text or '(sin pie)'}"
+        f"\n{caption_label} ({label}):\n{req.caption_text or '(sin texto)'}"
     )
     parts = [
         types.Part(inline_data=types.Blob(mime_type="image/png", data=png_bytes)),
         types.Part(text=text_prompt),
     ]
+    config = _ALGORITHM_EXPLAIN_CONFIG if is_algorithm else _FIGURE_EXPLAIN_CONFIG
     try:
-        return _generate_json_multimodal(_EXPLAIN_MODEL, parts, _FIGURE_EXPLAIN_CONFIG)
+        return _generate_json_multimodal(_EXPLAIN_MODEL, parts, config)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
