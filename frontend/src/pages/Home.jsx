@@ -71,11 +71,49 @@ function statusBadge(status) {
     case 'pending':   return { label: 'En cola',     cls: 'bg-slate-50 text-slate-500 border-slate-200' }
     case 'uploading': return { label: 'Subiendo',    cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
     case 'analyzing': return { label: 'Analizando',  cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
+    case 'fallback':  return { label: 'Fallback',    cls: 'bg-amber-50 text-amber-700 border-amber-200' }
     case 'conflict':  return { label: 'Confirmar…',  cls: 'bg-amber-50 text-amber-600 border-amber-200' }
     case 'done':      return { label: 'Hecho',       cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' }
     case 'skipped':   return { label: 'Omitido',     cls: 'bg-amber-50 text-amber-600 border-amber-200' }
     case 'error':     return { label: 'Error',       cls: 'bg-red-50 text-red-600 border-red-200' }
     default:          return { label: status,        cls: 'bg-slate-50 text-slate-500 border-slate-200' }
+  }
+}
+
+// Translate a backend SSE event into UI state. Successful phases climb the
+// bar; fallback phases reset it to 0 and switch the status badge to
+// 'fallback' so the user sees something concretely changed. Returns null
+// when the event is purely informational and should not update the bar.
+function uiUpdateForEvent(ev) {
+  if (!ev || !ev.phase) return null
+  switch (ev.phase) {
+    case 'started':            return { progress: 5,  message: ev.message, status: 'analyzing' }
+    case 'device_started':     return { progress: 10, message: ev.message, status: 'analyzing' }
+    case 'device_ladder':      return null
+    case 'device_skipped':     return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'batch_attempt':
+      return ev.tier_index === 0
+        ? { progress: 15, message: ev.message, status: 'analyzing' }
+        : { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'batch_oom':          return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'cuda_oom_abandon':   return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'batch_success':      return { progress: 95, message: ev.message, status: 'analyzing' }
+    case 'chunk_tier_started': return { progress: 20, message: ev.message, status: 'fallback' }
+    case 'chunk_started':      return { progress: 25, message: ev.message, status: 'analyzing' }
+    case 'chunk_progress': {
+      const total = Math.max(1, Number(ev.total_chunks) || 1)
+      const idx   = Math.max(0, Number(ev.chunk_index) || 0)
+      const pct   = Math.min(90, 25 + Math.round((60 * (idx + 1)) / total))
+      return { progress: pct, message: ev.message, status: 'analyzing' }
+    }
+    case 'chunk_oom':          return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'chunked_success':    return { progress: 95, message: ev.message, status: 'analyzing' }
+    case 'device_exhausted':   return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'child_error':        return { progress: 0,  message: ev.message, status: 'fallback' }
+    case 'global_map_started': return { progress: 97, message: ev.message, status: 'analyzing' }
+    case 'done':               return { progress: 100, message: ev.message, status: 'done' }
+    case 'failed':             return { progress: 0, message: ev.message, status: 'error' }
+    default:                   return { message: ev.message }
   }
 }
 
@@ -120,21 +158,25 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose }) {
                   <p className="text-sm font-medium text-slate-800 truncate" title={q.file.name}>
                     {q.file.name}
                   </p>
-                  {q.status === 'uploading' && (
+                  {(q.status === 'uploading' || q.status === 'analyzing' || q.status === 'fallback') && (
                     <div className="mt-1 w-full bg-slate-100 rounded-full h-1 overflow-hidden">
                       <div
-                        className="h-full bg-indigo-600 rounded-full transition-all duration-200"
-                        style={{ width: `${q.progress}%` }}
+                        className={`h-full rounded-full transition-all duration-200 ${
+                          q.status === 'fallback' ? 'bg-amber-500' : 'bg-indigo-600'
+                        }`}
+                        style={{ width: `${Math.max(0, Math.min(100, q.progress || 0))}%` }}
                       />
                     </div>
                   )}
-                  {q.status === 'analyzing' && (
-                    <div className="mt-1 w-full bg-slate-100 rounded-full h-1 overflow-hidden">
-                      <div
-                        className="h-full bg-indigo-500 rounded-full"
-                        style={{ animation: 'slide-indeterminate 1.5s ease-in-out infinite' }}
-                      />
-                    </div>
+                  {q.message && (q.status === 'analyzing' || q.status === 'fallback') && (
+                    <p
+                      className={`text-[11px] mt-0.5 truncate ${
+                        q.status === 'fallback' ? 'text-amber-700' : 'text-slate-500'
+                      }`}
+                      title={q.message}
+                    >
+                      {q.message}
+                    </p>
                   )}
                   {q.status === 'error' && q.error && (
                     <p className="text-[11px] text-red-500 mt-0.5 truncate" title={q.error}>
@@ -219,6 +261,7 @@ export default function Home() {
       file: f,
       status: 'pending',
       progress: 0,
+      message: null,
       error: null,
     }))
     setQueue(items)
@@ -231,7 +274,9 @@ export default function Home() {
       // Retry loop: re-enters after the user accepts an overwrite prompt.
       while (true) {
         setQueue(prev => prev.map((it, j) =>
-          j === i ? { ...it, status: 'uploading', progress: 0, error: null } : it,
+          j === i
+            ? { ...it, status: 'uploading', progress: 0, message: null, error: null }
+            : it,
         ))
         try {
           const formData = new FormData()
@@ -240,7 +285,9 @@ export default function Home() {
           formData.append('keep_terms_in_english', String(Boolean(opts?.keepTermsInEnglish)))
           if (overwrite) formData.append('overwrite', 'true')
 
-          await axios.post('/api/upload-pdf/', formData, {
+          // Phase 1: upload bytes. Backend returns 202 + job_id quickly so
+          // this only covers the network transfer.
+          const postRes = await axios.post('/api/upload-pdf/', formData, {
             headers: { 'Content-Type': 'multipart/form-data' },
             onUploadProgress: (e) => {
               const pct = Math.round((e.loaded / e.total) * 99)
@@ -251,6 +298,85 @@ export default function Home() {
               ))
             },
           })
+
+          const jobId = postRes?.data?.job_id
+          if (!jobId) throw new Error('Backend no devolvió job_id')
+
+          // Phase 2: subscribe to SSE progress. Failures here (network,
+          // proxy timeout) do not cancel the backend job — extraction keeps
+          // running and the analysis file lands on disk regardless. We just
+          // reconnect once and, if that also fails, mark the queue item as
+          // error while keeping the backend job alive.
+          await new Promise((resolve, reject) => {
+            let es = new EventSource(`/api/upload-pdf/${jobId}/events`)
+            let reconnected = false
+
+            const close = () => {
+              try { es.close() } catch { /* ignore */ }
+            }
+
+            const applyEvent = (ev) => {
+              const upd = uiUpdateForEvent(ev)
+              if (!upd) return
+              setQueue(prev => prev.map((it, j) =>
+                j === i
+                  ? {
+                      ...it,
+                      status: upd.status ?? it.status,
+                      progress: upd.progress ?? it.progress,
+                      message: upd.message ?? it.message,
+                    }
+                  : it,
+              ))
+            }
+
+            es.onmessage = (msg) => {
+              try {
+                const ev = JSON.parse(msg.data)
+                applyEvent(ev)
+                if (ev.phase === 'done') {
+                  close()
+                  resolve(ev.result)
+                } else if (ev.phase === 'failed') {
+                  close()
+                  reject(new Error(ev.message || 'Extracción falló'))
+                }
+              } catch {
+                // ignore malformed events
+              }
+            }
+
+            es.onerror = () => {
+              if (reconnected) {
+                close()
+                reject(new Error('Conexión SSE perdida — el backend sigue procesando'))
+                return
+              }
+              reconnected = true
+              close()
+              setTimeout(() => {
+                es = new EventSource(`/api/upload-pdf/${jobId}/events`)
+                es.onmessage = (msg) => {
+                  try {
+                    const ev = JSON.parse(msg.data)
+                    applyEvent(ev)
+                    if (ev.phase === 'done') {
+                      close()
+                      resolve(ev.result)
+                    } else if (ev.phase === 'failed') {
+                      close()
+                      reject(new Error(ev.message || 'Extracción falló'))
+                    }
+                  } catch { /* ignore */ }
+                }
+                es.onerror = () => {
+                  close()
+                  reject(new Error('Conexión SSE perdida — el backend sigue procesando'))
+                }
+              }, 1500)
+            }
+          })
+
           setQueue(prev => prev.map((it, j) =>
             j === i ? { ...it, status: 'done', progress: 100 } : it,
           ))
@@ -275,7 +401,7 @@ export default function Home() {
             ))
             break
           }
-          const msg = describeUploadError(err)
+          const msg = err?.message || describeUploadError(err)
           setQueue(prev => prev.map((it, j) =>
             j === i ? { ...it, status: 'error', error: msg } : it,
           ))

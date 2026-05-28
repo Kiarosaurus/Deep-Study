@@ -60,6 +60,18 @@ class ExtractionFailed(RuntimeError):
     """Raised when every fallback tier has been exhausted."""
 
 
+def _emit(on_event, payload: dict) -> None:
+    """Fire a progress event, swallowing exceptions so a buggy listener can
+    never break extraction. Events are plain dicts; consumers (SSE, logs,
+    progress bars) decide how to render them."""
+    if on_event is None:
+        return
+    try:
+        on_event(payload)
+    except Exception:
+        pass
+
+
 
 
 # Process exit codes / signals that we treat as "ran out of memory, retry
@@ -227,20 +239,46 @@ def _run_chunked(
     profile: MachineProfile,
     n_pages_total: int,
     pdf_mb_total: float,
-) -> tuple[list[PageBlocks], list[FullBlock]] | str:
+    on_event=None,
+) -> tuple[list[PageBlocks], list[FullBlock]] | dict:
     """Run one chunked-extraction tier. Each chunk runs in its own subprocess
     at batch=1 on the given device. Returns the stitched (pages, linear) on
-    success, or a string reason on failure (OOM-like or clean error in any
-    chunk)."""
+    success, or a structured failure dict:
+      - {'kind': 'oom'|'cuda_oom', 'message': str}  → caller can retry at a
+        smaller chunk size (smaller chunk = smaller peak RAM).
+      - {'kind': 'error', 'message': str}            → clean error in child
+        or in split/stitch glue. Smaller chunks won't help; caller should
+        abort the chunk-tier loop on this device.
+    """
     with tempfile.TemporaryDirectory(prefix="deepstudy-chunked-") as td:
         workdir = Path(td)
         try:
             chunks = _split_pdf_into_chunks(pdf_path, chunk_size, workdir)
         except Exception as e:
-            return f"split failed: {type(e).__name__}: {e}"
+            return {
+                "kind": "error",
+                "message": f"split failed: {type(e).__name__}: {e}",
+            }
+
+        total_chunks = len(chunks)
+        _emit(on_event, {
+            "phase": "chunk_started",
+            "device": device,
+            "chunk_size": chunk_size,
+            "total_chunks": total_chunks,
+            "message": f"Modo chunk activado ({chunk_size} páginas por chunk, {total_chunks} chunks)",
+        })
 
         collected: list[tuple[dict, int]] = []
-        for sub_path, page_offset in chunks:
+        for chunk_idx, (sub_path, page_offset) in enumerate(chunks):
+            _emit(on_event, {
+                "phase": "chunk_progress",
+                "device": device,
+                "chunk_size": chunk_size,
+                "chunk_index": chunk_idx,
+                "total_chunks": total_chunks,
+                "message": f"Procesando chunk {chunk_idx + 1} de {total_chunks}",
+            })
             rc, status, result = _run_subprocess(
                 sub_path,
                 batch=1,
@@ -250,6 +288,18 @@ def _run_chunked(
             if rc == 0 and result is not None:
                 collected.append((result, page_offset))
                 continue
+            if _is_cuda_oom(rc, status):
+                append_history(
+                    profile,
+                    pdf_pages=n_pages_total,
+                    pdf_mb=pdf_mb_total,
+                    batch_tried=1,
+                    result=f"chunked cuda_oom (chunk_size={chunk_size})",
+                )
+                return {
+                    "kind": "cuda_oom",
+                    "message": f"chunk CUDA OOM (chunk_size={chunk_size})",
+                }
             if _looks_like_oom(rc, status):
                 append_history(
                     profile,
@@ -258,7 +308,10 @@ def _run_chunked(
                     batch_tried=1,
                     result=f"chunked oom (chunk_size={chunk_size}, rc={rc})",
                 )
-                return f"chunk OOM (chunk_size={chunk_size}, rc={rc})"
+                return {
+                    "kind": "oom",
+                    "message": f"chunk OOM (chunk_size={chunk_size}, rc={rc})",
+                }
             err_type = (status or {}).get("error_type", "UnknownError")
             err_msg = (status or {}).get("error_msg", "")
             append_history(
@@ -268,12 +321,18 @@ def _run_chunked(
                 batch_tried=1,
                 result=f"chunked error:{err_type}",
             )
-            return f"chunk clean error: {err_type}: {err_msg}"
+            return {
+                "kind": "error",
+                "message": f"chunk clean error: {err_type}: {err_msg}",
+            }
 
         try:
             pages, linear = _stitch_chunk_results(collected)
         except Exception as e:
-            return f"stitch failed: {type(e).__name__}: {e}"
+            return {
+                "kind": "error",
+                "message": f"stitch failed: {type(e).__name__}: {e}",
+            }
         return pages, linear
 
 
@@ -286,6 +345,7 @@ def _run_device_pass(
     timeout_s: float,
     n_pages: int,
     pdf_mb: float,
+    on_event=None,
 ) -> tuple[list[PageBlocks], list[FullBlock]] | dict:
     """Run a full batch+chunk pass on the given device.
 
@@ -298,9 +358,27 @@ def _run_device_pass(
     """
     batch_init = pick_batch(pdf_bytes, profile, device=device)
     batch_tiers = compute_fallback_tiers(batch_init)
+    _emit(on_event, {
+        "phase": "device_started",
+        "device": device,
+        "batch_tiers": batch_tiers,
+        "message": f"Iniciando extracción en {device} (batch tiers={batch_tiers})",
+    })
 
     last_error: str | None = None
-    for batch in batch_tiers:
+    for tier_idx, batch in enumerate(batch_tiers):
+        _emit(on_event, {
+            "phase": "batch_attempt",
+            "device": device,
+            "batch": batch,
+            "tier_index": tier_idx,
+            "total_tiers": len(batch_tiers),
+            "message": (
+                f"Intentando batch={batch} en {device}"
+                if tier_idx == 0
+                else f"Fallback: batch reducido a {batch} en {device}"
+            ),
+        })
         rc, status, result = _run_subprocess(
             pdf_path,
             batch,
@@ -316,14 +394,17 @@ def _run_device_pass(
                 batch_tried=batch,
                 result=f"ok ({device})",
             )
+            _emit(on_event, {
+                "phase": "batch_success",
+                "device": device,
+                "batch": batch,
+                "message": f"Extracción exitosa en {device} (batch={batch})",
+            })
             pages = [PageBlocks(**p) for p in result["pages"]]
             linear = [FullBlock(**b) for b in result["linear"]]
             return pages, linear
 
         if _is_cuda_oom(rc, status):
-            # CUDA OOM never benefits from smaller batches in the same VRAM —
-            # abandon this device immediately so the caller can fall back to
-            # CPU (which has a different memory pool).
             append_history(
                 profile,
                 pdf_pages=n_pages,
@@ -331,6 +412,12 @@ def _run_device_pass(
                 batch_tried=batch,
                 result=f"cuda_oom ({device}, batch={batch})",
             )
+            _emit(on_event, {
+                "phase": "cuda_oom_abandon",
+                "device": device,
+                "batch": batch,
+                "message": "Fallback: GPU descartada por falta de memoria",
+            })
             return {
                 "kind": "cuda_oom",
                 "last_error": f"CUDA OOM at batch={batch}",
@@ -346,6 +433,13 @@ def _run_device_pass(
                 batch_tried=batch,
                 result=f"oom ({device}, batch={batch}, rc={rc})",
             )
+            _emit(on_event, {
+                "phase": "batch_oom",
+                "device": device,
+                "batch": batch,
+                "rc": rc,
+                "message": f"Fallback: OOM en batch={batch}, reintentando con batch más pequeño",
+            })
             last_error = f"OOM at batch={batch} on {device} (rc={rc})"
             continue
 
@@ -358,6 +452,14 @@ def _run_device_pass(
             batch_tried=batch,
             result=f"error:{err_type} ({device})",
         )
+        _emit(on_event, {
+            "phase": "child_error",
+            "device": device,
+            "batch": batch,
+            "error_type": err_type,
+            "error_msg": err_msg,
+            "message": f"Error en hijo: {err_type}: {err_msg}",
+        })
         return {
             "kind": "error",
             "last_error": f"{err_type}: {err_msg}",
@@ -368,6 +470,12 @@ def _run_device_pass(
     # Batch tiers exhausted — try chunked extraction on the same device.
     chunk_init = pick_chunk_size(pdf_bytes, profile, device=device, n_pages=n_pages)
     chunk_tiers = compute_chunk_fallback_tiers(chunk_init, n_pages)
+    _emit(on_event, {
+        "phase": "chunk_tier_started",
+        "device": device,
+        "chunk_tiers": chunk_tiers,
+        "message": f"Fallback: modo chunk activado en {device} (chunk tiers={chunk_tiers})",
+    })
     for chunk_size in chunk_tiers:
         outcome = _run_chunked(
             pdf_path,
@@ -377,6 +485,7 @@ def _run_device_pass(
             profile=profile,
             n_pages_total=n_pages,
             pdf_mb_total=pdf_mb,
+            on_event=on_event,
         )
         if isinstance(outcome, tuple):
             append_history(
@@ -386,8 +495,54 @@ def _run_device_pass(
                 batch_tried=1,
                 result=f"chunked ok (chunk_size={chunk_size}, {device})",
             )
+            _emit(on_event, {
+                "phase": "chunked_success",
+                "device": device,
+                "chunk_size": chunk_size,
+                "message": f"Extracción exitosa en {device} (chunk_size={chunk_size})",
+            })
             return outcome
-        last_error = f"{device} chunked: {outcome}"
+
+        # Structured failure from _run_chunked. CUDA OOM → abandon device
+        # (smaller chunk on same VRAM won't help). Clean error → abort the
+        # chunk-tier loop (PDF/split issue won't be cured by smaller chunks).
+        # Plain OOM → retry next smaller chunk_size.
+        kind = outcome.get("kind", "error")
+        msg = outcome.get("message", "")
+        if kind == "cuda_oom":
+            _emit(on_event, {
+                "phase": "cuda_oom_abandon",
+                "device": device,
+                "chunk_size": chunk_size,
+                "message": "Fallback: GPU descartada por OOM durante chunk",
+            })
+            return {
+                "kind": "cuda_oom",
+                "last_error": msg,
+                "batch_tiers": batch_tiers,
+                "chunk_tiers": chunk_tiers,
+            }
+        if kind == "error":
+            _emit(on_event, {
+                "phase": "child_error",
+                "device": device,
+                "chunk_size": chunk_size,
+                "message": f"Error no recuperable en chunk: {msg}",
+            })
+            return {
+                "kind": "error",
+                "last_error": msg,
+                "batch_tiers": batch_tiers,
+                "chunk_tiers": chunk_tiers,
+            }
+        # kind == "oom"
+        _emit(on_event, {
+            "phase": "chunk_oom",
+            "device": device,
+            "chunk_size": chunk_size,
+            "message": f"Fallback: chunk_size={chunk_size} en {device} falló por OOM, reduciendo",
+        })
+        last_error = f"{device} chunked: {msg}"
 
     return {
         "kind": "exhausted",
@@ -402,6 +557,7 @@ def extract_resilient(
     *,
     force_cpu: bool = False,
     timeout_s: float = 600.0,
+    on_event=None,
 ) -> tuple[list[PageBlocks], list[FullBlock]]:
     """Run extraction with full GPU-then-CPU device fallback.
 
@@ -410,10 +566,20 @@ def extract_resilient(
     CUDA device, we try GPU first (sized against VRAM); on CUDA OOM or any
     GPU-side OOM we fall through to a CPU pass (sized against system RAM).
     `force_cpu=True` skips the GPU pass entirely.
+
+    `on_event` is an optional callable receiving progress dicts so callers
+    (SSE, progress bar, logs) can react to fallbacks in real time.
     """
     profile = load_profile()
     n_pages = quick_page_count(pdf_bytes)
     pdf_mb = len(pdf_bytes) / 1e6
+    _emit(on_event, {
+        "phase": "started",
+        "n_pages": n_pages,
+        "pdf_mb": round(pdf_mb, 2),
+        "default_device": profile.default_device,
+        "message": f"Iniciando extracción ({n_pages} páginas, {pdf_mb:.2f} MB)",
+    })
 
     # Stage PDF once so each retry reads from disk and the parent does not
     # keep the multi-MB buffer alive while a child runs.
@@ -442,10 +608,21 @@ def extract_resilient(
                 devices.append("cuda")
             else:
                 last_summary.append(f"cuda[skipped]: {reason}")
+                _emit(on_event, {
+                    "phase": "device_skipped",
+                    "device": "cuda",
+                    "reason": reason,
+                    "message": f"Fallback: GPU descartada ({reason})",
+                })
         elif profile.default_device == "mps":
             devices.append("mps")
     if not devices or devices[-1] != "cpu":
         devices.append("cpu")
+    _emit(on_event, {
+        "phase": "device_ladder",
+        "devices": devices,
+        "message": f"Devices a probar: {', '.join(devices)}",
+    })
     try:
         for device in devices:
             outcome = _run_device_pass(
@@ -456,6 +633,7 @@ def extract_resilient(
                 timeout_s=timeout_s,
                 n_pages=n_pages,
                 pdf_mb=pdf_mb,
+                on_event=on_event,
             )
             if isinstance(outcome, tuple):
                 save_profile(profile)
@@ -467,15 +645,28 @@ def extract_resilient(
                 f"chunk tiers={outcome['chunk_tiers']})"
             )
 
-            # Clean non-OOM child error → don't waste time on more devices.
             if outcome["kind"] == "error":
                 save_profile(profile)
+                _emit(on_event, {
+                    "phase": "failed",
+                    "device": device,
+                    "message": f"Extracción falló en {device}: {outcome['last_error']}",
+                })
                 raise ExtractionFailed(
                     f"Extraction failed in child on {device}: "
                     f"{outcome['last_error']}"
                 )
+            _emit(on_event, {
+                "phase": "device_exhausted",
+                "device": device,
+                "message": f"Fallback: {device} agotado, intentando siguiente device",
+            })
 
         save_profile(profile)
+        _emit(on_event, {
+            "phase": "failed",
+            "message": "Todos los fallbacks agotados",
+        })
         raise ExtractionFailed(
             "All fallback tiers exhausted across devices "
             f"({' | '.join(last_summary)})"

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import os
@@ -7,10 +8,11 @@ import pypdfium2 as pdfium
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from extraction_runner import ExtractionFailed, extract_resilient
+from jobs import JOBS, progress_callback_for
 from models import (
     DocumentInfo,
     ExplainRequest,
@@ -364,6 +366,91 @@ def delete_document(filename: str):
 
 # ── Upload & analysis endpoints ───────────────────────────────────────────────
 
+def _run_extraction_pipeline(
+    *,
+    job_id: str,
+    filename: str,
+    contents: bytes,
+    language: str,
+    keep_terms_in_english: bool,
+) -> None:
+    """Synchronous worker run inside a threadpool executor by the upload
+    endpoint. Drives `extract_resilient` (with progress callback pushed to
+    the job's SSE queue), runs the Gemini global-map call, and writes the
+    analysis JSON to disk. Updates the job state to done/failed at the end.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        return
+    job.status = "running"
+    dest = UPLOADS_DIR / filename
+    try:
+        try:
+            pages_data, linear_blocks = extract_resilient(
+                contents,
+                on_event=progress_callback_for(job),
+            )
+        except ExtractionFailed as e:
+            dest.unlink(missing_ok=True)
+            JOBS.mark_failed(
+                job_id,
+                "PDF extraction exhausted memory at every fallback. "
+                f"Close other apps and retry. Detail: {e}",
+            )
+            return
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            JOBS.mark_failed(job_id, f"Could not parse PDF: {e}")
+            return
+
+        _assign_flat_block_refs(pages_data, linear_blocks)
+
+        parts: list[str] = []
+        for p in pages_data:
+            for b in p.blocks:
+                if b.continuation and parts:
+                    prev = parts[-1].rstrip()
+                    if prev.endswith(("-", "—", "¬")):
+                        parts[-1] = prev[:-1] + b.text.lstrip()
+                    else:
+                        parts[-1] = prev + " " + b.text.lstrip()
+                else:
+                    parts.append(b.text)
+        full_text = "\n\n".join(parts)
+
+        job.push_event({
+            "phase": "global_map_started",
+            "message": "Generando mapa global con Gemini",
+        })
+
+        try:
+            data = _generate_json(
+                _GLOBAL_MODEL,
+                full_text,
+                _build_global_config(language, keep_terms_in_english),
+            )
+            global_map = GlobalMapping(**data)
+        except Exception as e:
+            JOBS.mark_failed(job_id, f"Gemini API error: {e}")
+            return
+
+        result = UploadResponse(
+            filename=filename,
+            page_count=len(pages_data),
+            global_map=global_map,
+            pages=pages_data,
+            linear_blocks=linear_blocks,
+        )
+        analysis_path = UPLOADS_DIR / f"{filename}.analysis.json"
+        analysis_path.write_text(
+            json.dumps(result.model_dump(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        JOBS.mark_done(job_id, result.model_dump())
+    except Exception as e:
+        JOBS.mark_failed(job_id, f"Unexpected error: {e}")
+
+
 @app.post("/upload-pdf/")
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -371,6 +458,13 @@ async def upload_pdf(
     keep_terms_in_english: bool = Form(False),
     overwrite: bool = Form(False),
 ):
+    """Accept a PDF upload and kick off extraction in the background.
+
+    Returns 202 + `{job_id, filename}` immediately so the client never
+    times out on long extractions. The actual extraction (+ Gemini call)
+    runs in a thread-pool executor and reports progress through SSE at
+    `/upload-pdf/{job_id}/events`.
+    """
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF accepted.")
 
@@ -381,60 +475,96 @@ async def upload_pdf(
     contents = await file.read()
     dest.write_bytes(contents)
 
-    try:
-        pages_data, linear_blocks = extract_resilient(contents)
-    except ExtractionFailed as e:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=507,
-            detail=(
-                "PDF extraction exhausted memory at every fallback batch size. "
-                f"Close other applications and retry. Detail: {e}"
+    loop = asyncio.get_running_loop()
+    job = JOBS.create(file.filename, loop)
+    # Periodically prune old finished jobs. Cheap; runs on every upload.
+    JOBS.prune()
+
+    # Run extraction in a threadpool so the event loop stays responsive for
+    # the SSE endpoint. We don't await the task — its lifecycle is tracked
+    # by the JobRegistry, not by request scope.
+    asyncio.create_task(
+        loop.run_in_executor(
+            None,
+            lambda: _run_extraction_pipeline(
+                job_id=job.id,
+                filename=file.filename,
+                contents=contents,
+                language=language,
+                keep_terms_in_english=keep_terms_in_english,
             ),
         )
-    except Exception as e:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=422, detail=f"Could not parse PDF: {str(e)}")
-
-    _assign_flat_block_refs(pages_data, linear_blocks)
-
-    # Cross-page continuations join with the previous paragraph (no extra "\n\n")
-    # so Gemini receives the paragraph as a single semantic unit. If the
-    # previous text ends with a soft hyphen, drop it and concatenate seamlessly.
-    parts: list[str] = []
-    for p in pages_data:
-        for b in p.blocks:
-            if b.continuation and parts:
-                prev = parts[-1].rstrip()
-                if prev.endswith(("-", "—", "¬")):
-                    parts[-1] = prev[:-1] + b.text.lstrip()
-                else:
-                    parts[-1] = prev + " " + b.text.lstrip()
-            else:
-                parts.append(b.text)
-    full_text = "\n\n".join(parts)
-
-    try:
-        data = _generate_json(
-            _GLOBAL_MODEL,
-            full_text,
-            _build_global_config(language, keep_terms_in_english),
-        )
-        global_map = GlobalMapping(**data)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
-
-    result = UploadResponse(
-        filename=file.filename,
-        page_count=len(pages_data),
-        global_map=global_map,
-        pages=pages_data,
-        linear_blocks=linear_blocks,
     )
-    analysis_path = UPLOADS_DIR / f"{file.filename}.analysis.json"
-    analysis_path.write_text(json.dumps(result.model_dump(), ensure_ascii=False), encoding="utf-8")
 
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job.id, "filename": file.filename},
+    )
+
+
+@app.get("/upload-pdf/{job_id}/events")
+async def upload_pdf_events(job_id: str, request: Request):
+    """Server-Sent Events stream of extraction progress for `job_id`.
+
+    Each event is a JSON object: `{phase, message, ...}`. Terminal events
+    (`phase: 'done'` or `phase: 'failed'`) close the stream. The client
+    disconnecting does NOT cancel the underlying job — extraction keeps
+    running so the result is still cached on disk and reachable via
+    `/documents/{filename}/analysis` once finished.
+    """
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
+
+    async def event_stream():
+        # If the job already finished before the client subscribed, replay
+        # the terminal event so the client doesn't hang waiting.
+        if job.status in ("done", "failed"):
+            if job.status == "done":
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "phase": "done",
+                        "message": "Análisis completado",
+                        "filename": job.filename,
+                    }, ensure_ascii=False)
+                    + "\n\n"
+                )
+            else:
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "phase": "failed",
+                        "message": job.error or "Unknown error",
+                    }, ensure_ascii=False)
+                    + "\n\n"
+                )
+            return
+
+        # Stream events as they arrive. A small keepalive timeout makes sure
+        # proxies don't kill an idle connection during long batch runs.
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                event = await asyncio.wait_for(job.events.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                # SSE comment line keeps the connection alive without
+                # surfacing anything to the client-side JSON parser.
+                yield ": keepalive\n\n"
+                continue
+            if event.get("__terminal__"):
+                return
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable buffering on nginx-style proxies
+        },
+    )
 
 
 @app.post("/explain-paragraph/")
