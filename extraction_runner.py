@@ -1,12 +1,22 @@
 """Parent-side orchestration for resilient PDF extraction.
 
 Spawns `marker_worker` as a subprocess, watches for clean failure or hard
-kill (OOM-killer), and retries with progressively smaller batches.
+kill (OOM-killer), and retries with progressively smaller batches. If even
+batch=1 fails to fit, falls back to chunked extraction: the PDF is split into
+N-page sub-PDFs, each extracted independently in its own subprocess at
+batch=1, and the results are stitched back into a single (pages, linear)
+pair.
 
 The subprocess boundary is what makes adaptive batch sizing actually work —
 Marker / Surya read their `*_BATCH_SIZE` env vars at model-init time, so the
 parent cannot change them between requests once it has imported marker. Each
 retry spawns a fresh interpreter so the new env values take effect.
+
+Fallback ladder (top tier first):
+    1. Adaptive batch tier sequence (e.g. [4, 2, 1]).
+    2. Chunked extraction at decreasing chunk sizes (e.g. [5, 2]), all
+       with batch=1. Each chunk runs in its own subprocess so a single huge
+       page that still OOMs at chunk=1 surfaces as ExtractionFailed.
 """
 
 from __future__ import annotations
@@ -20,8 +30,10 @@ from pathlib import Path
 from typing import Any
 
 from batch_planner import (
+    compute_chunk_fallback_tiers,
     compute_fallback_tiers,
     pick_batch,
+    pick_chunk_size,
     quick_page_count,
 )
 from models import FullBlock, PageBlocks
@@ -35,6 +47,8 @@ from runtime_metrics import (
 
 class ExtractionFailed(RuntimeError):
     """Raised when every fallback tier has been exhausted."""
+
+
 
 
 # Process exit codes / signals that we treat as "ran out of memory, retry
@@ -111,6 +125,130 @@ def _run_subprocess(
             except json.JSONDecodeError:
                 result = None
         return rc, status, result
+
+
+def _split_pdf_into_chunks(
+    pdf_path: Path,
+    chunk_size: int,
+    workdir: Path,
+) -> list[tuple[Path, int]]:
+    """Split `pdf_path` into sub-PDFs of `chunk_size` pages.
+
+    Returns a list of (sub_pdf_path, page_offset) pairs in original page order.
+    `page_offset` is the 0-based index of the first page of each sub-PDF in
+    the original document; the caller adds it back to every `page` and
+    `reading_index` field while stitching.
+    """
+    import fitz  # PyMuPDF, already a dependency
+    pairs: list[tuple[Path, int]] = []
+    with fitz.open(pdf_path) as doc:
+        total = doc.page_count
+        idx = 0
+        for start in range(0, total, chunk_size):
+            end = min(total, start + chunk_size)
+            sub_path = workdir / f"chunk_{idx:03d}_{start}_{end}.pdf"
+            sub = fitz.open()
+            sub.insert_pdf(doc, from_page=start, to_page=end - 1)
+            sub.save(str(sub_path))
+            sub.close()
+            pairs.append((sub_path, start))
+            idx += 1
+    return pairs
+
+
+def _stitch_chunk_results(
+    chunk_results: list[tuple[dict, int]],
+) -> tuple[list[PageBlocks], list[FullBlock]]:
+    """Concatenate per-chunk results, shifting `page` and `reading_index`.
+
+    Cross-chunk continuations are re-detected by re-running
+    `_merge_continuations_linear` on the stitched linear list. Cross-chunk
+    figure-caption pairs are NOT re-merged here: such a split (figure on
+    page N, caption on page N+1, chunk boundary between them) is rare in
+    practice, and the linear figure-caption pass only checks immediate
+    neighbours.
+    """
+    from extraction import _merge_continuations_linear  # safe: lazy marker
+
+    pages_all: list[dict] = []
+    linear_all: list[dict] = []
+    ri_offset = 0
+    for payload, page_offset in chunk_results:
+        max_ri_in_chunk = -1
+        for p in payload.get("pages", []):
+            p["page"] = p.get("page", 1) + page_offset
+            pages_all.append(p)
+        for b in payload.get("linear", []):
+            b["page"] = b.get("page", 1) + page_offset
+            b["reading_index"] = b.get("reading_index", 0) + ri_offset
+            max_ri_in_chunk = max(max_ri_in_chunk, b["reading_index"])
+            linear_all.append(b)
+        # Next chunk's reading_index continues past the last one used.
+        if max_ri_in_chunk >= 0:
+            ri_offset = max_ri_in_chunk + 1
+
+    pages = [PageBlocks(**p) for p in pages_all]
+    linear = [FullBlock(**b) for b in linear_all]
+    _merge_continuations_linear(linear)
+    return pages, linear
+
+
+def _run_chunked(
+    pdf_path: Path,
+    chunk_size: int,
+    *,
+    force_cpu: bool,
+    timeout_s: float,
+    profile: MachineProfile,
+    n_pages_total: int,
+    pdf_mb_total: float,
+) -> tuple[list[PageBlocks], list[FullBlock]] | str:
+    """Run one chunked-extraction tier. Each chunk runs in its own subprocess
+    at batch=1. Returns the stitched (pages, linear) on success, or a string
+    reason on failure (OOM-like or clean error in any chunk)."""
+    with tempfile.TemporaryDirectory(prefix="deepstudy-chunked-") as td:
+        workdir = Path(td)
+        try:
+            chunks = _split_pdf_into_chunks(pdf_path, chunk_size, workdir)
+        except Exception as e:
+            return f"split failed: {type(e).__name__}: {e}"
+
+        collected: list[tuple[dict, int]] = []
+        for sub_path, page_offset in chunks:
+            rc, status, result = _run_subprocess(
+                sub_path,
+                batch=1,
+                force_cpu=force_cpu,
+                timeout_s=timeout_s,
+            )
+            if rc == 0 and result is not None:
+                collected.append((result, page_offset))
+                continue
+            if _looks_like_oom(rc, status):
+                append_history(
+                    profile,
+                    pdf_pages=n_pages_total,
+                    pdf_mb=pdf_mb_total,
+                    batch_tried=1,
+                    result=f"chunked oom (chunk_size={chunk_size}, rc={rc})",
+                )
+                return f"chunk OOM (chunk_size={chunk_size}, rc={rc})"
+            err_type = (status or {}).get("error_type", "UnknownError")
+            err_msg = (status or {}).get("error_msg", "")
+            append_history(
+                profile,
+                pdf_pages=n_pages_total,
+                pdf_mb=pdf_mb_total,
+                batch_tried=1,
+                result=f"chunked error:{err_type}",
+            )
+            return f"chunk clean error: {err_type}: {err_msg}"
+
+        try:
+            pages, linear = _stitch_chunk_results(collected)
+        except Exception as e:
+            return f"stitch failed: {type(e).__name__}: {e}"
+        return pages, linear
 
 
 def extract_resilient(
@@ -192,9 +330,41 @@ def extract_resilient(
                 f"Extraction failed in child: {err_type}: {err_msg}"
             )
 
+        # Batch tiers exhausted. Try chunked extraction: split the PDF into
+        # smaller sub-PDFs so per-chunk peak RAM is bounded even when a single
+        # whole-document run cannot fit at batch=1. The initial chunk size is
+        # derived from current available RAM + per-page intermediate cost
+        # coefficients in the machine profile; it then halves on each
+        # subsequent failure down to `_MIN_CHUNK`.
+        initial_chunk = pick_chunk_size(pdf_bytes, profile, n_pages=n_pages)
+        chunk_tiers = compute_chunk_fallback_tiers(initial_chunk, n_pages)
+        for chunk_size in chunk_tiers:
+            outcome = _run_chunked(
+                pdf_path,
+                chunk_size,
+                force_cpu=force_cpu,
+                timeout_s=timeout_s,
+                profile=profile,
+                n_pages_total=n_pages,
+                pdf_mb_total=pdf_mb,
+            )
+            if isinstance(outcome, tuple):
+                append_history(
+                    profile,
+                    pdf_pages=n_pages,
+                    pdf_mb=pdf_mb,
+                    batch_tried=1,
+                    result=f"chunked ok (chunk_size={chunk_size})",
+                )
+                save_profile(profile)
+                return outcome
+            last_error = outcome
+
         save_profile(profile)
         raise ExtractionFailed(
-            f"All fallback tiers exhausted ({tiers}). Last: {last_error}"
+            f"All fallback tiers exhausted "
+            f"(batch tiers={tiers}, chunk tiers={chunk_tiers}). "
+            f"Last: {last_error}"
         )
     finally:
         try:

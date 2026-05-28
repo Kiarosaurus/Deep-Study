@@ -30,6 +30,8 @@ class MachineProfile:
     marker_base_gb: float       # cost of Marker singleton once loaded
     per_slot_gb_base: float     # additive cost per +1 batch slot, before density
     per_slot_gb_density: float  # multiplier on density (MB/page) for per-slot cost
+    chunk_per_page_gb_base: float = 0.15  # extra RAM per page when chunking, base
+    chunk_per_page_gb_density: float = 0.4  # density multiplier for chunk page cost
     history: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -133,6 +135,8 @@ def _default_profile() -> MachineProfile:
         marker_base_gb=2.8,
         per_slot_gb_base=0.5,
         per_slot_gb_density=0.35,
+        chunk_per_page_gb_base=0.15,
+        chunk_per_page_gb_density=0.4,
         history=[],
     )
 
