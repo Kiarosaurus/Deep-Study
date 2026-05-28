@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import LinearReader from './LinearReader'
-import { resolveSentenceIndices, buildContinuationPayloads } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -117,6 +117,9 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           text: block.text ?? '',
           sentences: block.sentences ?? [],
           offset: 0,
+          boundaries: [],
+          mergedSentences: block.sentences ?? [],
+          mergedToOrig: (block.sentences ?? []).map((_, i) => [i]),
         }
         const chainId   = chainIds?.[ownFlatRef]
         const chainKey  = chainId != null ? `c-${chainId}` : `__b-${page}-${i}`
@@ -146,8 +149,17 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           return out
         }
 
+        const mergedSentences = payload.mergedSentences ?? payload.sentences
+        const mergedToOrig    = payload.mergedToOrig
+          ?? payload.sentences.map((_, i) => [i])
+        const resolveAndMap = (item) =>
+          mergedIndicesToOrig(
+            resolveSentenceIndices(mergedSentences, item),
+            mergedToOrig,
+          )
+
         const currentIndices = (isActive && currentExplanation && ownLen)
-          ? localizeIndices(resolveSentenceIndices(payload.sentences, currentExplanation))
+          ? localizeIndices(resolveAndMap(currentExplanation))
           : []
         const currentSet = new Set(currentIndices)
 
@@ -155,7 +167,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           ? [...new Set(
               allItems
                 .filter(it => it !== currentExplanation)
-                .flatMap(it => localizeIndices(resolveSentenceIndices(payload.sentences, it)))
+                .flatMap(it => localizeIndices(resolveAndMap(it)))
             )].filter(idx => !currentSet.has(idx))
           : []
 
@@ -238,7 +250,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   ? 'translate(-100%, -100%) scale(1.15)'
                   : 'translate(-100%, -100%)',
               }}
-              onClick={() => onExplain(payload.text, payload.sentences, ownFlatRef)}
+              onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef)}
               onMouseEnter={() => onHoveredChainChange?.(chainKey)}
               onMouseLeave={() => onHoveredChainChange?.(null)}
               title="Explicar párrafo"

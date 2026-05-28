@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { resolveSentenceIndices, buildContinuationPayloads } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 
@@ -359,6 +359,9 @@ const BlockCrop = memo(function BlockCrop({
     text: block.text,
     sentences: block.sentences ?? [],
     offset: 0,
+    boundaries: [],
+    mergedSentences: block.sentences ?? [],
+    mergedToOrig: (block.sentences ?? []).map((_, i) => [i]),
   }
   const isActive  = isInteractive && (
     (!!payload.text && activeParagraph?.text === payload.text)
@@ -392,16 +395,25 @@ const BlockCrop = memo(function BlockCrop({
     return out
   }
 
+  const mergedSentences = payload.mergedSentences ?? payload.sentences
+  const mergedToOrig    = payload.mergedToOrig
+    ?? payload.sentences.map((_, i) => [i])
+  const resolveAndMap = (item) =>
+    mergedIndicesToOrig(
+      resolveSentenceIndices(mergedSentences, item),
+      mergedToOrig,
+    )
+
   const allItems = explanation?.sentence_explanations ?? []
   const currentIndices = (isActive && currentExplanation)
-    ? localizeIndices(resolveSentenceIndices(payload.sentences, currentExplanation))
+    ? localizeIndices(resolveAndMap(currentExplanation))
     : []
   const currentSet = new Set(currentIndices)
   const otherIndices = isActive
     ? [...new Set(
         allItems
           .filter(it => it !== currentExplanation)
-          .flatMap(it => localizeIndices(resolveSentenceIndices(payload.sentences, it)))
+          .flatMap(it => localizeIndices(resolveAndMap(it)))
       )].filter(idx => !currentSet.has(idx))
     : []
 
@@ -559,7 +571,7 @@ const BlockCrop = memo(function BlockCrop({
                 } else {
                   onExplain?.(
                     payload.text,
-                    payload.sentences,
+                    payload.mergedSentences ?? payload.sentences,
                     block.flat_block_ref ?? block.paragraph_ref ?? null,
                   )
                 }

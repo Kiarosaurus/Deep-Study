@@ -109,25 +109,36 @@ export function resolveSentenceIndices(sentences, item) {
 //
 // Returns an array same length as `blocks`. Each entry is either:
 //   - null (non-paragraph block), or
-//   - { text, sentences, offset } where text/sentences are the MERGED chain
-//     payload (every block in the chain shares the same reference) and offset
-//     is how many sentences from earlier chain members precede this block —
-//     used at render time to translate merged-array indices back into this
-//     block's own sentence array for per-block highlighting.
+//   - { text, sentences, offset, boundaries, mergedSentences, mergedToOrig }
+//     where text/sentences are the MERGED chain payload (every block in the
+//     chain shares the same reference), offset is how many sentences from
+//     earlier chain members precede this block — used at render time to
+//     translate merged-array indices back into this block's own sentence
+//     array — and boundaries is the array of merged-array indices where each
+//     non-head sub-block begins. `mergedSentences` collapses split sentences
+//     across chain boundaries into a single logical sentence (with boxes from
+//     both halves concatenated) so the LLM analyzes them as one. `mergedToOrig`
+//     maps each mergedSentences index back to the array of underlying
+//     `sentences` indices it covers, so highlight code can re-fan a single
+//     LLM-returned index into both original halves.
 export function buildContinuationPayloads(blocks) {
   const out = new Array(blocks.length).fill(null)
   let chainIdxs = []
 
   const flush = () => {
     if (chainIdxs.length === 0) return
+    let text, sentences, offsets, boundaries
     if (chainIdxs.length === 1) {
       const b = blocks[chainIdxs[0]]
-      out[chainIdxs[0]] = { text: b.text ?? '', sentences: b.sentences ?? [], offset: 0 }
+      text = b.text ?? ''
+      sentences = b.sentences ?? []
+      offsets = [0]
+      boundaries = []
     } else {
       const head = blocks[chainIdxs[0]]
-      let text = head.text ?? ''
-      const sentences = [...(head.sentences ?? [])]
-      const offsets = [0]
+      text = head.text ?? ''
+      sentences = [...(head.sentences ?? [])]
+      offsets = [0]
       for (let k = 1; k < chainIdxs.length; k++) {
         offsets.push(sentences.length)
         const t   = text.replace(/\s+$/, '')
@@ -135,8 +146,19 @@ export function buildContinuationPayloads(blocks) {
         text = /[-—¬]$/.test(t) ? t.slice(0, -1) + nxt : t + ' ' + nxt
         sentences.push(...(blocks[chainIdxs[k]].sentences ?? []))
       }
-      for (let k = 0; k < chainIdxs.length; k++) {
-        out[chainIdxs[k]] = { text, sentences, offset: offsets[k] }
+      boundaries = offsets.slice(1)
+    }
+
+    const { mergedSentences, mergedToOrig } = buildMergedSentences(sentences, boundaries)
+
+    for (let k = 0; k < chainIdxs.length; k++) {
+      out[chainIdxs[k]] = {
+        text,
+        sentences,
+        offset: offsets[k],
+        boundaries,
+        mergedSentences,
+        mergedToOrig,
       }
     }
     chainIdxs = []
@@ -154,4 +176,79 @@ export function buildContinuationPayloads(blocks) {
   }
   flush()
   return out
+}
+
+
+// At a chain boundary (where one block's sentences end and the next block's
+// begin in the merged array) a real sentence may have been split mid-clause
+// because per-block sentence segmentation ran independently. A boundary `b`
+// is detected as a mid-sentence split when sentences[b-1] does not end with
+// a terminal punctuation, or sentences[b] does not start with a capital /
+// opening punctuation.
+const SENTENCE_END_RE   = /[.!?…)"'»\]]\s*$/
+const SENTENCE_START_RE = /^[\s]*[A-ZÁÉÍÓÚÜÑ¿¡("'«\[]/
+function isSplitBoundary(sentences, b) {
+  if (b <= 0 || b >= sentences.length) return false
+  const prev = sentences[b - 1]?.text ?? ''
+  const next = sentences[b]?.text ?? ''
+  return !SENTENCE_END_RE.test(prev) || !SENTENCE_START_RE.test(next)
+}
+
+// Collapse split-sentence halves at chain boundaries into single logical
+// sentences. Returns { mergedSentences, mergedToOrig } where mergedToOrig[m]
+// is the array of original-sentences indices that compose mergedSentences[m].
+// Non-split sentences map 1→1; a split pair (b-1, b) maps 2→1 with text
+// joined by a space and boxes concatenated.
+function buildMergedSentences(sentences, boundaries) {
+  const boundarySet = new Set(boundaries ?? [])
+  const mergedSentences = []
+  const mergedToOrig = []
+  let i = 0
+  while (i < sentences.length) {
+    const orig = [i]
+    while (
+      orig[orig.length - 1] + 1 < sentences.length
+      && boundarySet.has(orig[orig.length - 1] + 1)
+      && isSplitBoundary(sentences, orig[orig.length - 1] + 1)
+    ) {
+      orig.push(orig[orig.length - 1] + 1)
+    }
+    if (orig.length === 1) {
+      mergedSentences.push(sentences[i])
+    } else {
+      const text  = orig.map(k => sentences[k]?.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
+      const boxes = orig.flatMap(k => sentences[k]?.boxes ?? [])
+      mergedSentences.push({ text, boxes })
+    }
+    mergedToOrig.push(orig)
+    i = orig[orig.length - 1] + 1
+  }
+  return { mergedSentences, mergedToOrig }
+}
+
+// Expands a set of merged-array indices (returned by the LLM, which saw
+// `mergedSentences`) back into the original `sentences` indices, fanning each
+// merged index into all the original halves it covers.
+export function mergedIndicesToOrig(mergedIndices, mergedToOrig) {
+  if (!mergedIndices?.length || !mergedToOrig?.length) return mergedIndices ?? []
+  const out = []
+  for (const m of mergedIndices) {
+    const orig = mergedToOrig[m]
+    if (orig) out.push(...orig)
+    else out.push(m)
+  }
+  return [...new Set(out)].sort((a, z) => a - z)
+}
+
+// Legacy helper retained for any caller that still resolves indices directly
+// on the raw `sentences` array. The mergedSentences path supersedes it.
+export function expandAcrossChainBoundaries(indices, sentences, boundaries) {
+  if (!indices?.length || !boundaries?.length || !sentences?.length) return indices
+  const set = new Set(indices)
+  for (const b of boundaries) {
+    if (!isSplitBoundary(sentences, b)) continue
+    if (set.has(b - 1)) set.add(b)
+    if (set.has(b))     set.add(b - 1)
+  }
+  return [...set].sort((a, z) => a - z)
 }

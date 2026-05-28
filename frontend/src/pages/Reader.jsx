@@ -195,7 +195,7 @@ export default function Reader() {
           linearIdx: i,
           linearIdxs: chainMembers.get(pay.text) ?? [i],
           text: pay.text,
-          sentences: pay.sentences,
+          sentences: pay.mergedSentences ?? pay.sentences,
           flat_block_ref: b.flat_block_ref,
         })
       } else if (b.role === 'figure' || b.role === 'table') {
