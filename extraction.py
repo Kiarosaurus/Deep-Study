@@ -255,6 +255,28 @@ def _looks_like_author_line(text: str) -> bool:
     return proper >= max(2, len(words) - 4)
 
 
+# Affiliation-superscript / list punctuation stripped off each token before the
+# proper-noun test ("Sun1" → "Sun", "Jouppi," → "Jouppi", "A." → "A").
+_NAME_STRIP_CHARS = "0123456789.,;:*†‡§¶∗·¹²³⁴⁵⁶⁷⁸⁹⁰()[]{}"
+
+
+def _is_dense_name_list(text: str) -> bool:
+    """A run of mostly Title-Case proper-noun tokens with no prose — an author
+    name list of ANY length (no 18-word cap, unlike `_looks_like_author_line`).
+    Used to keep long author lines out of the body-paragraph anchor that fixes
+    the masthead floor: an abstract is lowercase-heavy prose (low proper-noun
+    fraction), a names line is ~all proper nouns even when it runs past a
+    dozen authors."""
+    words = text.split()
+    if len(words) < 4:
+        return False
+    proper = sum(
+        1 for w in words
+        if (t := w.strip(_NAME_STRIP_CHARS)) and _PROPER_NOUN_RE.match(t)
+    )
+    return proper >= 0.6 * len(words)
+
+
 # ── Paragraph continuation detection ─────────────────────────────────────────
 
 # Debug toggle: set DEEPSTUDY_CONT_DEBUG=1 in the backend env to dump the
@@ -633,34 +655,106 @@ def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
 
 
 def _reorder_authors_after_title(blocks: list[FullBlock]) -> None:
-    """Move author blocks into a contiguous group immediately after the title,
-    sorted by natural reading order (top-to-bottom, left-to-right). Marker
-    sometimes emits multi-column or multi-row author lists in a
-    layout-detection order that doesn't reflect natural reading order — in
-    tracking mode that places individual author lines after the abstract or
-    interleaved with affiliations. This pass forces the masthead to stay
-    coherent regardless of Marker's emission order, by re-sorting only the
-    blocks already classified as `author` and inserting them after the
-    title (or at the start of the document if no title was detected).
+    """Move author + affiliation blocks into a contiguous group immediately
+    after the title, sorted by natural reading order (top-to-bottom,
+    left-to-right). Marker reads two-column mastheads column-by-column, so an
+    author / affiliation sitting in the SECOND column physically next to the
+    title gets emitted AFTER the abstract (which lives at the bottom of column
+    one) — and Marker frequently mislabels those stray author lines as
+    `SectionHeader`. Both effects leave author blocks stranded after the
+    abstract in the linear stream.
 
-    Only touches the linear projection — the paginated view still mirrors
-    the actual page layout.
+    Detection is GEOMETRIC, not reading-order or text based: on the title page
+    the masthead is the vertical band ABOVE the first body block — the first
+    "Abstract" / "Introduction" header, or failing that the first substantial
+    paragraph. Every title-page `paragraph` / `section_header` whose top edge
+    lies inside that band is masthead material. A real numbered section header
+    such as "2 PHOTONIC GPU ARCHITECTURE" sits BELOW the band and is left
+    untouched — a pure text heuristic wrongly grabs it because its all-caps /
+    Title-Case text reads like a name list. When the title page has no body
+    anchor at all (abstract on a later page), fall back to the author/
+    affiliation text heuristics.
+
+    Always includes blocks Marker already tagged `role=='author'`. All matched
+    blocks are re-stamped `role='author'` so downstream code (frontend block-
+    role styling, sentence-stop filters) treats them uniformly. Only touches
+    the linear projection — the paginated view still mirrors the page layout.
     """
     if not blocks:
         return
-    author_idxs = [i for i, b in enumerate(blocks) if b.role == "author"]
-    if not author_idxs:
-        return
-    title_idx = next((i for i, b in enumerate(blocks) if b.role == "title"), -1)
-    insert_at = title_idx + 1 if title_idx >= 0 else 0
 
-    authors = [blocks[i] for i in author_idxs]
-    for i in sorted(author_idxs, reverse=True):
+    title_idx  = next((i for i, b in enumerate(blocks) if b.role == "title"), -1)
+    title_page = blocks[title_idx].page if title_idx >= 0 else (blocks[0].page if blocks else 1)
+    first_after = title_idx + 1 if title_idx >= 0 else 0
+
+    # Masthead floor = top edge of the highest body block on the title page.
+    # A body block is a body/skip section header (Abstract / Introduction / …)
+    # or a substantial paragraph (>30 words ≈ abstract or first body para).
+    # Authors live strictly above this line; numbered section headers below it.
+    body_tops = [
+        b.bbox.y0
+        for b in blocks
+        if b.page == title_page
+        and (
+            (
+                b.role == "section_header"
+                and (
+                    _is_body_section_name((b.text or "").strip())
+                    or _is_skip_section((b.text or "").strip())
+                )
+            )
+            or (
+                b.role == "paragraph"
+                and len((b.text or "").split()) > 30
+                and not _is_dense_name_list(b.text or "")
+            )
+        )
+    ]
+    masthead_bottom = min(body_tops) if body_tops else None
+
+    candidate_idxs: list[int] = []
+    for i, b in enumerate(blocks):
+        if b.role == "author":
+            candidate_idxs.append(i)
+            continue
+        if b.page != title_page or b.role not in ("paragraph", "section_header"):
+            continue
+        txt = (b.text or "").strip()
+        if not txt:
+            continue
+        # Body / skip section headers are NEVER masthead — even when they fall
+        # inside the band (a sub-header that bleeds up). Without this guard a
+        # header like "References" or "Acknowledgments" could get pulled up.
+        if b.role == "section_header" and (
+            _is_body_section_name(txt) or _is_skip_section(txt)
+        ):
+            continue
+        if masthead_bottom is not None:
+            # In-band → masthead. Test the block's vertical CENTER, not its top
+            # edge: in two-column layouts the first body fragment of column 2
+            # shares the abstract's top y, so a `y0 <` test flips on a float
+            # tie. A body block extends below the floor (center fails); authors
+            # sit entirely above it. This catches stray authors Marker
+            # mislabeled as section_header and long author-name lines the text
+            # heuristic misses, while excluding real headers below the band.
+            if (b.bbox.y0 + b.bbox.y1) / 2 < masthead_bottom:
+                candidate_idxs.append(i)
+        elif _looks_like_author_line(txt) or _is_soft_noise(txt):
+            candidate_idxs.append(i)
+
+    if not candidate_idxs:
+        return
+
+    candidates = [blocks[i] for i in candidate_idxs]
+    insert_at  = first_after
+    for i in sorted(candidate_idxs, reverse=True):
         blocks.pop(i)
-    insert_at -= sum(1 for i in author_idxs if i < insert_at)
-    authors.sort(key=lambda b: (b.page, b.bbox.y0, b.bbox.x0))
-    for k, a in enumerate(authors):
-        blocks.insert(insert_at + k, a)
+    insert_at -= sum(1 for i in candidate_idxs if i < insert_at)
+    for c in candidates:
+        c.role = "author"
+    candidates.sort(key=lambda b: (b.page, b.bbox.y0, b.bbox.x0))
+    for k, c in enumerate(candidates):
+        blocks.insert(insert_at + k, c)
     # Reassign reading_index in array order so the cross-mode sequence
     # builder (frontend buildLinearReadingSequence) stays consistent with
     # the new visual order.
