@@ -998,6 +998,49 @@ def _role_for_image_block(bt: str) -> str:
     return "table" if bt == "Table" else "figure"
 
 
+# Decorative-icon thresholds. Standard CC BY button is 88x31 pt, CC mark is
+# ~50x50 pt, conference / publisher logos in headers and corners are
+# similarly small. Real paper figures either fill a column (typically
+# >200pt wide) or carry a "Figure N: ..." caption that pulls them through
+# the merge pass with caption_text populated.
+_ICON_MAX_W_PT       = 130
+_ICON_MAX_H_PT       = 70
+_ICON_MAX_AREA_PT_SQ = 12000
+
+
+def _looks_like_decorative_icon(bbox, caption_text: str | None) -> bool:
+    """Tiny image with no caption — license badge, publisher logo, page-
+    corner mark. Filtered out of both the per-page `images` list and the
+    linear projection so they never reach the explain pipeline (no ✦
+    button, no Gemini analysis on a Creative Commons icon)."""
+    if caption_text:
+        return False
+    w = max(0.0, bbox.x1 - bbox.x0)
+    h = max(0.0, bbox.y1 - bbox.y0)
+    if w < _ICON_MAX_W_PT and h < _ICON_MAX_H_PT:
+        return True
+    if w * h < _ICON_MAX_AREA_PT_SQ:
+        return True
+    return False
+
+
+def _drop_decorative_icons_pages(pages: list[PageBlocks]) -> None:
+    for pg in pages:
+        pg.images = [
+            im for im in pg.images
+            if im.role != "figure"
+            or not _looks_like_decorative_icon(im.bbox, im.caption_text)
+        ]
+
+
+def _drop_decorative_icons_linear(blocks: list[FullBlock]) -> list[FullBlock]:
+    return [
+        b for b in blocks
+        if b.role != "figure"
+        or not _looks_like_decorative_icon(b.bbox, b.caption_text)
+    ]
+
+
 def _extract_linear_from_document(document, line_cache: dict | None = None) -> list[FullBlock]:
     """Walk the whole Marker document in global reading order.
 
@@ -1171,6 +1214,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     blocks = _extract_linear_from_document(document)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
+    blocks = _drop_decorative_icons_linear(blocks)
     _reorder_authors_after_title(blocks)
     _merge_continuations_linear(blocks)
     return blocks
@@ -1197,9 +1241,11 @@ def extract_both(
     linear = _extract_linear_from_document(document, line_cache)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
+    linear = _drop_decorative_icons_linear(linear)
     _reorder_authors_after_title(linear)
     _merge_figure_captions_pages(pages)
     _merge_algorithms_pages(pages)
+    _drop_decorative_icons_pages(pages)
     _merge_continuations_pages(pages)
     _merge_continuations_linear(linear)
     return pages, linear
