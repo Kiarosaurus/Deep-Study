@@ -929,11 +929,27 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       if (e.touches.length < 2) pinchActive = false
     }
 
+    // Trackpad pinch + Ctrl+wheel zoom. Browsers translate two-finger pinch
+    // on a trackpad into a wheel event with ctrlKey=true (Chromium, Firefox,
+    // Safari on macOS/Windows/Linux), so the same handler covers both. Per-
+    // event deltaY is clamped to keep keyboard Ctrl+wheel (~100 per tick)
+    // close to one ZOOM_STEP without making trackpad pinches feel sluggish.
+    // Active in BOTH paginated and tracking modes since the container is
+    // mounted in both.
+    function onWheel(e) {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      const clamped = Math.max(-30, Math.min(30, e.deltaY))
+      const factor  = Math.exp(-clamped * 0.01)
+      setUserZoom(z => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * factor)))
+    }
+
     // passive:false necesario para que preventDefault sea efectivo durante pinch
     node.addEventListener('touchstart',  onTouchStart, { passive: false })
     node.addEventListener('touchmove',   onTouchMove,  { passive: false })
     node.addEventListener('touchend',    onTouchEnd)
     node.addEventListener('touchcancel', onTouchEnd)
+    node.addEventListener('wheel',       onWheel,      { passive: false })
 
     return () => {
       ro.disconnect()
@@ -941,6 +957,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       node.removeEventListener('touchmove',   onTouchMove)
       node.removeEventListener('touchend',    onTouchEnd)
       node.removeEventListener('touchcancel', onTouchEnd)
+      node.removeEventListener('wheel',       onWheel)
     }
   }, [])
 
