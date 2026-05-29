@@ -36,11 +36,14 @@ source venv/bin/activate          # Linux/WSL/macOS
 pip install -r requirements.txt
 ```
 
-Create a `.env` file at the project root:
+Copy `.env.example` to `.env` and fill in your Gemini API key:
 
-```env
-GEMINI_API_KEY=your_api_key_here
+```bash
+cp .env.example .env
+# then edit .env and set GEMINI_API_KEY=your_api_key_here
 ```
+
+`.env.example` documents every variable the project consumes (required, optional backend, optional frontend build-time, and advanced Marker/Surya tunables). Only `GEMINI_API_KEY` is mandatory; the rest fall back to sensible defaults.
 
 ### 3. Frontend
 
@@ -71,13 +74,14 @@ This builds two images (`deepstudy-backend`, `deepstudy-frontend`) and starts bo
 
 Stop with `Ctrl+C` (or `docker compose down` from another terminal). Rebuild after dependency changes with `docker compose up --build`.
 
-**Optional env overrides** (set in `.env` or via `export` before `docker compose up`):
+**Optional env overrides** (set in `.env` or via `export` before `docker compose up`; see `.env.example` for the full annotated list including advanced Marker/Surya tunables):
 
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `DEEPSTUDY_LOG_LEVEL` | `INFO` | Backend log verbosity (`DEBUG`, `INFO`, `WARNING`, ...) |
 | `DEEPSTUDY_EXTRACT_PARALLEL` | `1` | How many Marker extractions can run in parallel |
-| `VITE_FLAG_SENTENCE` | unset | Set to `1` to bake `flag_sentence` diagnostic logging into the frontend build |
+| `DEEPSTUDY_CONT_DEBUG` | `0` | `1` to trace continuation-paragraph merge decisions |
+| `VITE_FLAG_SENTENCE` | unset | `1` to bake `flag_sentence` diagnostic logging into the frontend build |
 
 **Notes**
 
@@ -139,6 +143,7 @@ DeepStudy/
 ├── docker-compose.yml   # Orchestrates backend + frontend
 ├── .dockerignore
 ├── .env                 # GEMINI_API_KEY (not committed)
+├── .env.example         # Annotated template for .env (committed)
 ├── uploads/             # Persisted PDFs and analysis JSON files
 ├── venv/                # Python virtual environment (gitignored)
 └── frontend/
