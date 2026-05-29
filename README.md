@@ -52,9 +52,42 @@ cd ..
 
 ## Running the project
 
-Two terminals must be open in parallel.
+You can run everything with a single Docker command, or run the backend and frontend manually in two terminals.
 
-### Terminal 1 — Backend (port 8000)
+### Option A — Docker (single command)
+
+Requirements: Docker Engine 24+ and the Docker Compose plugin (`docker compose`). A `.env` file with `GEMINI_API_KEY=...` must exist at the project root.
+
+```bash
+docker compose up --build
+```
+
+This builds two images (`deepstudy-backend`, `deepstudy-frontend`) and starts both services:
+
+- Backend on <http://localhost:8000>
+- Frontend on <http://localhost:5173>
+
+`uploads/` is bind-mounted from the host so PDFs and `*.analysis.json` files persist across `docker compose down`. The Surya / HuggingFace model cache (~2 GB downloaded on first run) is kept in a named volume `marker-cache` so subsequent runs reuse it.
+
+Stop with `Ctrl+C` (or `docker compose down` from another terminal). Rebuild after dependency changes with `docker compose up --build`.
+
+**Optional env overrides** (set in `.env` or via `export` before `docker compose up`):
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DEEPSTUDY_LOG_LEVEL` | `INFO` | Backend log verbosity (`DEBUG`, `INFO`, `WARNING`, ...) |
+| `DEEPSTUDY_EXTRACT_PARALLEL` | `1` | How many Marker extractions can run in parallel |
+| `VITE_FLAG_SENTENCE` | unset | Set to `1` to bake `flag_sentence` diagnostic logging into the frontend build |
+
+**Notes**
+
+- First build takes 5–10 minutes (torch + marker-pdf + Surya weights). Subsequent builds are fast thanks to layer caching.
+- The frontend container serves the built bundle through nginx and proxies `/api/*` to the `backend` service via compose DNS — no CORS configuration needed.
+- GPU is **not** enabled by default. Backend runs Marker on CPU. To enable CUDA, base `Dockerfile` on `nvidia/cuda:12.x-runtime-ubuntu22.04`, install Python on top, and add `deploy.resources.reservations.devices` for the backend service.
+
+### Option B — Manual (two terminals)
+
+#### Terminal 1 — Backend (port 8000)
 
 ```bash
 cd DeepStudy
@@ -64,7 +97,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 Confirm the service is reachable: <http://localhost:8000/> should return `{"status": "ok", "message": "DeepStudy API running"}`.
 
-### Terminal 2 — Frontend (port 5173)
+#### Terminal 2 — Frontend (port 5173)
 
 ```bash
 cd DeepStudy/frontend
@@ -102,11 +135,17 @@ DeepStudy/
 ├── extraction.py        # Marker-based PDF layout extraction pipeline
 ├── models.py            # Pydantic models shared across endpoints
 ├── requirements.txt
+├── Dockerfile           # Backend image
+├── docker-compose.yml   # Orchestrates backend + frontend
+├── .dockerignore
 ├── .env                 # GEMINI_API_KEY (not committed)
 ├── uploads/             # Persisted PDFs and analysis JSON files
 ├── venv/                # Python virtual environment (gitignored)
 └── frontend/
     ├── package.json
+    ├── Dockerfile       # Multistage build → nginx
+    ├── nginx.conf       # SPA + /api proxy to backend service
+    ├── .dockerignore
     ├── src/
     └── node_modules/    # (gitignored)
 ```

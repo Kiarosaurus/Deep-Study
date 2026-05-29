@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deepstudy-backend
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY must be set (export it or put it in .env)}
+      DEEPSTUDY_LOG_LEVEL: ${DEEPSTUDY_LOG_LEVEL:-INFO}
+      DEEPSTUDY_EXTRACT_PARALLEL: ${DEEPSTUDY_EXTRACT_PARALLEL:-1}
+    volumes:
+      # PDFs + *.analysis.json — bind-mounted so they survive `down`.
+      - ./uploads:/app/uploads
+      # Surya / HuggingFace model cache — ~2 GB downloaded on first run.
+      # Named volume keeps it out of the host tree but persistent across
+      # rebuilds.
+      - marker-cache:/root/.cache
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_FLAG_SENTENCE: ${VITE_FLAG_SENTENCE:-}
+    container_name: deepstudy-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    restart: unless-stopped
+
+volumes:
+  marker-cache:
