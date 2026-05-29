@@ -45,6 +45,47 @@ export function significantWords(text) {
   )]
 }
 
+// Normalize text for whitespace/hyphenation-tolerant matching. Marker keeps
+// PDF line-break artifacts like `net- works`, `demon- strates`, and the LLM
+// quote may write `networks`, `one-shot`, etc. Collapsing soft-hyphens,
+// hyphen+optional-whitespace, and whitespace runs makes literal substring
+// match these equivalent forms. Returns { norm, posMap } where
+// posMap[i] = index in original string of norm[i] — used by Tier 2 to map
+// matched substring positions back to original char offsets.
+function normalizeForMatchWithMap(s) {
+  const lower = (s ?? '').toLowerCase()
+  let norm = ''
+  const posMap = []
+  let i = 0
+  while (i < lower.length) {
+    const c = lower[i]
+    if (c === '­') { i++; continue }
+    if (c === '-') {
+      // Drop hyphen and any whitespace that immediately follows it
+      i++
+      while (i < lower.length && /\s/.test(lower[i])) i++
+      continue
+    }
+    if (/\s/.test(c)) {
+      // Collapse whitespace runs into a single space
+      if (norm.length === 0 || norm[norm.length - 1] !== ' ') {
+        norm += ' '
+        posMap.push(i)
+      }
+      i++
+      continue
+    }
+    norm += c
+    posMap.push(i)
+    i++
+  }
+  return { norm, posMap }
+}
+
+function normalizeForMatch(s) {
+  return normalizeForMatchWithMap(s).norm
+}
+
 export function charRangeToSentenceIndices(sentences, charStart, charEnd) {
   const indices = []
   let cursor = 0
@@ -59,11 +100,12 @@ export function charRangeToSentenceIndices(sentences, charStart, charEnd) {
 
 export function indicesAgreeWithQuote(sentences, indices, quote) {
   if (!indices.length || !quote) return false
-  const indexedLower = indices.map(i => sentences[i].text).join(' ').toLowerCase()
-  if (indexedLower.includes(quote.toLowerCase())) return true
+  const indexedNorm = normalizeForMatch(indices.map(i => sentences[i].text).join(' '))
+  const quoteNorm   = normalizeForMatch(quote)
+  if (quoteNorm && indexedNorm.includes(quoteNorm)) return true
   const words = significantWords(quote)
   if (!words.length) return false
-  const hits = words.filter(w => indexedLower.includes(w)).length
+  const hits = words.filter(w => indexedNorm.includes(w)).length
   return hits / words.length >= 0.7
 }
 
@@ -85,47 +127,90 @@ export function resolveSentenceIndices(sentences, item) {
     result = cleanIndices
   }
 
-  // Tier 2
+  // Tier 2 — literal substring match, whitespace/hyphenation tolerant. PDF
+  // line-break artifacts (`net- works`) and LLM hyphenation choices
+  // (`one-shot` vs `one- shot`) used to defeat raw `.includes()`; normalize
+  // both sides and map matched positions back to original char offsets.
   if (result === null && quote) {
     let concat = ''
     for (let i = 0; i < sentences.length; i++) {
       concat += sentences[i].text
       if (i < sentences.length - 1) concat += ' '
     }
-    const idx = concat.toLowerCase().indexOf(quote.toLowerCase())
-    if (idx !== -1) {
-      const located = charRangeToSentenceIndices(sentences, idx, idx + quote.length)
-      if (located.length) {
-        tier = 2
-        result = located
+    const { norm: concatNorm, posMap } = normalizeForMatchWithMap(concat)
+    const quoteNorm = normalizeForMatch(quote)
+    if (quoteNorm) {
+      const nIdx = concatNorm.indexOf(quoteNorm)
+      if (nIdx !== -1 && posMap.length) {
+        const origStart  = posMap[nIdx] ?? 0
+        const lastNorm   = Math.min(nIdx + quoteNorm.length - 1, posMap.length - 1)
+        const origEnd    = (posMap[lastNorm] ?? concat.length - 1) + 1
+        const located = charRangeToSentenceIndices(sentences, origStart, origEnd)
+        if (located.length) {
+          tier = 2
+          result = located
+        }
       }
     }
   }
 
-  // Tier 3 — fuzzy sobre quote o concatenación de terms
+  // Tier 3 — fuzzy sobre quote o concatenación de terms. Picks the SMALLEST
+  // window meeting the sigWord threshold, preferring windows that overlap
+  // declared indices when those exist. The earlier "largest seen.size" rule
+  // drifted to wide windows just because adjacent sentences happened to share
+  // common vocabulary (e.g., "bandwidth", "reconfiguration") — a 2-sentence
+  // window that meets threshold is a better signal than a 5-sentence one.
   if (result === null) {
     const conceptTerms = Array.isArray(concepts) ? concepts.map(c => c.term).join(' ') : ''
     const fuzzySource = quote || conceptTerms || ''
     const sigWords = significantWords(fuzzySource)
     if (sigWords.length) {
-      const sentLowers = sentences.map(s => s.text.toLowerCase())
+      const sentLowers = sentences.map(s => normalizeForMatch(s.text))
       const threshold  = Math.ceil(sigWords.length * 0.6)
-      let bestStart = -1, bestEnd = -1, bestHits = 0
-      for (let s = 0; s < sentences.length; s++) {
-        const seen = new Set()
-        for (let e = s; e < sentences.length && e - s < 5; e++) {
-          for (const w of sigWords) if (sentLowers[e].includes(w)) seen.add(w)
-          if (seen.size >= threshold && seen.size > bestHits) {
-            bestHits  = seen.size
-            bestStart = s
-            bestEnd   = e
+      const declared   = cleanIndices.length ? new Set(cleanIndices) : null
+
+      const score = (requireAnchor) => {
+        let bestStart = -1, bestEnd = -1, bestSize = Infinity, bestHits = 0
+        for (let s = 0; s < sentences.length; s++) {
+          const seen = new Set()
+          for (let e = s; e < sentences.length && e - s < 5; e++) {
+            for (const w of sigWords) if (sentLowers[e].includes(w)) seen.add(w)
+            if (seen.size < threshold) continue
+            if (requireAnchor && declared) {
+              let overlaps = false
+              for (let k = s; k <= e; k++) if (declared.has(k)) { overlaps = true; break }
+              if (!overlaps) continue
+            }
+            const size = e - s + 1
+            if (size < bestSize || (size === bestSize && seen.size > bestHits)) {
+              bestStart = s; bestEnd = e; bestSize = size; bestHits = seen.size
+              break
+            }
           }
         }
+        return { bestStart, bestEnd, bestSize, bestHits }
       }
-      if (bestStart !== -1) {
+
+      let pick = score(true)
+      let anchored = pick.bestStart !== -1
+      if (!anchored) pick = score(false)
+
+      if (pick.bestStart !== -1) {
         tier = 3
-        result = Array.from({ length: bestEnd - bestStart + 1 }, (_, k) => bestStart + k)
-        tier3Debug = { sigWords, threshold, bestStart, bestEnd, bestHits, windowSize: bestEnd - bestStart + 1 }
+        result = Array.from(
+          { length: pick.bestEnd - pick.bestStart + 1 },
+          (_, k) => pick.bestStart + k,
+        )
+        tier3Debug = {
+          sigWords,
+          threshold,
+          declared: declared ? [...declared] : null,
+          anchored,
+          bestStart: pick.bestStart,
+          bestEnd: pick.bestEnd,
+          bestHits: pick.bestHits,
+          windowSize: pick.bestSize,
+        }
       }
     }
   }
