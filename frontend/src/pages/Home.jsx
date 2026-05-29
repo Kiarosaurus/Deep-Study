@@ -117,7 +117,7 @@ function uiUpdateForEvent(ev) {
   }
 }
 
-function UploadQueueView({ queue, currentIdx, allDone, onClose }) {
+function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
   const doneCount = queue.filter(q => q.status === 'done').length
   const errorCount = queue.filter(q => q.status === 'error').length
   const skippedCount = queue.filter(q => q.status === 'skipped').length
@@ -148,14 +148,31 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose }) {
         <ul className="flex flex-col gap-2 max-h-[60vh] overflow-y-auto pr-1">
           {queue.map((q, i) => {
             const b = statusBadge(q.status)
+            const isDone     = q.status === 'done'
+            const canOpen    = isDone && !!q.filename && !!onOpen
+            const openTarget = canOpen ? q.filename : null
             return (
               <li
                 key={`${q.file.name}-${i}`}
-                className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 flex items-center gap-3"
+                role={canOpen ? 'button' : undefined}
+                tabIndex={canOpen ? 0 : undefined}
+                onClick={canOpen ? () => onOpen(openTarget) : undefined}
+                onKeyDown={canOpen ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    onOpen(openTarget)
+                  }
+                } : undefined}
+                title={canOpen ? `Abrir ${q.filename}` : q.file.name}
+                className={`rounded-xl px-3 py-2.5 flex items-center gap-3 transition-all duration-150 ${
+                  isDone
+                    ? 'bg-emerald-50/60 border border-emerald-200 hover:bg-emerald-50 hover:border-emerald-300 hover:shadow-sm cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-200 focus:outline-none focus:ring-2 focus:ring-emerald-300'
+                    : 'bg-white border border-slate-200'
+                }`}
               >
-                <span className="text-base shrink-0">📄</span>
+                <span className="text-base shrink-0">{isDone ? '✅' : '📄'}</span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-800 truncate" title={q.file.name}>
+                  <p className={`text-sm font-medium truncate ${isDone ? 'text-emerald-900' : 'text-slate-800'}`} title={q.file.name}>
                     {q.file.name}
                   </p>
                   {(q.status === 'uploading' || q.status === 'analyzing' || q.status === 'fallback') && (
@@ -178,15 +195,31 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose }) {
                       {q.message}
                     </p>
                   )}
+                  {isDone && (
+                    <p className="text-[11px] text-emerald-700 mt-0.5">
+                      Listo — click para abrir
+                    </p>
+                  )}
                   {q.status === 'error' && q.error && (
                     <p className="text-[11px] text-red-500 mt-0.5 truncate" title={q.error}>
                       {q.error}
                     </p>
                   )}
                 </div>
-                <span className={`text-[10px] font-semibold px-2 py-0.5 border rounded-full shrink-0 ${b.cls}`}>
-                  {b.label}
-                </span>
+                {canOpen ? (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onOpen(openTarget) }}
+                    className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shrink-0 flex items-center gap-1"
+                  >
+                    Abrir
+                    <span aria-hidden="true">→</span>
+                  </button>
+                ) : (
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 border rounded-full shrink-0 ${b.cls}`}>
+                    {b.label}
+                  </span>
+                )}
               </li>
             )
           })}
@@ -307,7 +340,7 @@ export default function Home() {
           // running and the analysis file lands on disk regardless. We just
           // reconnect once and, if that also fails, mark the queue item as
           // error while keeping the backend job alive.
-          await new Promise((resolve, reject) => {
+          const doneEvent = await new Promise((resolve, reject) => {
             let es = new EventSource(`/api/upload-pdf/${jobId}/events`)
             let reconnected = false
 
@@ -336,7 +369,7 @@ export default function Home() {
                 applyEvent(ev)
                 if (ev.phase === 'done') {
                   close()
-                  resolve(ev.result)
+                  resolve(ev)
                 } else if (ev.phase === 'failed') {
                   close()
                   reject(new Error(ev.message || 'Extracción falló'))
@@ -378,7 +411,18 @@ export default function Home() {
           })
 
           setQueue(prev => prev.map((it, j) =>
-            j === i ? { ...it, status: 'done', progress: 100 } : it,
+            j === i
+              ? {
+                  ...it,
+                  status: 'done',
+                  progress: 100,
+                  // Canonical filename the backend wrote to disk — may differ
+                  // from items[i].file.name if the server sanitized or
+                  // deduplicated. Falls back to the local file name when the
+                  // backend didn't include it (older builds, replay path).
+                  filename: doneEvent?.filename ?? items[i].file.name,
+                }
+              : it,
           ))
           break
         } catch (err) {
@@ -442,6 +486,7 @@ export default function Home() {
           currentIdx={currentIdx}
           allDone={allDone}
           onClose={closeUploadView}
+          onOpen={handleOpen}
         />
       </>
     )
