@@ -1,15 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Document, Page, pdfjs } from 'react-pdf'
-import 'react-pdf/dist/Page/AnnotationLayer.css'
-import 'react-pdf/dist/Page/TextLayer.css'
 import LinearReader from './LinearReader'
+import PaginatedCanvas from './PaginatedCanvas'
 import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
-
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString()
+import { usePageCache } from './use-page-cache'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 3.0
@@ -365,25 +359,43 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
   )
 }
 
-function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloads, chainIds, onExplain, activeParagraph, currentExplanation, explanation, trackedBox, hoveredChain, onHoveredChainChange }) {
-  // Guarda originalWidth (no scale) — así `scale = width / originalWidth` se recomputa
-  // automáticamente cuando `width` cambia por zoom o resize.
-  const [originalWidth, setOriginalWidth] = useState(null)
-  const scale = originalWidth ? width / originalWidth : null
-
-  function handlePageLoad(page) {
-    setOriginalWidth(page.getViewport({ scale: 1 }).width)
-  }
+function PdfPage({
+  pdfDoc,
+  pageNumber,
+  width,
+  pageDim,
+  srcCanvas,
+  requestPage,
+  observer,
+  blocks,
+  images = [],
+  flatBase,
+  chainPayloads,
+  chainIds,
+  onExplain,
+  activeParagraph,
+  currentExplanation,
+  explanation,
+  trackedBox,
+  hoveredChain,
+  onHoveredChainChange,
+}) {
+  // scale = displayWidth / page-natural-width (PDF points). pageDim comes
+  // from the backend analysis; if missing we fall back to a sentinel so
+  // overlays stay laid out even before pdfjs resolves the page.
+  const naturalW = pageDim?.width ?? 612
+  const scale = naturalW > 0 ? width / naturalW : null
 
   return (
-    <div className="relative shadow-xl mb-5 bg-white" data-page={pageNumber}>
-      <Page
-        pageNumber={pageNumber}
-        width={width}
-        onLoadSuccess={handlePageLoad}
-        renderTextLayer
-        renderAnnotationLayer
-      />
+    <PaginatedCanvas
+      pdfDoc={pdfDoc}
+      pageNumber={pageNumber}
+      width={width}
+      pageDim={pageDim}
+      srcCanvas={srcCanvas}
+      requestPage={requestPage}
+      observer={observer}
+    >
       <ParagraphOverlay
         blocks={blocks}
         images={images}
@@ -412,21 +424,23 @@ function PdfPage({ pageNumber, width, blocks, images = [], flatBase, chainPayloa
           }}
         />
       )}
-    </div>
+    </PaginatedCanvas>
   )
 }
 
 const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }, ref) {
-  const [numPages, setNumPages]               = useState(null)
   const [hoveredChain, setHoveredChain]       = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
   const [tracking, setTracking]               = useState(false)
   const [currentStop, setCurrentStop]         = useState(0)
+  // Shared IntersectionObserver for both PaginatedCanvas instances and
+  // (eventually) any other lazy-render component on the page. Held in
+  // state so child effects rebind when it's available.
+  const [observerInstance, setObserverInstance] = useState(null)
 
   const containerRef = useRef(null)
-  const userZoomRef  = useRef(1.0)
-  const trackingToolbarRef = useRef(null)
+  const trackingToolbarRef    = useRef(null)
   // Scroll preservation across tracking toggle. lastLinearBlockIdxRef stores
   // the linearBlocks index the user was reading in tracking mode; restored
   // when they toggle back on after a paginated detour. lastPaginatedFlatRef
@@ -444,21 +458,17 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
     lastPaginatedFlatRef.current  = null
   }, [file])
 
-  // Lazy-load the pdfjs doc the first time tracking activates and keep it
-  // alive for the lifetime of this viewer. LinearReader unmounts on toggle off
-  // but the doc + page-canvas cache survive, so re-activating doesn't re-fetch
-  // or re-parse the PDF.
-  const [docNeeded, setDocNeeded] = useState(false)
-  useEffect(() => {
-    // Intentional latch: flip on first activation, never reset. Drives the
-    // lazy-mount of the shared pdfjs doc so paginated-only sessions don't pay
-    // the parsing cost.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (tracking) setDocNeeded(true)
-  }, [tracking])
-  const sharedPdfDoc = usePdfDocument(docNeeded ? file : null)
-
-  useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
+  // Single shared pdfjs document instance — used by BOTH the paginated
+  // PaginatedCanvas pages AND the tracking-mode LinearReader (BlockCrop).
+  // Loaded eagerly now that paginated mode also needs it (custom canvas
+  // render); the parsing cost happens once per file and is reused across
+  // mode toggles + zoom + scroll without re-fetching.
+  const sharedPdfDoc = usePdfDocument(file)
+  // Shared page-canvas cache. maxCached sized for a sliding window of
+  // visible paginated pages (~6 visible at a time on a typical viewport)
+  // plus headroom for the IntersectionObserver prefetch margin.
+  const { pageCanvases, requestPage } = usePageCache(sharedPdfDoc, { maxCached: 12, concurrent: 2 })
+  const numPages = sharedPdfDoc?.numPages ?? null
 
   // ── Tracking mode ───────────────────────────────────────────────────────────
   const paginatedSequence = useMemo(() => buildReadingSequence(pages), [pages])
@@ -930,17 +940,20 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
     }
 
     // Trackpad pinch + Ctrl+wheel zoom. Browsers translate two-finger pinch
-    // on a trackpad into a wheel event with ctrlKey=true (Chromium, Firefox,
-    // Safari on macOS/Windows/Linux), so the same handler covers both. Per-
-    // event deltaY is clamped to keep keyboard Ctrl+wheel (~100 per tick)
-    // close to one ZOOM_STEP without making trackpad pinches feel sluggish.
-    // Active in BOTH paginated and tracking modes since the container is
-    // mounted in both.
+    // on a trackpad into a wheel event with ctrlKey=true (Chromium,
+    // Firefox, Safari on macOS/Windows/Linux), so the same handler covers
+    // both. Both modes now render via canvas drawImage from a cached
+    // pdfjs page bitmap (paginated through PaginatedCanvas, tracking
+    // through BlockCrop), so zoom is GPU-fast and we can apply userZoom
+    // directly per event — no debounce, no CSS-transform preview hack,
+    // no blank canvas. Direction inverts in tracking because higher
+    // userZoom shrinks the reading column there.
     function onWheel(e) {
       if (!e.ctrlKey) return
       e.preventDefault()
-      const clamped = Math.max(-30, Math.min(30, e.deltaY))
-      const factor  = Math.exp(-clamped * 0.01)
+      const clamped = Math.max(-20, Math.min(20, e.deltaY))
+      const sign    = trackingRef.current ? -1 : 1
+      const factor  = Math.exp(-clamped * 0.005 * sign)
       setUserZoom(z => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * factor)))
     }
 
@@ -960,6 +973,32 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       node.removeEventListener('wheel',       onWheel)
     }
   }, [])
+
+  // Shared IntersectionObserver for lazy page renders. rootMargin keeps
+  // ~one viewport of headroom so pages prefetch before the user scrolls
+  // to them. Container has overflow-auto so it IS the scroll root.
+  useEffect(() => {
+    const node = containerRef.current
+    if (!node) return
+    const obs = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        entry.target.__onIntersect?.(entry)
+      }
+    }, { root: node, rootMargin: '600px 0px 600px 0px', threshold: 0 })
+    setObserverInstance(obs)
+    return () => {
+      obs.disconnect()
+      setObserverInstance(null)
+    }
+  }, [])
+
+  // Re-add the trackingRef + userZoomRef the wheel/touch handlers need —
+  // touch path still reads them for pinch state, and tracking-mode
+  // wheel inverts based on trackingRef.
+  const userZoomRef = useRef(1.0)
+  const trackingRef = useRef(false)
+  useEffect(() => { userZoomRef.current = userZoom }, [userZoom])
+  useEffect(() => { trackingRef.current = tracking }, [tracking])
 
   function zoomIn()  { setUserZoom(z => Math.min(z + ZOOM_STEP, ZOOM_MAX)) }
   function zoomOut() { setUserZoom(z => Math.max(z - ZOOM_STEP, ZOOM_MIN)) }
@@ -1112,33 +1151,34 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
           className="flex flex-col items-center py-8 px-6 min-h-full"
           style={{ minWidth: 'fit-content' }}
         >
-          <Document
-            file={file}
-            onLoadSuccess={({ numPages }) => setNumPages(numPages)}
-            loading={<p className="text-slate-400 text-sm mt-16">Cargando PDF...</p>}
-            error={<p className="text-red-500 text-sm mt-16">No se pudo cargar el PDF.</p>}
-          >
-            {numPages && pageWidth &&
-              Array.from({ length: numPages }, (_, i) => (
-                <PdfPage
-                  key={i}
-                  pageNumber={i + 1}
-                  width={pageWidth}
-                  blocks={blocksMap[i + 1]}
-                  images={imagesMap[i + 1]}
-                  flatBase={flatBaseByPage[i + 1] ?? 0}
-                  chainPayloads={paginatedChainPayloads}
-                  chainIds={paginatedChainIds}
-                  onExplain={onExplain}
-                  activeParagraph={activeParagraph}
-                  currentExplanation={currentExplanation}
-                  explanation={explanation}
-                  trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
-                  hoveredChain={hoveredChain}
-                  onHoveredChainChange={setHoveredChain}
-                />
-              ))}
-          </Document>
+          {!sharedPdfDoc && (
+            <p className="text-slate-400 text-sm mt-16">Cargando PDF...</p>
+          )}
+          {numPages && pageWidth &&
+            Array.from({ length: numPages }, (_, i) => (
+              <PdfPage
+                key={i}
+                pdfDoc={sharedPdfDoc}
+                pageNumber={i + 1}
+                width={pageWidth}
+                pageDim={pageDims[i + 1]}
+                srcCanvas={pageCanvases[i + 1]}
+                requestPage={requestPage}
+                observer={observerInstance}
+                blocks={blocksMap[i + 1]}
+                images={imagesMap[i + 1]}
+                flatBase={flatBaseByPage[i + 1] ?? 0}
+                chainPayloads={paginatedChainPayloads}
+                chainIds={paginatedChainIds}
+                onExplain={onExplain}
+                activeParagraph={activeParagraph}
+                currentExplanation={currentExplanation}
+                explanation={explanation}
+                trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
+                hoveredChain={hoveredChain}
+                onHoveredChainChange={setHoveredChain}
+              />
+            ))}
         </div>
         )}
       </div>

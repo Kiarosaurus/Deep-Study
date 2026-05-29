@@ -6,7 +6,7 @@
 // releases pdfjs worker resources.
 
 import { useEffect, useState } from 'react'
-import { pdfjs } from 'react-pdf'
+import * as pdfjs from 'pdfjs-dist'
 
 if (!pdfjs.GlobalWorkerOptions.workerSrc) {
   pdfjs.GlobalWorkerOptions.workerSrc = new URL(
