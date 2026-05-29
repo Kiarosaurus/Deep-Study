@@ -221,20 +221,39 @@ export default function Reader() {
   // items emitted at their first covered index, placeholders for gaps. Keeps
   // original item shape (quote / sentence_indices / concepts) so highlighting
   // via resolveSentenceIndices keeps working.
+  //
+  // Claim sentences by RESOLVED indices (Tier 1/2/3 output), not declared
+  // sentence_indices. Resolved is what actually lights up yellow when the
+  // slot is active; using it here means any sentence covered by a real
+  // item's highlight is exclusive to that item, so no two carousel slots
+  // ever paint the same sentence yellow.
   const alignExplanations = (aiData, originalSentences) => {
     if (!originalSentences?.length) return aiData
     if (!aiData || !Array.isArray(aiData.sentence_explanations)) return aiData
     const raw = aiData.sentence_explanations
     const N = originalSentences.length
 
+    const resolvedByItem = raw.map(item => {
+      const r = resolveSentenceIndices(originalSentences, item)
+      return Array.isArray(r) ? r : []
+    })
+
     const sentToItem = new Map()
-    raw.forEach((item, idx) => {
-      const idxs = Array.isArray(item?.sentence_indices) ? item.sentence_indices : []
+    resolvedByItem.forEach((idxs, idx) => {
       for (const k of idxs) {
         if (Number.isInteger(k) && k >= 0 && k < N && !sentToItem.has(k)) {
           sentToItem.set(k, idx)
         }
       }
+    })
+
+    logSentence('alignExplanations.resolved', {
+      perItem: resolvedByItem.map((r, i) => ({
+        itemIdx: i,
+        declared: raw[i]?.sentence_indices,
+        resolved: r,
+      })),
+      sentenceClaimMap: [...sentToItem.entries()].map(([sentIdx, itemIdx]) => ({ sentIdx, itemIdx })),
     })
 
     const aligned = []
