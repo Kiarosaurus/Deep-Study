@@ -1,0 +1,382 @@
+// UI-language strings (interface chrome only). This is INDEPENDENT from the
+// "Idioma de explicación" setting that drives the Gemini prompt + responses —
+// changing the UI language never changes what language explanations come back
+// in. See PdfUploader's `language` state for the explanation language.
+//
+// Values are plain strings with optional {var} placeholders, or functions
+// (vars) => string for counts / pluralization. `t(key, vars)` (see
+// LanguageContext) resolves both, falling back to English then the raw key.
+
+export const DEFAULT_LANG = 'es'
+
+export const LANGS = [
+  { code: 'en',      label: 'English' },
+  { code: 'es',      label: 'Español' },
+  { code: 'zh-Hant', label: '繁體中文' },
+]
+
+export const TRANSLATIONS = {
+  en: {
+    'common.open': 'Open',
+    'common.delete': 'Delete',
+    'common.remove': 'Remove',
+    'common.error': 'Error',
+    'common.backHome': 'Back to home',
+
+    'home.yourDocs': ({ n }) => `Your documents (${n})`,
+    'home.analyzed': 'Analyzed',
+    'home.openAria': ({ name }) => `Open ${name}`,
+    'home.status.pending': 'Queued',
+    'home.status.uploading': 'Uploading',
+    'home.status.analyzing': 'Analyzing',
+    'home.status.fallback': 'Fallback',
+    'home.status.conflict': 'Confirm…',
+    'home.status.done': 'Done',
+    'home.status.skipped': 'Skipped',
+    'home.status.error': 'Error',
+    'home.analysisComplete': 'Analysis complete',
+    'home.doneSummary': ({ done, error, skipped }) =>
+      `${done} done`
+      + (error > 0 ? `, ${error} with error${error === 1 ? '' : 's'}` : '')
+      + (skipped > 0 ? `, ${skipped} skipped` : ''),
+    'home.processing': ({ current, total }) => `Processing (${current} / ${total})`,
+    'home.dontClose': "Don't close this window",
+    'home.readyClick': 'Ready — click to open',
+    'home.backToLibrary': 'Back to library',
+
+    'uploader.title': 'Upload your papers',
+    'uploader.subtitle': "One or more PDFs. They're analyzed and saved to your library, ready to open.",
+    'uploader.dropHere': 'Drag PDFs here',
+    'uploader.orClick': 'or click to select one or more',
+    'uploader.configAll': 'Settings (applies to all)',
+    'uploader.explainLang': 'Explanation language',
+    'uploader.keepTerms': 'Keep technical terms and acronyms in English',
+    'uploader.analyze': ({ count }) =>
+      count === 0 ? 'Analyze papers' : count === 1 ? 'Analyze 1 paper' : `Analyze ${count} papers`,
+    'uploader.uiLang': 'Interface language',
+
+    'reader.loadingDoc': 'Loading document...',
+    'reader.analysisNotFound': 'Document analysis not found.',
+
+    'viewer.zoomSmaller': 'Smaller text (−)',
+    'viewer.fit100': 'Fit to 100%',
+    'viewer.zoomLarger': 'Larger text (+)',
+    'viewer.explainParagraph': 'Explain paragraph',
+    'viewer.explainBlock': ({ role }) =>
+      role === 'table' ? 'Explain table' : role === 'algorithm' ? 'Explain algorithm' : 'Explain figure',
+    'viewer.backToMenu': 'Back to main menu',
+    'viewer.trackingExit': 'Exit (Esc)',
+    'viewer.trackingActivate': 'Enable Tracking Mode',
+    'viewer.trackingOn': '◉ Tracking ON',
+    'viewer.trackingOff': '◯ Enable Tracking',
+    'viewer.prevStop': 'Previous (↑ / PgUp)',
+    'viewer.nextStop': 'Next (↓ / Space / PgDn)',
+    'viewer.loadingPdf': 'Loading PDF...',
+
+    'sidebar.tabGlobal': 'Global Map',
+    'sidebar.tabExplain': 'Explanation',
+    'sidebar.retrying': ({ attempt, max, secs }) =>
+      `Retrying (${attempt}/${max}) in ${secs}s — transient model error.`,
+    'sidebar.globalEmpty': 'Upload a paper to generate the global map.',
+    'sidebar.coreMethodology': 'Core Methodology',
+    'sidebar.assumedConcepts': 'Assumed Concepts',
+    'sidebar.acronyms': ({ n }) => `Acronyms (${n})`,
+    'sidebar.paragraphClear': 'This paragraph is clear and has no complex structures.',
+    'sidebar.sentenceNoConcepts': 'This sentence has no technical concepts needing further explanation.',
+    'sidebar.prev': 'Previous (←)',
+    'sidebar.next': 'Next (→)',
+    'sidebar.sentenceCounter': ({ i, total }) =>
+      `${i} of ${total} ${total === 1 ? 'sentence' : 'sentences'}`,
+    'sidebar.noContext': 'No context available for this paragraph.',
+    'sidebar.roleInSection': 'Role in the section',
+    'sidebar.narrative': 'Narrative',
+    'sidebar.explainEmpty': 'Click ✦ on any paragraph in the PDF to explain it.',
+    'sidebar.modeContexto': 'Context',
+    'sidebar.modeConceptos': 'Concepts',
+
+    // SSE extraction-progress phases. Receive the raw event object as vars and
+    // read its structured fields (device, batch, chunk_index, …). Follow the UI
+    // language; unmapped phases fall back to the backend Spanish `message`.
+    'progress.started': (e) => `Starting extraction (${e.n_pages} pages, ${e.pdf_mb} MB)`
+      + (e.disable_ocr ? ' — native text detected, OCR skipped' : ''),
+    'progress.queued': 'Waiting behind another extraction in progress',
+    'progress.device_skipped': (e) => `Fallback: GPU skipped (${e.reason})`,
+    'progress.device_started': (e) => `Starting extraction on ${e.device} (batch tiers=${(e.batch_tiers || []).join(', ')})`,
+    'progress.batch_attempt': (e) => e.tier_index === 0
+      ? `Trying batch=${e.batch} on ${e.device}`
+      : `Fallback: batch reduced to ${e.batch} on ${e.device}`,
+    'progress.batch_success': (e) => `Extraction succeeded on ${e.device} (batch=${e.batch})`,
+    'progress.batch_oom': (e) => `Fallback: OOM at batch=${e.batch}, retrying with a smaller batch`,
+    'progress.cuda_oom_abandon': 'Fallback: GPU dropped (out of memory)',
+    'progress.child_error': (e) => `Child error${e.error_type ? ': ' + e.error_type : ''}${e.error_msg ? ': ' + e.error_msg : ''}`,
+    'progress.chunk_tier_skipped': (e) => `Fallback: chunking skipped on ${e.device} (PDF of ${e.n_pages} pages too small)`,
+    'progress.chunk_tier_started': (e) => `Fallback: chunk mode enabled on ${e.device}`,
+    'progress.chunk_started': (e) => `Chunk mode enabled (${e.chunk_size} pages per chunk, ${e.total_chunks} chunks)`,
+    'progress.chunk_progress': (e) => `Processing chunk ${(e.chunk_index ?? 0) + 1} of ${e.total_chunks}`,
+    'progress.chunked_success': (e) => `Extraction succeeded on ${e.device} (chunk_size=${e.chunk_size})`,
+    'progress.chunk_oom': (e) => `Fallback: chunk_size=${e.chunk_size} on ${e.device} failed (OOM), reducing`,
+    'progress.device_exhausted': (e) => `Fallback: ${e.device} exhausted, trying next device`,
+    'progress.global_map_started': 'Generating global map with Gemini',
+    'progress.failed': (e) => `Extraction failed${e.device ? ` on ${e.device}` : ''}`,
+    'progress.done': 'Analysis complete',
+
+    // Error messages (upload queue + explain panel). Follow the UI language.
+    'errors.noJobId': 'Backend did not return a job_id',
+    'errors.extractionFailed': 'Extraction failed',
+    'errors.sseLost': 'SSE connection lost — the backend is still processing',
+    'errors.noBackendResponse': 'No response from backend',
+    'errors.unknown': 'Unknown error',
+    'errors.http': (e) => `HTTP ${e.status}`,
+    'errors.explain.timeout': 'The request took too long and was canceled. Retry the “Explain” button.',
+    'errors.explain.noConnection': 'Could not connect to the server. Make sure the backend is running on :8000 and try again.',
+    'errors.explain.badRequest': (e) => `Invalid request: ${e.detail || 'the paragraph has no sentences to explain.'}`,
+    'errors.explain.truncated': 'The model returned an incomplete response (token limit). Retry — it usually resolves on the second attempt.',
+    'errors.explain.invalidJson': 'The model returned malformed JSON. Retry — it is a transient LLM error.',
+    'errors.explain.rateLimit': 'Gemini rate limit reached. Wait a few seconds and retry.',
+    'errors.explain.empty': 'The model returned no content (possible safety filter). Retry or try another paragraph.',
+    'errors.explain.geminiTransient': (e) => `Gemini error: ${e.detail || 'transient failure'}. Retry the “Explain” button.`,
+    'errors.explain.server': (e) => `Server error (${e.status}). Retry in a few seconds.`,
+    'errors.explain.unexpected': (e) => `Unexpected error (${e.status}): ${e.detail || 'no details'}.`,
+  },
+
+  es: {
+    'common.open': 'Abrir',
+    'common.delete': 'Eliminar',
+    'common.remove': 'Quitar',
+    'common.error': 'Error',
+    'common.backHome': 'Volver al inicio',
+
+    'home.yourDocs': ({ n }) => `Tus documentos (${n})`,
+    'home.analyzed': 'Analizado',
+    'home.openAria': ({ name }) => `Abrir ${name}`,
+    'home.status.pending': 'En cola',
+    'home.status.uploading': 'Subiendo',
+    'home.status.analyzing': 'Analizando',
+    'home.status.fallback': 'Fallback',
+    'home.status.conflict': 'Confirmar…',
+    'home.status.done': 'Hecho',
+    'home.status.skipped': 'Omitido',
+    'home.status.error': 'Error',
+    'home.analysisComplete': 'Análisis completado',
+    'home.doneSummary': ({ done, error, skipped }) =>
+      `${done} listo${done === 1 ? '' : 's'}`
+      + (error > 0 ? `, ${error} con error` : '')
+      + (skipped > 0 ? `, ${skipped} omitido${skipped === 1 ? '' : 's'}` : ''),
+    'home.processing': ({ current, total }) => `Procesando (${current} / ${total})`,
+    'home.dontClose': 'No cierres esta ventana',
+    'home.readyClick': 'Listo — click para abrir',
+    'home.backToLibrary': 'Volver a la biblioteca',
+
+    'uploader.title': 'Sube tus papers',
+    'uploader.subtitle': 'Uno o varios PDFs. Se analizan y quedan en tu biblioteca, listos para abrir.',
+    'uploader.dropHere': 'Arrastra PDFs aquí',
+    'uploader.orClick': 'o haz clic para seleccionar uno o varios',
+    'uploader.configAll': 'Configuración (aplica a todos)',
+    'uploader.explainLang': 'Idioma de explicación',
+    'uploader.keepTerms': 'Mantener términos técnicos y acrónimos en Inglés',
+    'uploader.analyze': ({ count }) =>
+      count === 0 ? 'Analizar papers' : count === 1 ? 'Analizar 1 paper' : `Analizar ${count} papers`,
+    'uploader.uiLang': 'Idioma de la interfaz',
+
+    'reader.loadingDoc': 'Cargando documento...',
+    'reader.analysisNotFound': 'No se encontró el análisis del documento.',
+
+    'viewer.zoomSmaller': 'Texto más pequeño (−)',
+    'viewer.fit100': 'Ajustar a 100%',
+    'viewer.zoomLarger': 'Texto más grande (+)',
+    'viewer.explainParagraph': 'Explicar párrafo',
+    'viewer.explainBlock': ({ role }) =>
+      role === 'table' ? 'Explicar tabla' : role === 'algorithm' ? 'Explicar algoritmo' : 'Explicar figura',
+    'viewer.backToMenu': 'Volver al menú principal',
+    'viewer.trackingExit': 'Salir (Esc)',
+    'viewer.trackingActivate': 'Activar Modo de Seguimiento',
+    'viewer.trackingOn': '◉ Seguimiento ON',
+    'viewer.trackingOff': '◯ Activar Seguimiento',
+    'viewer.prevStop': 'Anterior (↑ / PgUp)',
+    'viewer.nextStop': 'Siguiente (↓ / Space / PgDn)',
+    'viewer.loadingPdf': 'Cargando PDF...',
+
+    'sidebar.tabGlobal': 'Mapa Global',
+    'sidebar.tabExplain': 'Explicación',
+    'sidebar.retrying': ({ attempt, max, secs }) =>
+      `Reintentando (${attempt}/${max}) en ${secs}s — error transitorio del modelo.`,
+    'sidebar.globalEmpty': 'Sube un paper para generar el mapa global.',
+    'sidebar.coreMethodology': 'Metodología Core',
+    'sidebar.assumedConcepts': 'Conceptos Asumidos',
+    'sidebar.acronyms': ({ n }) => `Acrónimos (${n})`,
+    'sidebar.paragraphClear': 'Este párrafo es claro y no contiene estructuras complejas.',
+    'sidebar.sentenceNoConcepts': 'Esta oración no contiene conceptos técnicos que requieran explicación adicional.',
+    'sidebar.prev': 'Anterior (←)',
+    'sidebar.next': 'Siguiente (→)',
+    'sidebar.sentenceCounter': ({ i, total }) =>
+      `${i} de ${total} ${total === 1 ? 'oración' : 'oraciones'}`,
+    'sidebar.noContext': 'No hay contexto disponible para este párrafo.',
+    'sidebar.roleInSection': 'Rol en la sección',
+    'sidebar.narrative': 'Narrativa',
+    'sidebar.explainEmpty': 'Pulsa ✦ en cualquier párrafo del PDF para explicarlo.',
+    'sidebar.modeContexto': 'Contexto',
+    'sidebar.modeConceptos': 'Conceptos',
+
+    // Fases de progreso SSE de extracción. Reciben el evento como vars.
+    'progress.started': (e) => `Iniciando extracción (${e.n_pages} páginas, ${e.pdf_mb} MB)`
+      + (e.disable_ocr ? ' — texto nativo detectado, OCR omitido' : ''),
+    'progress.queued': 'Esperando turno detrás de otra extracción en curso',
+    'progress.device_skipped': (e) => `Fallback: GPU descartada (${e.reason})`,
+    'progress.device_started': (e) => `Iniciando extracción en ${e.device} (batch tiers=${(e.batch_tiers || []).join(', ')})`,
+    'progress.batch_attempt': (e) => e.tier_index === 0
+      ? `Intentando batch=${e.batch} en ${e.device}`
+      : `Fallback: batch reducido a ${e.batch} en ${e.device}`,
+    'progress.batch_success': (e) => `Extracción exitosa en ${e.device} (batch=${e.batch})`,
+    'progress.batch_oom': (e) => `Fallback: OOM en batch=${e.batch}, reintentando con batch más pequeño`,
+    'progress.cuda_oom_abandon': 'Fallback: GPU descartada por falta de memoria',
+    'progress.child_error': (e) => `Error en hijo${e.error_type ? ': ' + e.error_type : ''}${e.error_msg ? ': ' + e.error_msg : ''}`,
+    'progress.chunk_tier_skipped': (e) => `Fallback: chunking omitido en ${e.device} (PDF de ${e.n_pages} páginas demasiado pequeño)`,
+    'progress.chunk_tier_started': (e) => `Fallback: modo chunk activado en ${e.device}`,
+    'progress.chunk_started': (e) => `Modo chunk activado (${e.chunk_size} páginas por chunk, ${e.total_chunks} chunks)`,
+    'progress.chunk_progress': (e) => `Procesando chunk ${(e.chunk_index ?? 0) + 1} de ${e.total_chunks}`,
+    'progress.chunked_success': (e) => `Extracción exitosa en ${e.device} (chunk_size=${e.chunk_size})`,
+    'progress.chunk_oom': (e) => `Fallback: chunk_size=${e.chunk_size} en ${e.device} falló por OOM, reduciendo`,
+    'progress.device_exhausted': (e) => `Fallback: ${e.device} agotado, intentando siguiente device`,
+    'progress.global_map_started': 'Generando mapa global con Gemini',
+    'progress.failed': (e) => `La extracción falló${e.device ? ` en ${e.device}` : ''}`,
+    'progress.done': 'Análisis completado',
+
+    // Mensajes de error (cola de subida + panel de explicación).
+    'errors.noJobId': 'El backend no devolvió job_id',
+    'errors.extractionFailed': 'La extracción falló',
+    'errors.sseLost': 'Conexión SSE perdida — el backend sigue procesando',
+    'errors.noBackendResponse': 'Sin respuesta del backend',
+    'errors.unknown': 'Error desconocido',
+    'errors.http': (e) => `HTTP ${e.status}`,
+    'errors.explain.timeout': 'La solicitud tardó demasiado y se canceló. Reintenta el botón “Explicar”.',
+    'errors.explain.noConnection': 'No se pudo conectar con el servidor. Verifica que el backend esté corriendo en :8000 e inténtalo de nuevo.',
+    'errors.explain.badRequest': (e) => `Solicitud inválida: ${e.detail || 'el párrafo no tiene oraciones para explicar.'}`,
+    'errors.explain.truncated': 'El modelo devolvió una respuesta incompleta (límite de tokens). Reintenta — suele resolverse al segundo intento.',
+    'errors.explain.invalidJson': 'El modelo devolvió un JSON malformado. Reintenta — es un error transitorio del LLM.',
+    'errors.explain.rateLimit': 'Límite de tasa de Gemini alcanzado. Espera unos segundos y reintenta.',
+    'errors.explain.empty': 'El modelo no devolvió contenido (posible filtro de seguridad). Reintenta o prueba otro párrafo.',
+    'errors.explain.geminiTransient': (e) => `Error de Gemini: ${e.detail || 'fallo transitorio'}. Reintenta el botón “Explicar”.`,
+    'errors.explain.server': (e) => `Error del servidor (${e.status}). Reintenta en unos segundos.`,
+    'errors.explain.unexpected': (e) => `Error inesperado (${e.status}): ${e.detail || 'sin detalles'}.`,
+  },
+
+  'zh-Hant': {
+    'common.open': '開啟',
+    'common.delete': '刪除',
+    'common.remove': '移除',
+    'common.error': '錯誤',
+    'common.backHome': '返回首頁',
+
+    'home.yourDocs': ({ n }) => `你的文件（${n}）`,
+    'home.analyzed': '已分析',
+    'home.openAria': ({ name }) => `開啟 ${name}`,
+    'home.status.pending': '排隊中',
+    'home.status.uploading': '上傳中',
+    'home.status.analyzing': '分析中',
+    'home.status.fallback': '備援模式',
+    'home.status.conflict': '待確認…',
+    'home.status.done': '完成',
+    'home.status.skipped': '已略過',
+    'home.status.error': '錯誤',
+    'home.analysisComplete': '分析完成',
+    'home.doneSummary': ({ done, error, skipped }) =>
+      `${done} 個完成`
+      + (error > 0 ? `，${error} 個失敗` : '')
+      + (skipped > 0 ? `，${skipped} 個略過` : ''),
+    'home.processing': ({ current, total }) => `處理中（${current} / ${total}）`,
+    'home.dontClose': '請勿關閉此視窗',
+    'home.readyClick': '完成 — 點擊開啟',
+    'home.backToLibrary': '返回書庫',
+
+    'uploader.title': '上傳你的論文',
+    'uploader.subtitle': '一個或多個 PDF。系統會分析並存入你的書庫，隨時可開啟。',
+    'uploader.dropHere': '將 PDF 拖曳至此',
+    'uploader.orClick': '或點擊選擇一個或多個',
+    'uploader.configAll': '設定（套用至全部）',
+    'uploader.explainLang': '解說語言',
+    'uploader.keepTerms': '技術術語與縮寫保留英文',
+    'uploader.analyze': ({ count }) =>
+      count === 0 ? '分析論文' : `分析 ${count} 篇論文`,
+    'uploader.uiLang': '介面語言',
+
+    'reader.loadingDoc': '載入文件中…',
+    'reader.analysisNotFound': '找不到此文件的分析。',
+
+    'viewer.zoomSmaller': '縮小文字（−）',
+    'viewer.fit100': '還原 100%',
+    'viewer.zoomLarger': '放大文字（+）',
+    'viewer.explainParagraph': '解說段落',
+    'viewer.explainBlock': ({ role }) =>
+      role === 'table' ? '解說表格' : role === 'algorithm' ? '解說演算法' : '解說圖表',
+    'viewer.backToMenu': '返回主選單',
+    'viewer.trackingExit': '退出（Esc）',
+    'viewer.trackingActivate': '啟用追蹤模式',
+    'viewer.trackingOn': '◉ 追蹤開啟',
+    'viewer.trackingOff': '◯ 啟用追蹤',
+    'viewer.prevStop': '上一個（↑ / PgUp）',
+    'viewer.nextStop': '下一個（↓ / Space / PgDn）',
+    'viewer.loadingPdf': '載入 PDF 中…',
+
+    'sidebar.tabGlobal': '全域地圖',
+    'sidebar.tabExplain': '解說',
+    'sidebar.retrying': ({ attempt, max, secs }) =>
+      `重試中（${attempt}/${max}），${secs} 秒後 — 模型暫時性錯誤。`,
+    'sidebar.globalEmpty': '上傳論文以產生全域地圖。',
+    'sidebar.coreMethodology': '核心方法',
+    'sidebar.assumedConcepts': '預設概念',
+    'sidebar.acronyms': ({ n }) => `縮寫（${n}）`,
+    'sidebar.paragraphClear': '此段落清楚明瞭，沒有複雜結構。',
+    'sidebar.sentenceNoConcepts': '此句子沒有需要額外解說的技術概念。',
+    'sidebar.prev': '上一個（←）',
+    'sidebar.next': '下一個（→）',
+    'sidebar.sentenceCounter': ({ i, total }) => `第 ${i} / ${total} 句`,
+    'sidebar.noContext': '此段落沒有可用的脈絡。',
+    'sidebar.roleInSection': '在章節中的角色',
+    'sidebar.narrative': '敘事',
+    'sidebar.explainEmpty': '點擊 PDF 中任一段落的 ✦ 進行解說。',
+    'sidebar.modeContexto': '脈絡',
+    'sidebar.modeConceptos': '概念',
+
+    // SSE 擷取進度階段。以事件物件作為變數傳入。
+    'progress.started': (e) => `開始擷取（${e.n_pages} 頁，${e.pdf_mb} MB）`
+      + (e.disable_ocr ? ' — 偵測到原生文字，略過 OCR' : ''),
+    'progress.queued': '排隊等待其他擷取完成',
+    'progress.device_skipped': (e) => `備援：略過 GPU（${e.reason}）`,
+    'progress.device_started': (e) => `在 ${e.device} 上開始擷取（batch tiers=${(e.batch_tiers || []).join(', ')}）`,
+    'progress.batch_attempt': (e) => e.tier_index === 0
+      ? `嘗試 batch=${e.batch}（${e.device}）`
+      : `備援：batch 降為 ${e.batch}（${e.device}）`,
+    'progress.batch_success': (e) => `在 ${e.device} 上擷取成功（batch=${e.batch}）`,
+    'progress.batch_oom': (e) => `備援：batch=${e.batch} 記憶體不足，改用更小的 batch 重試`,
+    'progress.cuda_oom_abandon': '備援：GPU 記憶體不足，已略過',
+    'progress.child_error': (e) => `子程序錯誤${e.error_type ? '：' + e.error_type : ''}${e.error_msg ? '：' + e.error_msg : ''}`,
+    'progress.chunk_tier_skipped': (e) => `備援：在 ${e.device} 略過分塊（PDF 僅 ${e.n_pages} 頁，過小）`,
+    'progress.chunk_tier_started': (e) => `備援：在 ${e.device} 啟用分塊模式`,
+    'progress.chunk_started': (e) => `啟用分塊模式（每塊 ${e.chunk_size} 頁，共 ${e.total_chunks} 塊）`,
+    'progress.chunk_progress': (e) => `處理第 ${(e.chunk_index ?? 0) + 1} / ${e.total_chunks} 塊`,
+    'progress.chunked_success': (e) => `在 ${e.device} 上擷取成功（chunk_size=${e.chunk_size}）`,
+    'progress.chunk_oom': (e) => `備援：${e.device} 上 chunk_size=${e.chunk_size} 記憶體不足，縮小中`,
+    'progress.device_exhausted': (e) => `備援：${e.device} 已用盡，改試下一個裝置`,
+    'progress.global_map_started': '使用 Gemini 產生全域地圖',
+    'progress.failed': (e) => `擷取失敗${e.device ? `（${e.device}）` : ''}`,
+    'progress.done': '分析完成',
+
+    // 錯誤訊息（上傳佇列 + 解說面板）。
+    'errors.noJobId': '後端未回傳 job_id',
+    'errors.extractionFailed': '擷取失敗',
+    'errors.sseLost': 'SSE 連線中斷 — 後端仍在處理',
+    'errors.noBackendResponse': '後端無回應',
+    'errors.unknown': '未知錯誤',
+    'errors.http': (e) => `HTTP ${e.status}`,
+    'errors.explain.timeout': '請求逾時已取消。請再次點擊「解說」按鈕。',
+    'errors.explain.noConnection': '無法連線到伺服器。請確認後端在 :8000 執行後再試一次。',
+    'errors.explain.badRequest': (e) => `無效的請求：${e.detail || '此段落沒有可解說的句子。'}`,
+    'errors.explain.truncated': '模型回傳的內容不完整（token 上限）。請重試 — 通常第二次即可成功。',
+    'errors.explain.invalidJson': '模型回傳的 JSON 格式錯誤。請重試 — 這是 LLM 的暫時性錯誤。',
+    'errors.explain.rateLimit': '已達 Gemini 速率上限。請稍候幾秒再重試。',
+    'errors.explain.empty': '模型沒有回傳內容（可能觸發安全過濾）。請重試或換一個段落。',
+    'errors.explain.geminiTransient': (e) => `Gemini 錯誤：${e.detail || '暫時性失敗'}。請再次點擊「解說」按鈕。`,
+    'errors.explain.server': (e) => `伺服器錯誤（${e.status}）。請稍候幾秒再重試。`,
+    'errors.explain.unexpected': (e) => `非預期的錯誤（${e.status}）：${e.detail || '無詳細資訊'}。`,
+  },
+}

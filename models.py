@@ -114,6 +114,11 @@ class UploadResponse(BaseModel):
     global_map: GlobalMapping
     pages: list[PageBlocks]
     linear_blocks: list[FullBlock] = []
+    # Explanation language chosen at upload. Persisted in analysis.json so the
+    # reader can echo it back on every explain request — explanations come back
+    # in this language regardless of the UI language. Older analysis files
+    # without this field fall back to "es" at read time.
+    language: str = "es"
 
 
 class DocumentInfo(BaseModel):
@@ -134,6 +139,10 @@ class ExplainRequest(BaseModel):
     page: int | None = None
     bbox: BBox | None = None
     caption_text: str = ""
+    # Explanation language for this request (es | en | zh-Hant). Drives the
+    # Gemini output language; independent of the UI language. Defaults to es
+    # for older clients that don't send it.
+    language: str = "es"
 
 
 class ConceptExplanation(BaseModel):

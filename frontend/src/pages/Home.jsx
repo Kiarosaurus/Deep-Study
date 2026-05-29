@@ -3,6 +3,8 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import axios from 'axios'
 import PdfUploader from '../components/PdfUploader'
 import OverwriteModal from '../components/OverwriteModal'
+import LanguageSwitcher from '../i18n/LanguageSwitcher'
+import { useUiLang } from '../i18n/LanguageContext'
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -10,6 +12,7 @@ function formatBytes(bytes) {
 }
 
 function DocumentCard({ doc, onOpen, onDelete }) {
+  const { t } = useUiLang()
   const [deleting, setDeleting] = useState(false)
 
   async function handleDelete(e) {
@@ -27,7 +30,7 @@ function DocumentCard({ doc, onOpen, onDelete }) {
         <span className="text-3xl">📄</span>
         {doc.has_analysis && (
           <span className="text-[10px] font-semibold px-2 py-0.5 bg-emerald-50 text-emerald-600 border border-emerald-200 rounded-full shrink-0">
-            Analizado
+            {t('home.analyzed')}
           </span>
         )}
       </div>
@@ -42,13 +45,13 @@ function DocumentCard({ doc, onOpen, onDelete }) {
           onClick={() => onOpen(doc.filename)}
           className="flex-1 text-xs font-semibold py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"
         >
-          Abrir
+          {t('common.open')}
         </button>
         <button
           onClick={handleDelete}
           disabled={deleting}
           className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-40 shrink-0"
-          title="Eliminar"
+          title={t('common.delete')}
         >
           {deleting ? (
             <span className="w-3.5 h-3.5 border-2 border-slate-200 border-t-slate-500 rounded-full animate-spin block" />
@@ -66,17 +69,17 @@ function DocumentCard({ doc, onOpen, onDelete }) {
   )
 }
 
-function statusBadge(status) {
+function statusBadge(status, t) {
   switch (status) {
-    case 'pending':   return { label: 'En cola',     cls: 'bg-slate-50 text-slate-500 border-slate-200' }
-    case 'uploading': return { label: 'Subiendo',    cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
-    case 'analyzing': return { label: 'Analizando',  cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
-    case 'fallback':  return { label: 'Fallback',    cls: 'bg-amber-50 text-amber-700 border-amber-200' }
-    case 'conflict':  return { label: 'Confirmar…',  cls: 'bg-amber-50 text-amber-600 border-amber-200' }
-    case 'done':      return { label: 'Hecho',       cls: 'bg-emerald-50 text-emerald-600 border-emerald-200' }
-    case 'skipped':   return { label: 'Omitido',     cls: 'bg-amber-50 text-amber-600 border-amber-200' }
-    case 'error':     return { label: 'Error',       cls: 'bg-red-50 text-red-600 border-red-200' }
-    default:          return { label: status,        cls: 'bg-slate-50 text-slate-500 border-slate-200' }
+    case 'pending':   return { label: t('home.status.pending'),   cls: 'bg-slate-50 text-slate-500 border-slate-200' }
+    case 'uploading': return { label: t('home.status.uploading'), cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
+    case 'analyzing': return { label: t('home.status.analyzing'), cls: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
+    case 'fallback':  return { label: t('home.status.fallback'),  cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+    case 'conflict':  return { label: t('home.status.conflict'),  cls: 'bg-amber-50 text-amber-600 border-amber-200' }
+    case 'done':      return { label: t('home.status.done'),      cls: 'bg-teal-50 text-teal-600 border-teal-200' }
+    case 'skipped':   return { label: t('home.status.skipped'),   cls: 'bg-amber-50 text-amber-600 border-amber-200' }
+    case 'error':     return { label: t('home.status.error'),     cls: 'bg-red-50 text-red-600 border-red-200' }
+    default:          return { label: status,                     cls: 'bg-slate-50 text-slate-500 border-slate-200' }
   }
 }
 
@@ -117,7 +120,18 @@ function uiUpdateForEvent(ev) {
   }
 }
 
+// Localize an SSE progress event by its `phase`, reading the event's structured
+// fields. Falls back to the backend-provided (Spanish) `message` for any phase
+// not in the catalog, and to '' when there is no event yet.
+function progressMessage(ev, t) {
+  if (!ev || !ev.phase) return ''
+  const key = `progress.${ev.phase}`
+  const out = t(key, ev)
+  return out === key ? (ev.message || '') : out
+}
+
 function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
+  const { t } = useUiLang()
   const doneCount = queue.filter(q => q.status === 'done').length
   const errorCount = queue.filter(q => q.status === 'error').length
   const skippedCount = queue.filter(q => q.status === 'skipped').length
@@ -128,26 +142,24 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
         <div className="text-center">
           {allDone ? (
             <>
-              <p className="font-bold text-slate-800 text-xl">Análisis completado</p>
+              <p className="font-bold text-slate-800 text-xl">{t('home.analysisComplete')}</p>
               <p className="text-sm text-slate-500 mt-1">
-                {doneCount} listo{doneCount === 1 ? '' : 's'}
-                {errorCount > 0 && `, ${errorCount} con error`}
-                {skippedCount > 0 && `, ${skippedCount} omitido${skippedCount === 1 ? '' : 's'}`}
+                {t('home.doneSummary', { done: doneCount, error: errorCount, skipped: skippedCount })}
               </p>
             </>
           ) : (
             <>
               <p className="font-bold text-slate-800 text-xl">
-                Procesando ({Math.min(currentIdx + 1, queue.length)} / {queue.length})
+                {t('home.processing', { current: Math.min(currentIdx + 1, queue.length), total: queue.length })}
               </p>
-              <p className="text-xs text-slate-400 mt-1">No cierres esta ventana</p>
+              <p className="text-xs text-slate-400 mt-1">{t('home.dontClose')}</p>
             </>
           )}
         </div>
 
         <ul className="flex flex-col gap-2 max-h-[60vh] overflow-y-auto pr-1">
           {queue.map((q, i) => {
-            const b = statusBadge(q.status)
+            const b = statusBadge(q.status, t)
             const isDone     = q.status === 'done'
             const canOpen    = isDone && !!q.filename && !!onOpen
             const openTarget = canOpen ? q.filename : null
@@ -163,16 +175,16 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
                     onOpen(openTarget)
                   }
                 } : undefined}
-                title={canOpen ? `Abrir ${q.filename}` : q.file.name}
+                title={canOpen ? t('home.openAria', { name: q.filename }) : q.file.name}
                 className={`rounded-xl px-3 py-2.5 flex items-center gap-3 transition-all duration-150 ${
                   isDone
-                    ? 'bg-emerald-50/60 border border-emerald-200 hover:bg-emerald-50 hover:border-emerald-300 hover:shadow-sm cursor-pointer ring-0 hover:ring-2 hover:ring-emerald-200 focus:outline-none focus:ring-2 focus:ring-emerald-300'
+                    ? 'bg-teal-50/60 border border-teal-200 hover:bg-teal-100 cursor-pointer focus:outline-none focus:ring-2 focus:ring-teal-300'
                     : 'bg-white border border-slate-200'
                 }`}
               >
                 <span className="text-base shrink-0">{isDone ? '✅' : '📄'}</span>
                 <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-medium truncate ${isDone ? 'text-emerald-900' : 'text-slate-800'}`} title={q.file.name}>
+                  <p className={`text-sm font-medium truncate ${isDone ? 'text-teal-900' : 'text-slate-800'}`} title={q.file.name}>
                     {q.file.name}
                   </p>
                   {(q.status === 'uploading' || q.status === 'analyzing' || q.status === 'fallback') && (
@@ -185,19 +197,22 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
                       />
                     </div>
                   )}
-                  {q.message && (q.status === 'analyzing' || q.status === 'fallback') && (
-                    <p
-                      className={`text-[11px] mt-0.5 truncate ${
-                        q.status === 'fallback' ? 'text-amber-700' : 'text-slate-500'
-                      }`}
-                      title={q.message}
-                    >
-                      {q.message}
-                    </p>
-                  )}
+                  {(() => {
+                    const msg = progressMessage(q.lastEvent, t) || q.message
+                    return msg && (q.status === 'analyzing' || q.status === 'fallback') && (
+                      <p
+                        className={`text-[11px] mt-0.5 truncate ${
+                          q.status === 'fallback' ? 'text-amber-700' : 'text-slate-500'
+                        }`}
+                        title={msg}
+                      >
+                        {msg}
+                      </p>
+                    )
+                  })()}
                   {isDone && (
-                    <p className="text-[11px] text-emerald-700 mt-0.5">
-                      Listo — click para abrir
+                    <p className="text-[11px] text-teal-700 mt-0.5">
+                      {t('home.readyClick')}
                     </p>
                   )}
                   {q.status === 'error' && q.error && (
@@ -210,9 +225,9 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onOpen(openTarget) }}
-                    className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shrink-0 flex items-center gap-1"
+                    className="text-[11px] font-semibold px-2.5 py-1 rounded-full bg-teal-600 text-white hover:bg-teal-700 transition-colors shrink-0 flex items-center gap-1"
                   >
-                    Abrir
+                    {t('common.open')}
                     <span aria-hidden="true">→</span>
                   </button>
                 ) : (
@@ -230,7 +245,7 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
             onClick={onClose}
             className="self-center px-8 py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-colors min-w-44"
           >
-            Volver a la biblioteca
+            {t('home.backToLibrary')}
           </button>
         )}
       </div>
@@ -239,6 +254,7 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
 }
 
 export default function Home() {
+  const { t } = useUiLang()
   const navigate = useNavigate()
   const location = useLocation()
   const [documents, setDocuments] = useState([])
@@ -283,9 +299,9 @@ export default function Home() {
       return detail.map(d => `${d.loc?.join('.') ?? ''}: ${d.msg}`).join(' | ')
     }
     if (typeof detail === 'string') return detail
-    if (err?.response) return `HTTP ${err.response.status}`
-    if (err?.request) return 'Sin respuesta del backend'
-    return err?.message || 'Error desconocido'
+    if (err?.response) return t('errors.http', { status: err.response.status })
+    if (err?.request) return t('errors.noBackendResponse')
+    return err?.message || t('errors.unknown')
   }
 
   async function processQueue(files, opts) {
@@ -333,7 +349,7 @@ export default function Home() {
           })
 
           const jobId = postRes?.data?.job_id
-          if (!jobId) throw new Error('Backend no devolvió job_id')
+          if (!jobId) throw new Error(t('errors.noJobId'))
 
           // Phase 2: subscribe to SSE progress. Failures here (network,
           // proxy timeout) do not cancel the backend job — extraction keeps
@@ -358,6 +374,9 @@ export default function Home() {
                       status: upd.status ?? it.status,
                       progress: upd.progress ?? it.progress,
                       message: upd.message ?? it.message,
+                      // Raw event kept so the queue view can localize the
+                      // message by phase in the current UI language.
+                      lastEvent: ev,
                     }
                   : it,
               ))
@@ -372,7 +391,7 @@ export default function Home() {
                   resolve(ev)
                 } else if (ev.phase === 'failed') {
                   close()
-                  reject(new Error(ev.message || 'Extracción falló'))
+                  reject(new Error(progressMessage(ev, t) || t('errors.extractionFailed')))
                 }
               } catch {
                 // ignore malformed events
@@ -382,7 +401,7 @@ export default function Home() {
             es.onerror = () => {
               if (reconnected) {
                 close()
-                reject(new Error('Conexión SSE perdida — el backend sigue procesando'))
+                reject(new Error(t('errors.sseLost')))
                 return
               }
               reconnected = true
@@ -398,13 +417,13 @@ export default function Home() {
                       resolve(ev.result)
                     } else if (ev.phase === 'failed') {
                       close()
-                      reject(new Error(ev.message || 'Extracción falló'))
+                      reject(new Error(progressMessage(ev, t) || t('errors.extractionFailed')))
                     }
                   } catch { /* ignore */ }
                 }
                 es.onerror = () => {
                   close()
-                  reject(new Error('Conexión SSE perdida — el backend sigue procesando'))
+                  reject(new Error(t('errors.sseLost')))
                 }
               }, 1500)
             }
@@ -445,7 +464,7 @@ export default function Home() {
             ))
             break
           }
-          const msg = err?.message || describeUploadError(err)
+          const msg = describeUploadError(err)
           setQueue(prev => prev.map((it, j) =>
             j === i ? { ...it, status: 'error', error: msg } : it,
           ))
@@ -498,6 +517,9 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-2.5">
           <span className="text-xl">🔬</span>
           <span className="text-lg font-bold text-slate-800 tracking-tight">DeepStudy</span>
+          <div className="ml-auto">
+            <LanguageSwitcher />
+          </div>
         </div>
       </header>
 
@@ -520,7 +542,7 @@ export default function Home() {
         {!loadingDocs && documents.length > 0 && (
           <section>
             <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-4">
-              Tus documentos ({documents.length})
+              {t('home.yourDocs', { n: documents.length })}
             </h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {documents.map(doc => (

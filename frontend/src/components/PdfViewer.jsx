@@ -4,6 +4,7 @@ import PaginatedCanvas from './PaginatedCanvas'
 import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
 import { usePageCache } from './use-page-cache'
+import { useUiLang } from '../i18n/LanguageContext'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 3.0
@@ -75,23 +76,25 @@ function buildLinearReadingSequence(linearBlocks) {
 }
 
 function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, canDecrease }) {
+  const { t } = useUiLang()
   const btn = "w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors text-base font-semibold"
   return (
     <div className="absolute top-4 right-4 z-30 flex items-center gap-0.5 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1 select-none">
-      <button onClick={onDecrease} disabled={!canDecrease} title="Texto más pequeño (−)" className={btn}>−</button>
+      <button onClick={onDecrease} disabled={!canDecrease} title={t('viewer.zoomSmaller')} className={btn}>−</button>
       <button
         onClick={onFit}
-        title="Ajustar a 100%"
+        title={t('viewer.fit100')}
         className="px-2.5 h-8 flex items-center justify-center rounded-lg text-[11px] font-bold tabular-nums text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors min-w-[3.25rem]"
       >
         {Math.round(displayZoom * 100)}%
       </button>
-      <button onClick={onIncrease} disabled={!canIncrease} title="Texto más grande (+)" className={btn}>+</button>
+      <button onClick={onIncrease} disabled={!canIncrease} title={t('viewer.zoomLarger')} className={btn}>+</button>
     </div>
   )
 }
 
 function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange }) {
+  const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
   if ((!blocks && !images?.length) || !scale) return null
@@ -270,7 +273,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef)}
               onMouseEnter={() => onHoveredChainChange?.(chainKey)}
               onMouseLeave={() => onHoveredChainChange?.(null)}
-              title="Explicar párrafo"
+              title={t('viewer.explainParagraph')}
             >
               ✦
             </button>
@@ -348,7 +351,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               )}
               onMouseEnter={() => setHoveredImgIdx(i)}
               onMouseLeave={() => setHoveredImgIdx(null)}
-              title={`Explicar ${img.role === 'table' ? 'tabla' : img.role === 'algorithm' ? 'algoritmo' : 'figura'}`}
+              title={t('viewer.explainBlock', { role: img.role })}
             >
               ✦
             </button>
@@ -429,6 +432,7 @@ function PdfPage({
 }
 
 const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }, ref) {
+  const { t } = useUiLang()
   const [hoveredChain, setHoveredChain]       = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
@@ -1074,8 +1078,8 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
           <button
             onClick={onHome}
             className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-            title="Volver al menú principal"
-            aria-label="Volver al menú principal"
+            title={t('viewer.backToMenu')}
+            aria-label={t('viewer.backToMenu')}
           >
             <svg
               className="w-4 h-4"
@@ -1099,9 +1103,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
               ? 'bg-indigo-600 text-white hover:bg-indigo-700'
               : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
           }`}
-          title={tracking ? 'Salir (Esc)' : 'Activar Modo de Seguimiento'}
+          title={tracking ? t('viewer.trackingExit') : t('viewer.trackingActivate')}
         >
-          {tracking ? '◉ Seguimiento ON' : '◯ Activar Seguimiento'}
+          {tracking ? t('viewer.trackingOn') : t('viewer.trackingOff')}
         </button>
         {tracking && (
           <>
@@ -1109,7 +1113,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
               onClick={() => setCurrentStop(s => Math.max(0, s - 1))}
               disabled={currentStop <= 0}
               className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
-              title="Anterior (↑ / PgUp)"
+              title={t('viewer.prevStop')}
             >↑</button>
             <span className="text-[11px] font-bold tabular-nums text-slate-600 min-w-[3.5rem] text-center">
               {currentStop + 1}/{readingSequence.length}
@@ -1118,7 +1122,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
               onClick={() => setCurrentStop(s => Math.min(readingSequence.length - 1, s + 1))}
               disabled={currentStop >= readingSequence.length - 1}
               className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
-              title="Siguiente (↓ / Space / PgDn)"
+              title={t('viewer.nextStop')}
             >↓</button>
           </>
         )}
@@ -1152,7 +1156,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
           style={{ minWidth: 'fit-content' }}
         >
           {!sharedPdfDoc && (
-            <p className="text-slate-400 text-sm mt-16">Cargando PDF...</p>
+            <p className="text-slate-400 text-sm mt-16">{t('viewer.loadingPdf')}</p>
           )}
           {numPages && pageWidth &&
             Array.from({ length: numPages }, (_, i) => (

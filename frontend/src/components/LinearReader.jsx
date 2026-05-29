@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
+import { useUiLang } from '../i18n/LanguageContext'
 
 const BBOX_INFLATE_PT       = 2
 const EQUATION_Y_INFLATE_PT = 4
@@ -234,6 +235,7 @@ const BlockCrop = memo(function BlockCrop({
   currentExplanation,
   explanation,
 }) {
+  const { t } = useUiLang()
   const wrapperRef = useRef(null)
   const canvasRef  = useRef(null)
 
@@ -599,7 +601,7 @@ const BlockCrop = memo(function BlockCrop({
                   )
                 }
               }}
-              title={isFigure ? `Explicar ${block.role === 'table' ? 'tabla' : block.role === 'algorithm' ? 'algoritmo' : 'figura'}` : 'Explicar párrafo'}
+              title={isFigure ? t('viewer.explainBlock', { role: block.role }) : t('viewer.explainParagraph')}
             >
               ✦
             </button>

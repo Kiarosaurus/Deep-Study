@@ -4,6 +4,7 @@ import axios from 'axios'
 import PdfViewer from '../components/PdfViewer'
 import Sidebar from '../components/Sidebar'
 import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
+import { useUiLang } from '../i18n/LanguageContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -35,17 +36,20 @@ function djb2(s) {
 
 // Cache key version. Bump when stored explanation shape changes so stale
 // entries from old shapes get orphaned instead of mis-deserialized.
-const EXPLAIN_CACHE_VERSION = 'v2'
+const EXPLAIN_CACHE_VERSION = 'v3'
 
 function explainCacheKey(filename, text, opts = {}) {
+  // Language is part of the key: the same paragraph explained in es / en /
+  // zh-Hant produces different text, so each language caches independently.
+  const lang = opts.language || 'es'
   // Figures/tables have no representative text — key on role+page+bbox so a
   // recropped or relocated figure invalidates correctly.
   if (opts.role === 'figure' || opts.role === 'table' || opts.role === 'algorithm') {
     const b = opts.bbox || {}
     const tag = `${opts.role}:${opts.page}:${b.x0},${b.y0},${b.x1},${b.y1}`
-    return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${filename}:${djb2(tag)}`
+    return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${lang}:${filename}:${djb2(tag)}`
   }
-  return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${filename}:${djb2(text)}`
+  return `deepstudy:explain:${EXPLAIN_CACHE_VERSION}:${lang}:${filename}:${djb2(text)}`
 }
 
 function readCachedExplanation(filename, text, memCache, opts = {}) {
@@ -72,42 +76,43 @@ function writeCachedExplanation(filename, text, data, memCache, opts = {}) {
   }
 }
 
-function buildExplainError(err) {
+function buildExplainError(err, t) {
   if (err?.code === 'ECONNABORTED') {
-    return 'La solicitud tardó demasiado y se canceló. Reintenta el botón "Explicar".'
+    return t('errors.explain.timeout')
   }
   if (!err?.response) {
-    return 'No se pudo conectar con el servidor. Verifica que el backend esté corriendo en :8000 e inténtalo de nuevo.'
+    return t('errors.explain.noConnection')
   }
   const status = err.response.status
   const detail = err.response.data?.detail ?? ''
 
   if (status === 400) {
-    return `Solicitud inválida: ${detail || 'el párrafo no tiene oraciones para explicar.'}`
+    return t('errors.explain.badRequest', { detail })
   }
   if (status === 502) {
     const lower = detail.toLowerCase()
     if (lower.includes('truncated') || lower.includes('max_tokens')) {
-      return 'El modelo devolvió una respuesta incompleta (límite de tokens). Reintenta — suele resolverse al segundo intento.'
+      return t('errors.explain.truncated')
     }
     if (lower.includes('invalid json')) {
-      return 'El modelo devolvió un JSON malformado. Reintenta — es un error transitorio del LLM.'
+      return t('errors.explain.invalidJson')
     }
     if (lower.includes('429') || lower.includes('rate') || lower.includes('quota')) {
-      return 'Límite de tasa de Gemini alcanzado. Espera unos segundos y reintenta.'
+      return t('errors.explain.rateLimit')
     }
     if (lower.includes('empty response')) {
-      return 'El modelo no devolvió contenido (posible filtro de seguridad). Reintenta o prueba otro párrafo.'
+      return t('errors.explain.empty')
     }
-    return `Error de Gemini: ${detail || 'fallo transitorio'}. Reintenta el botón "Explicar".`
+    return t('errors.explain.geminiTransient', { detail })
   }
   if (status >= 500) {
-    return `Error del servidor (${status}). Reintenta en unos segundos.`
+    return t('errors.explain.server', { status })
   }
-  return `Error inesperado (${status}): ${detail || 'sin detalles'}.`
+  return t('errors.explain.unexpected', { status, detail })
 }
 
 export default function Reader() {
+  const { t } = useUiLang()
   const { filename } = useParams()
   const navigate = useNavigate()
   const decoded = decodeURIComponent(filename)
@@ -152,7 +157,7 @@ export default function Reader() {
   useEffect(() => {
     axios.get(`/api/documents/${encodeURIComponent(decoded)}/analysis`)
       .then(res => setAnalysis(res.data))
-      .catch(() => setErrorAnalysis('No se encontró el análisis del documento.'))
+      .catch(() => setErrorAnalysis(true))
       .finally(() => setLoadingAnalysis(false))
   }, [decoded])
 
@@ -309,6 +314,10 @@ export default function Reader() {
     if (!analysis) return
     const { initialIndex = 0, role, page, bbox, caption_text } = opts
     const isFigure = role === 'figure' || role === 'table' || role === 'algorithm'
+    // Explanation language chosen at upload (persisted in the analysis). Drives
+    // the Gemini output language; independent of the UI language. Older
+    // analyses without the field fall back to Spanish.
+    const explainLang = analysis.language || 'es'
 
     // Stamp this call so an earlier in-flight fetch can't overwrite a later
     // user action (e.g. retry-throttled A resolving after the user clicked B).
@@ -334,7 +343,7 @@ export default function Reader() {
       paragraphText: (text ?? '').slice(0, 200),
     })
 
-    const cacheOpts = { role, page, bbox }
+    const cacheOpts = { role, page, bbox, language: explainLang }
     const cached = readCachedExplanation(decoded, text, explanationsCache.current, cacheOpts)
     if (cached) {
       logSentence('handleExplain.cacheHit', {
@@ -383,10 +392,12 @@ export default function Reader() {
             page,
             bbox,
             caption_text: caption_text || '',
+            language: explainLang,
           }
         : {
             paragraph_sentences: (sentences ?? []).map(s => s.text),
             global_map: analysis.global_map,
+            language: explainLang,
           }
       const data = await postExplainWithRetry(
         payload,
@@ -447,7 +458,7 @@ export default function Reader() {
 
     } catch (err) {
       if (isCurrent()) {
-        setErrorExplain(buildExplainError(err))
+        setErrorExplain(buildExplainError(err, t))
         setExplanation(null)
       }
     } finally {
@@ -456,7 +467,7 @@ export default function Reader() {
         setRetryInfo(null)
       }
     }
-  }, [analysis, decoded])
+  }, [analysis, decoded, t])
 
   const handleHome = useCallback(() => navigate('/'), [navigate])
 
@@ -665,7 +676,7 @@ export default function Reader() {
       <div className="h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
-          <p className="text-sm text-slate-500">Cargando documento...</p>
+          <p className="text-sm text-slate-500">{t('reader.loadingDoc')}</p>
         </div>
       </div>
     )
@@ -675,12 +686,12 @@ export default function Reader() {
     return (
       <div className="h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-slate-500 mb-4">{errorAnalysis}</p>
+          <p className="text-slate-500 mb-4">{t('reader.analysisNotFound')}</p>
           <button
             onClick={() => navigate('/')}
             className="px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-colors"
           >
-            Volver al inicio
+            {t('common.backHome')}
           </button>
         </div>
       </div>

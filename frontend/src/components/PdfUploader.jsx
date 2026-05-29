@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { useUiLang } from '../i18n/LanguageContext'
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -6,6 +7,7 @@ function formatBytes(bytes) {
 }
 
 export default function PdfUploader({ onUpload, error }) {
+  const { t } = useUiLang()
   const [files, setFiles] = useState([])
   const [dragging, setDragging] = useState(false)
   const [language, setLanguage] = useState('es')
@@ -45,18 +47,14 @@ export default function PdfUploader({ onUpload, error }) {
   }
 
   const count = files.length
-  const buttonLabel = count === 0
-    ? 'Analizar papers'
-    : count === 1
-      ? 'Analizar 1 paper'
-      : `Analizar ${count} papers`
+  const buttonLabel = t('uploader.analyze', { count })
 
   return (
     <div className="flex flex-col items-center gap-6 w-full">
       <div className="text-center">
-        <h2 className="text-3xl font-bold text-slate-800">Sube tus papers</h2>
+        <h2 className="text-3xl font-bold text-slate-800">{t('uploader.title')}</h2>
         <p className="mt-2 text-slate-500 text-sm">
-          Uno o varios PDFs. Se analizan y quedan en tu biblioteca, listos para abrir.
+          {t('uploader.subtitle')}
         </p>
       </div>
 
@@ -80,8 +78,8 @@ export default function PdfUploader({ onUpload, error }) {
           onChange={(e) => addFiles(e.target.files)}
         />
         <div className="text-5xl mb-3">📄</div>
-        <p className="font-medium text-slate-700">Arrastra PDFs aquí</p>
-        <p className="text-xs text-slate-400 mt-1">o haz clic para seleccionar uno o varios</p>
+        <p className="font-medium text-slate-700">{t('uploader.dropHere')}</p>
+        <p className="text-xs text-slate-400 mt-1">{t('uploader.orClick')}</p>
       </div>
 
       {count > 0 && (
@@ -99,8 +97,8 @@ export default function PdfUploader({ onUpload, error }) {
               <button
                 onClick={() => removeFile(f.name)}
                 className="w-7 h-7 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0 text-lg leading-none"
-                title="Quitar"
-                aria-label={`Quitar ${f.name}`}
+                title={t('common.remove')}
+                aria-label={`${t('common.remove')} ${f.name}`}
               >
                 ×
               </button>
@@ -111,12 +109,12 @@ export default function PdfUploader({ onUpload, error }) {
 
       <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl px-5 py-4 flex flex-col gap-4">
         <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
-          Configuración (aplica a todos)
+          {t('uploader.configAll')}
         </span>
 
         <div className="flex items-center justify-between">
           <label htmlFor="language" className="text-sm text-slate-700">
-            Idioma de explicación
+            {t('uploader.explainLang')}
           </label>
           <select
             id="language"
@@ -126,6 +124,7 @@ export default function PdfUploader({ onUpload, error }) {
           >
             <option value="es">Español</option>
             <option value="en">English</option>
+            <option value="zh-Hant">繁體中文</option>
           </select>
         </div>
 
@@ -137,14 +136,14 @@ export default function PdfUploader({ onUpload, error }) {
             className="mt-0.5 w-4 h-4 accent-indigo-600 cursor-pointer"
           />
           <span className="text-sm text-slate-700 leading-snug group-hover:text-slate-900 transition-colors">
-            Mantener términos técnicos y acrónimos en Inglés
+            {t('uploader.keepTerms')}
           </span>
         </label>
       </div>
 
       {error && (
         <div className="w-full max-w-md bg-red-50 border border-red-200 rounded-xl px-4 py-3">
-          <p className="text-sm font-semibold text-red-600 mb-0.5">Error</p>
+          <p className="text-sm font-semibold text-red-600 mb-0.5">{t('common.error')}</p>
           <p className="text-xs text-red-500">{error}</p>
         </div>
       )}

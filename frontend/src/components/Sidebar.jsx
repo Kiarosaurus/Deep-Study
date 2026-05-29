@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useUiLang } from '../i18n/LanguageContext'
 
 function SkeletonGlobal() {
   return (
@@ -24,11 +24,12 @@ function SkeletonGlobal() {
 }
 
 function SkeletonExplain({ retryInfo }) {
+  const { t } = useUiLang()
   return (
     <div className="flex flex-col gap-6">
       {retryInfo && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-          Reintentando ({retryInfo.attempt}/{retryInfo.maxAttempts - 1}) en {Math.round(retryInfo.delayMs / 1000)}s — error transitorio del modelo.
+          {t('sidebar.retrying', { attempt: retryInfo.attempt, max: retryInfo.maxAttempts - 1, secs: Math.round(retryInfo.delayMs / 1000) })}
         </div>
       )}
       <div className="flex flex-col gap-6 animate-pulse">
@@ -49,10 +50,11 @@ function SkeletonExplain({ retryInfo }) {
 }
 
 function GlobalMapView({ globalMap }) {
+  const { t } = useUiLang()
   if (!globalMap) {
     return (
       <p className="text-xs text-slate-400 text-center mt-10 leading-relaxed">
-        Sube un paper para generar<br />el mapa global.
+        {t('sidebar.globalEmpty')}
       </p>
     )
   }
@@ -61,7 +63,7 @@ function GlobalMapView({ globalMap }) {
     <div className="flex flex-col gap-5">
       <section>
         <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
-          Metodología Core
+          {t('sidebar.coreMethodology')}
         </h3>
         <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
           <p className="text-xs text-slate-700 leading-relaxed">{globalMap.core_methodology}</p>
@@ -70,7 +72,7 @@ function GlobalMapView({ globalMap }) {
 
       <section>
         <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
-          Conceptos Asumidos
+          {t('sidebar.assumedConcepts')}
         </h3>
         <div className="flex flex-wrap gap-1.5">
           {globalMap.assumed_concepts.map((c, i) => (
@@ -86,7 +88,7 @@ function GlobalMapView({ globalMap }) {
 
       <section>
         <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
-          Acrónimos ({globalMap.acronyms.length})
+          {t('sidebar.acronyms', { n: globalMap.acronyms.length })}
         </h3>
         <div className="flex flex-col gap-1.5">
           {globalMap.acronyms.map((a, i) => (
@@ -107,13 +109,14 @@ function GlobalMapView({ globalMap }) {
 }
 
 function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) {
+  const { t } = useUiLang()
   const total = items.length
 
   if (total === 0) {
     return (
       <div className="mt-6 px-4 py-5 rounded-2xl border border-slate-100 bg-slate-50 text-center">
         <p className="text-xs text-slate-400 leading-relaxed italic">
-          Este párrafo es claro y no contiene estructuras complejas.
+          {t('sidebar.paragraphClear')}
         </p>
       </div>
     )
@@ -152,7 +155,7 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) 
             </div>
           ) : (
             <p className="text-[12px] text-slate-400 italic leading-relaxed">
-              Esta oración no contiene conceptos técnicos que requieran explicación adicional.
+              {t('sidebar.sentenceNoConcepts')}
             </p>
           )
         ) : (
@@ -175,20 +178,20 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) 
         <button
           onClick={() => onIndexChange(i => i - 1)}
           disabled={!canPrev}
-          title="Anterior (←)"
+          title={t('sidebar.prev')}
           className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
         >
           ←
         </button>
 
         <span className="flex-1 text-center text-[11px] text-slate-400 font-medium tabular-nums select-none">
-          {currentIndex + 1} de {total} {total === 1 ? 'oración' : 'oraciones'}
+          {t('sidebar.sentenceCounter', { i: currentIndex + 1, total })}
         </span>
 
         <button
           onClick={() => onIndexChange(i => i + 1)}
           disabled={!canNext}
-          title="Siguiente (→)"
+          title={t('sidebar.next')}
           className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
         >
           →
@@ -199,6 +202,7 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) 
 }
 
 function ContextoPanel({ context, loadingExplain }) {
+  const { t } = useUiLang()
   if (!context) {
     if (loadingExplain) {
       return (
@@ -218,7 +222,7 @@ function ContextoPanel({ context, loadingExplain }) {
     return (
       <div className="mt-6 px-4 py-5 rounded-2xl border border-slate-100 bg-slate-50 text-center">
         <p className="text-xs text-slate-400 leading-relaxed italic">
-          No hay contexto disponible para este párrafo.
+          {t('sidebar.noContext')}
         </p>
       </div>
     )
@@ -231,7 +235,7 @@ function ContextoPanel({ context, loadingExplain }) {
     >
       <section className="flex flex-col gap-1.5">
         <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
-          Rol en la sección
+          {t('sidebar.roleInSection')}
         </p>
         <p className="text-sm text-slate-700 leading-snug">
           {context.section_role}
@@ -240,7 +244,7 @@ function ContextoPanel({ context, loadingExplain }) {
 
       <section className="flex flex-col gap-1.5">
         <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
-          Narrativa
+          {t('sidebar.narrative')}
         </p>
         <p className="text-[13px] text-slate-600 leading-relaxed">
           {context.narrative}
@@ -251,6 +255,7 @@ function ContextoPanel({ context, loadingExplain }) {
 }
 
 function ExplainView({ explanation, error, currentIndex, onIndexChange, explainMode, onExplainModeChange, loadingExplain, retryInfo }) {
+  const { t } = useUiLang()
   if (error) {
     return (
       <p className="text-xs text-red-500 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
@@ -262,7 +267,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
   if (!explanation) {
     return (
       <p className="text-xs text-slate-400 text-center mt-10 leading-relaxed">
-        Pulsa ✦ en cualquier párrafo<br />del PDF para explicarlo.
+        {t('sidebar.explainEmpty')}
       </p>
     )
   }
@@ -274,13 +279,13 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
     <div className="flex flex-col gap-4">
       {loadingExplain && retryInfo && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-          Reintentando ({retryInfo.attempt}/{retryInfo.maxAttempts - 1}) en {Math.round(retryInfo.delayMs / 1000)}s — error transitorio del modelo.
+          {t('sidebar.retrying', { attempt: retryInfo.attempt, max: retryInfo.maxAttempts - 1, secs: Math.round(retryInfo.delayMs / 1000) })}
         </div>
       )}
       <div className="flex p-0.5 bg-slate-100 rounded-lg">
         {[
-          { id: 'contexto',  label: 'Contexto'  },
-          { id: 'conceptos', label: 'Conceptos' },
+          { id: 'contexto',  label: t('sidebar.modeContexto')  },
+          { id: 'conceptos', label: t('sidebar.modeConceptos') },
         ].map(m => (
           <button
             key={m.id}
@@ -313,25 +318,26 @@ export default function Sidebar({
   tab, onTabChange,
   explainMode, onExplainModeChange
 }) {
+  const { t } = useUiLang()
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex border-b border-slate-200 shrink-0">
         {[
-          { id: 'global', label: 'Mapa Global' },
-          { id: 'explain', label: 'Explicación' },
-        ].map((t) => (
+          { id: 'global', label: t('sidebar.tabGlobal') },
+          { id: 'explain', label: t('sidebar.tabExplain') },
+        ].map((tab_) => (
           <button
-            key={t.id}
-            onClick={() => onTabChange(t.id)}
+            key={tab_.id}
+            onClick={() => onTabChange(tab_.id)}
             className={`flex-1 text-[11px] font-semibold py-3 transition-colors relative ${
-              tab === t.id
+              tab === tab_.id
                 ? 'text-indigo-600 border-b-2 border-indigo-600'
                 : 'text-slate-400 hover:text-slate-600'
             }`}
           >
-            {t.label}
-            {t.id === 'explain' && (loadingExplain || explanation) && (
+            {tab_.label}
+            {tab_.id === 'explain' && (loadingExplain || explanation) && (
               <span
                 className={`ml-1.5 inline-block w-1.5 h-1.5 rounded-full align-middle ${
                   loadingExplain ? 'bg-amber-400 animate-pulse' : 'bg-indigo-400'

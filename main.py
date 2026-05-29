@@ -105,7 +105,7 @@ ESTRUCTURA POR OBJETO (3 campos):
 
 3. "concepts": LISTA, una por concepto técnico. Cada elemento:
    - "term": Concepto, acrónimo, jerga o frase clave. NO incluyas dos puntos finales.
-   - "explanation": Análisis profundo, VERBOSO y altamente CONTEXTUAL en español. NO te limites a dar una definición de diccionario ni a repetir/traducir lo que ya dice la oración original. Aporta información adicional de valor, trasfondo teórico o las implicaciones prácticas que ayuden al usuario a entender POR QUÉ este concepto importa en esta línea. Extiéndete lo necesario para dejar el panorama absolutamente claro y rico en detalles (usa de 3 a 6 oraciones largas y descriptivas).
+   - "explanation": Análisis profundo, VERBOSO y altamente CONTEXTUAL en el idioma de salida. NO te limites a dar una definición de diccionario ni a repetir/traducir lo que ya dice la oración original. Aporta información adicional de valor, trasfondo teórico o las implicaciones prácticas que ayuden al usuario a entender POR QUÉ este concepto importa en esta línea. Extiéndete lo necesario para dejar el panorama absolutamente claro y rico en detalles (usa de 3 a 6 oraciones largas y descriptivas).
 REGLAS PARTE A:
 - Múltiples conceptos en una sola oración → varios elementos en "concepts", UN solo objeto.
 - Oraciones triviales → no aparecen.
@@ -124,7 +124,7 @@ ESTRUCTURA (2 campos):
 
 1. "section_role": UNA línea (máximo 12 palabras) etiquetando qué hace este párrafo. Ejemplos: "Motiva el problema desde una limitación previa", "Describe la configuración experimental", "Reporta resultado clave del método propuesto", "Contrasta con trabajo relacionado".
 
-2. "narrative": 2 a 4 oraciones en español que respondan: ¿Sobre qué construye este párrafo (qué viene antes)? ¿Hacia dónde lleva (qué viene después)? ¿Qué intención tiene el autor aquí — argumentar, justificar, contrastar, definir, evaluar? NO repitas el contenido literal del párrafo: explica su FUNCIÓN.
+2. "narrative": 2 a 4 oraciones en el idioma de salida que respondan: ¿Sobre qué construye este párrafo (qué viene antes)? ¿Hacia dónde lleva (qué viene después)? ¿Qué intención tiene el autor aquí — argumentar, justificar, contrastar, definir, evaluar? NO repitas el contenido literal del párrafo: explica su FUNCIÓN.
 
 REGLAS PARTE B:
 - Siempre devuelve "paragraph_context" aunque el párrafo sea simple. Nunca lo omitas.
@@ -137,8 +137,22 @@ _GLOBAL_MODEL = "gemini-3.1-flash-lite"
 _EXPLAIN_MODEL = "gemini-3.1-flash-lite"
 
 
+# Explanation output languages. Maps the wire code (sent by the frontend's
+# "Idioma de explicación" select) to the name injected into the Gemini prompt.
+# Independent from the UI language. Unknown codes fall back to English.
+_LANG_NAMES = {
+    "es": "Spanish",
+    "en": "English",
+    "zh-Hant": "Traditional Chinese (繁體中文)",
+}
+
+
+def _lang_name(language: str) -> str:
+    return _LANG_NAMES.get(language, "English")
+
+
 def _build_global_config(language: str, keep_terms_in_english: bool) -> types.GenerateContentConfig:
-    lang_name = "Spanish" if language == "es" else "English"
+    lang_name = _lang_name(language)
     extra = f"\n\nLANGUAGE RULE: Generate ALL text values in {lang_name}."
     if keep_terms_in_english:
         extra += (
@@ -156,12 +170,28 @@ def _build_global_config(language: str, keep_terms_in_english: bool) -> types.Ge
     )
 
 
-_EXPLAIN_CONFIG = types.GenerateContentConfig(
-    system_instruction=EXPLAIN_PROMPT,
-    response_mime_type="application/json",
-    response_schema=ExplainResponse,
-    max_output_tokens=10240,
-)
+def _explain_lang_rule(language: str) -> str:
+    """Dominant final language directive appended to every explain prompt. The
+    base prompts describe the task in Spanish for historical reasons; this rule
+    overrides the output language without touching that wording, and protects
+    the verbatim `quote` fragments from being translated."""
+    lang_name = _lang_name(language)
+    return (
+        f"\n\nLANGUAGE RULE (overrides any language named above): Write every "
+        f"natural-language value — 'term', 'explanation', 'section_role' and "
+        f"'narrative' — in {lang_name}. Do NOT translate the verbatim 'quote' "
+        f"fields: copy them exactly from the source text. Leave math symbols, "
+        f"code and acronyms in their original form."
+    )
+
+
+def _build_explain_config(base_prompt: str, language: str) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=base_prompt + _explain_lang_rule(language),
+        response_mime_type="application/json",
+        response_schema=ExplainResponse,
+        max_output_tokens=10240,
+    )
 
 
 FIGURE_EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás una IMAGEN (figura o tabla extraída de un paper científico), opcionalmente su pie de figura/tabla, y el Mapa Global del documento.
@@ -182,7 +212,7 @@ Por cada uno, devuelve UN objeto con:
 
 3. "concepts": Lista con UN solo elemento:
    - "term": Nombre del elemento visual o concepto (p. ej. "Eje X: SNR (dB)", "Diagonal de la matriz de confusión", "Línea azul: método propuesto", "Color: cohesión del cluster").
-   - "explanation": Análisis VERBOSO en español que explique QUÉ ES ese elemento y especialmente POR QUÉ ES IMPORTANTE conocerlo para entender la imagen. Debe quedar absolutamente claro qué aporta a la lectura visual de la figura/tabla. Aporta background teórico cuando ayude. 3 a 6 oraciones largas y descriptivas.
+   - "explanation": Análisis VERBOSO en el idioma de salida que explique QUÉ ES ese elemento y especialmente POR QUÉ ES IMPORTANTE conocerlo para entender la imagen. Debe quedar absolutamente claro qué aporta a la lectura visual de la figura/tabla. Aporta background teórico cuando ayude. 3 a 6 oraciones largas y descriptivas.
 
 ═══════════════════════════════════════════════════════════
 PARTE B — "paragraph_context" (INTERPRETACIÓN DE LA IMAGEN)
@@ -196,14 +226,6 @@ Interpreta la imagen como un todo — no describas oración por oración el pie 
 
 ═══════════════════════════════════════════════════════════
 SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
-
-
-_FIGURE_EXPLAIN_CONFIG = types.GenerateContentConfig(
-    system_instruction=FIGURE_EXPLAIN_PROMPT,
-    response_mime_type="application/json",
-    response_schema=ExplainResponse,
-    max_output_tokens=10240,
-)
 
 
 ALGORITHM_EXPLAIN_PROMPT = """Eres un tutor académico experto. Recibirás una IMAGEN que muestra un ALGORITMO (pseudocódigo numerado por pasos) extraído de un paper científico, su cabecera (p. ej. "Algorithm 1 Min-Max Decomposition"), y el Mapa Global del documento.
@@ -224,7 +246,7 @@ Por cada uno, devuelve UN objeto con:
 
 3. "concepts": Lista con UN solo elemento:
    - "term": Nombre del paso o concepto (p. ej. "Inicialización de inf como cota superior", "Paso 3: construcción del grafo bipartito ponderado", "Definición por casos de wij", "Condición de terminación k = r").
-   - "explanation": Análisis VERBOSO en español. Explica QUÉ HACE ese paso, POR QUÉ se hace (rol algorítmico), y qué efecto tiene sobre las estructuras de datos del algoritmo. Aporta contexto teórico cuando ayude (complejidad, garantía de convergencia, semántica de operadores como ← o ⊕). 3 a 6 oraciones largas y descriptivas.
+   - "explanation": Análisis VERBOSO en el idioma de salida. Explica QUÉ HACE ese paso, POR QUÉ se hace (rol algorítmico), y qué efecto tiene sobre las estructuras de datos del algoritmo. Aporta contexto teórico cuando ayude (complejidad, garantía de convergencia, semántica de operadores como ← o ⊕). 3 a 6 oraciones largas y descriptivas.
 
 ═══════════════════════════════════════════════════════════
 PARTE B — "paragraph_context" (INTERPRETACIÓN GLOBAL DEL ALGORITMO)
@@ -238,14 +260,6 @@ Interpreta el algoritmo como un todo — no expliques paso por paso.
 
 ═══════════════════════════════════════════════════════════
 SALIDA: ÚNICAMENTE un JSON válido con ambas partes. Sin texto adicional fuera del JSON."""
-
-
-_ALGORITHM_EXPLAIN_CONFIG = types.GenerateContentConfig(
-    system_instruction=ALGORITHM_EXPLAIN_PROMPT,
-    response_mime_type="application/json",
-    response_schema=ExplainResponse,
-    max_output_tokens=10240,
-)
 
 
 def _render_pdf_crop(pdf_path: Path, page_idx0: int, bbox: dict, scale: float = 2.0) -> bytes:
@@ -482,6 +496,7 @@ def _run_extraction_pipeline(
             global_map=global_map,
             pages=pages_data,
             linear_blocks=linear_blocks,
+            language=language,
         )
         analysis_path = UPLOADS_DIR / f"{filename}.analysis.json"
         analysis_path.write_text(
@@ -625,7 +640,9 @@ async def explain_paragraph(req: ExplainRequest):
         f"\n\nPárrafo a explicar (numerado por oraciones):\n{numbered}"
     )
     try:
-        return _generate_json(_EXPLAIN_MODEL, prompt, _EXPLAIN_CONFIG)
+        return _generate_json(
+            _EXPLAIN_MODEL, prompt, _build_explain_config(EXPLAIN_PROMPT, req.language)
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 
@@ -661,7 +678,8 @@ def _explain_figure(req: ExplainRequest) -> dict:
         types.Part(inline_data=types.Blob(mime_type="image/png", data=png_bytes)),
         types.Part(text=text_prompt),
     ]
-    config = _ALGORITHM_EXPLAIN_CONFIG if is_algorithm else _FIGURE_EXPLAIN_CONFIG
+    base_prompt = ALGORITHM_EXPLAIN_PROMPT if is_algorithm else FIGURE_EXPLAIN_PROMPT
+    config = _build_explain_config(base_prompt, req.language)
     try:
         return _generate_json_multimodal(_EXPLAIN_MODEL, parts, config)
     except Exception as e:
