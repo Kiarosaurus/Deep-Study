@@ -2,7 +2,7 @@
 
 Immersive reader for scientific papers. A FastAPI backend processes PDFs through Marker (Surya layout-detection models that classify `Text`, `SectionHeader`, `Caption`, `Figure`, and related block types) and builds paragraphs plus per-sentence bounding boxes from the lines Marker already extracts. Gemini produces a global document map and contextual per-paragraph explanations. The frontend is built with Vite and React 19 using `react-pdf` for rendering.
 
-The pipeline applies the following filters automatically: the document title, author and affiliation blocks (including the case in which Marker mislabels them as `SectionHeader`), copyright / DOI / ISBN / `Permission to make` notices, `CCS Concepts` / `Keywords` / `Index Terms` sections, `PageHeader`, `PageFooter`, `Footnote`, `Reference`, and every block that appears after `Acknowledgments` / `References` / `Bibliography`.
+The pipeline applies the following filters automatically: the document title, author and affiliation blocks (including the case in which Marker mislabels them as `SectionHeader`), DOI / ISBN / `Permission to make` notices, `CCS Concepts` / `Keywords` / `Index Terms` sections, `PageHeader`, `PageFooter`, `Footnote`, `Reference`, and every block that appears after `Acknowledgments` / `References` / `Bibliography`. License and copyright boilerplate (Creative Commons / CC BY variants, "licensed under …", `creativecommons.org` URLs, `© 2024 …`, `Copyright held by …`) is dropped on every page, not just page 1, so per-page license footers never reach paragraph analysis.
 
 ## Stack
 

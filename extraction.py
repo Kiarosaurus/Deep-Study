@@ -190,12 +190,27 @@ def _is_body_section_name(text: str) -> bool:
 # Drops anywhere on page 1, regardless of length.
 _HARD_NOISE_RE = re.compile(
     r"(\bpermission\s+to\s+(?:make|copy|reproduce|distribute)\b|"
-    r"©\s*\d{4}|\bcopyright\s+(?:held|notice|\d{4})|"
     r"\b(?:acm|ieee)\s+(?:reference\s+format|copyright)\b|"
     r"\bisbn\s*[\d\-]+|\bdoi[\.:\s]+\S+|\bdoi\.org\b|"
     r"\barxiv(?:\.org)?\b|\bpreprint\b|\bunder\s+review\b|"
-    r"\bsubmitted\s+to\b|\bpublication\s+rights\b|"
-    r"\bcc\s+by(?:[- ]\w+)*\b)",
+    r"\bsubmitted\s+to\b|\bpublication\s+rights\b)",
+    re.IGNORECASE,
+)
+
+# License / copyright signals — dropped on ANY page (license footers, CC
+# banners, and "this work is licensed under …" boilerplate frequently repeat
+# on body pages, not just the masthead). Kept separate from _HARD_NOISE_RE
+# so the page-1-only filters above don't widen scope inadvertently.
+_LICENSE_NOISE_RE = re.compile(
+    r"(\bcreative\s+commons\b|"
+    r"\bcc\s+by(?:[- ]?(?:nc|sa|nd))*(?:\s+\d+(?:\.\d+)?)?\b|"
+    r"\battribution(?:[- ](?:non[- ]?commercial|share[- ]?alike|no[- ]?derivatives))*"
+    r"\s+\d+(?:\.\d+)?\s+international(?:\s+license)?\b|"
+    r"\b(?:licen[sc]ed?|distributed|made\s+available)\s+under\s+"
+    r"(?:a\s+|the\s+)?(?:creative\s+commons|cc\s+by|gnu|mit|bsd|apache|gpl)\b|"
+    r"\bcreativecommons\.org\S*|"
+    r"©\s*\d{4}|\(c\)\s*\d{4}|"
+    r"\bcopyright\s+(?:©|\(c\))?\s*(?:held|notice|\d{4}))",
     re.IGNORECASE,
 )
 
@@ -216,6 +231,10 @@ _PROPER_NOUN_RE = re.compile(r"^[A-ZÁÉÍÓÚÑÜ][\w'’\-]*$", re.UNICODE)
 
 def _is_hard_noise(text: str) -> bool:
     return bool(_HARD_NOISE_RE.search(text))
+
+
+def _is_license_noise(text: str) -> bool:
+    return bool(_LICENSE_NOISE_RE.search(text))
 
 
 def _is_soft_noise(text: str) -> bool:
@@ -865,6 +884,10 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 stop_content = True
                 break
 
+            # License / copyright boilerplate — drop on any page.
+            if _is_license_noise(text):
+                continue
+
             # Page-1 noise filters.
             if page_idx == 0:
                 if _is_hard_noise(text):
@@ -1054,6 +1077,10 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
             if _is_stop_header(text):
                 stop_content = True
                 break
+
+            # License / copyright boilerplate — drop on any page.
+            if _is_license_noise(text):
+                continue
 
             role = _role_for_text_block(bt)
 
