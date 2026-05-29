@@ -3,6 +3,30 @@
 // Tiered resolution: declared indices → literal quote search → fuzzy-window
 // scoring on significant words → fall back to whatever indices were declared.
 
+// Diagnostic logging — gated by any of:
+//   - VITE_FLAG_SENTENCE=1 in frontend/.env.local (build-time, persistent)
+//   - localStorage.flag_sentence === '1' (per-browser, persistent across reloads)
+//   - window.flag_sentence === true (DevTools one-shot, lost on reload)
+// Used to trace why a highlight covers the sentences it does
+// (LLM mis-output vs frontend mis-resolution vs merge).
+export function flagSentenceEnabled() {
+  const envVal = import.meta.env?.VITE_FLAG_SENTENCE
+  if (envVal === '1' || envVal === 'true') return true
+  if (typeof window === 'undefined') return false
+  if (window.flag_sentence === true) return true
+  try {
+    return typeof localStorage !== 'undefined'
+      && localStorage.getItem('flag_sentence') === '1'
+  } catch {
+    return false
+  }
+}
+
+export function logSentence(tag, payload) {
+  if (!flagSentenceEnabled()) return
+  console.log(`[flag_sentence:${tag}]`, payload)
+}
+
 const STOP_WORDS = new Set([
   'de','del','la','el','los','las','en','a','y','o','u','e','un','una','unos','unas',
   'que','se','con','por','para','su','sus','al','es','son','lo','le','les','si',
@@ -51,11 +75,18 @@ export function resolveSentenceIndices(sentences, item) {
     ? raw.filter(i => Number.isInteger(i) && i >= 0 && i < sentences.length)
     : []
 
+  let tier = 0
+  let result = null
+  let tier3Debug = null
+
   // Tier 1
-  if (indicesAgreeWithQuote(sentences, cleanIndices, quote)) return cleanIndices
+  if (indicesAgreeWithQuote(sentences, cleanIndices, quote)) {
+    tier = 1
+    result = cleanIndices
+  }
 
   // Tier 2
-  if (quote) {
+  if (result === null && quote) {
     let concat = ''
     for (let i = 0; i < sentences.length; i++) {
       concat += sentences[i].text
@@ -64,36 +95,63 @@ export function resolveSentenceIndices(sentences, item) {
     const idx = concat.toLowerCase().indexOf(quote.toLowerCase())
     if (idx !== -1) {
       const located = charRangeToSentenceIndices(sentences, idx, idx + quote.length)
-      if (located.length) return located
+      if (located.length) {
+        tier = 2
+        result = located
+      }
     }
   }
 
   // Tier 3 — fuzzy sobre quote o concatenación de terms
-  const conceptTerms = Array.isArray(concepts) ? concepts.map(c => c.term).join(' ') : ''
-  const fuzzySource = quote || conceptTerms || ''
-  const sigWords = significantWords(fuzzySource)
-  if (sigWords.length) {
-    const sentLowers = sentences.map(s => s.text.toLowerCase())
-    const threshold  = Math.ceil(sigWords.length * 0.6)
-    let bestStart = -1, bestEnd = -1, bestHits = 0
-    for (let s = 0; s < sentences.length; s++) {
-      const seen = new Set()
-      for (let e = s; e < sentences.length && e - s < 5; e++) {
-        for (const w of sigWords) if (sentLowers[e].includes(w)) seen.add(w)
-        if (seen.size >= threshold && seen.size > bestHits) {
-          bestHits  = seen.size
-          bestStart = s
-          bestEnd   = e
+  if (result === null) {
+    const conceptTerms = Array.isArray(concepts) ? concepts.map(c => c.term).join(' ') : ''
+    const fuzzySource = quote || conceptTerms || ''
+    const sigWords = significantWords(fuzzySource)
+    if (sigWords.length) {
+      const sentLowers = sentences.map(s => s.text.toLowerCase())
+      const threshold  = Math.ceil(sigWords.length * 0.6)
+      let bestStart = -1, bestEnd = -1, bestHits = 0
+      for (let s = 0; s < sentences.length; s++) {
+        const seen = new Set()
+        for (let e = s; e < sentences.length && e - s < 5; e++) {
+          for (const w of sigWords) if (sentLowers[e].includes(w)) seen.add(w)
+          if (seen.size >= threshold && seen.size > bestHits) {
+            bestHits  = seen.size
+            bestStart = s
+            bestEnd   = e
+          }
         }
       }
-    }
-    if (bestStart !== -1) {
-      return Array.from({ length: bestEnd - bestStart + 1 }, (_, k) => bestStart + k)
+      if (bestStart !== -1) {
+        tier = 3
+        result = Array.from({ length: bestEnd - bestStart + 1 }, (_, k) => bestStart + k)
+        tier3Debug = { sigWords, threshold, bestStart, bestEnd, bestHits, windowSize: bestEnd - bestStart + 1 }
+      }
     }
   }
 
   // Tier 4
-  return cleanIndices
+  if (result === null) {
+    tier = 4
+    result = cleanIndices
+  }
+
+  if (flagSentenceEnabled()) {
+    logSentence('resolveSentenceIndices', {
+      quote: quote?.slice(0, 120),
+      declaredRaw: raw,
+      cleanIndices,
+      tier,
+      result,
+      sentencesCount: sentences.length,
+      ...(tier3Debug ? { tier3: tier3Debug } : {}),
+      ...(tier === 1 && cleanIndices.length > 1 ? {
+        note: 'Tier 1 accepted multi-sentence declared indices — may indicate LLM grouped non-contiguous sentences.',
+      } : {}),
+    })
+  }
+
+  return result
 }
 
 
@@ -191,6 +249,10 @@ function isSplitBoundary(sentences, b) {
   if (b <= 0 || b >= sentences.length) return false
   const prev = sentences[b - 1]?.text ?? ''
   const next = sentences[b]?.text ?? ''
+  // Colon/semicolon mark intentional clause boundaries (intro to equation,
+  // list, or where-clause). What follows is conceptually a separate unit even
+  // when it starts lowercase, so never treat as a mid-sentence split.
+  if (/[:;]\s*$/.test(prev)) return false
   return !SENTENCE_END_RE.test(prev) || !SENTENCE_START_RE.test(next)
 }
 
@@ -203,6 +265,7 @@ function buildMergedSentences(sentences, boundaries) {
   const boundarySet = new Set(boundaries ?? [])
   const mergedSentences = []
   const mergedToOrig = []
+  const mergeEvents = []
   let i = 0
   while (i < sentences.length) {
     const orig = [i]
@@ -219,9 +282,23 @@ function buildMergedSentences(sentences, boundaries) {
       const text  = orig.map(k => sentences[k]?.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
       const boxes = orig.flatMap(k => sentences[k]?.boxes ?? [])
       mergedSentences.push({ text, boxes })
+      mergeEvents.push({
+        mergedIdx: mergedSentences.length - 1,
+        origIndices: [...orig],
+        prevTail: (sentences[orig[0]]?.text ?? '').slice(-40),
+        nextHead: (sentences[orig[orig.length - 1]]?.text ?? '').slice(0, 40),
+      })
     }
     mergedToOrig.push(orig)
     i = orig[orig.length - 1] + 1
+  }
+  if (mergeEvents.length && flagSentenceEnabled()) {
+    logSentence('buildMergedSentences', {
+      origCount: sentences.length,
+      mergedCount: mergedSentences.length,
+      boundaries: [...boundarySet],
+      merges: mergeEvents,
+    })
   }
   return { mergedSentences, mergedToOrig }
 }
@@ -232,12 +309,25 @@ function buildMergedSentences(sentences, boundaries) {
 export function mergedIndicesToOrig(mergedIndices, mergedToOrig) {
   if (!mergedIndices?.length || !mergedToOrig?.length) return mergedIndices ?? []
   const out = []
+  const fanned = []
   for (const m of mergedIndices) {
     const orig = mergedToOrig[m]
-    if (orig) out.push(...orig)
-    else out.push(m)
+    if (orig) {
+      out.push(...orig)
+      if (orig.length > 1) fanned.push({ mergedIdx: m, origIndices: orig })
+    } else {
+      out.push(m)
+    }
   }
-  return [...new Set(out)].sort((a, z) => a - z)
+  const result = [...new Set(out)].sort((a, z) => a - z)
+  if (fanned.length && flagSentenceEnabled()) {
+    logSentence('mergedIndicesToOrig', {
+      input: mergedIndices,
+      output: result,
+      fanouts: fanned,
+    })
+  }
+  return result
 }
 
 // Legacy helper retained for any caller that still resolves indices directly

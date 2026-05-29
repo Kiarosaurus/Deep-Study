@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 
@@ -424,6 +424,29 @@ const BlockCrop = memo(function BlockCrop({
 
   const otherBoxes     = boxesFromIndices(otherIndices)
   const highlightBoxes = boxesFromIndices(currentIndices)
+
+  if (isActive && currentExplanation && flagSentenceEnabled()) {
+    logSentence('LinearReader.highlight', {
+      blockIdx,
+      role: block.role,
+      page: block.page,
+      ownLen,
+      ownOffset,
+      mergedSentencesCount: mergedSentences.length,
+      payloadSentencesCount: payload.sentences?.length ?? 0,
+      currentExplanation: {
+        sentence_indices: currentExplanation?.sentence_indices,
+        quote: (currentExplanation?.quote ?? '').slice(0, 100),
+        placeholder: !!currentExplanation?.is_placeholder,
+      },
+      currentIndicesLocalized: currentIndices,
+      otherIndicesLocalized: otherIndices,
+      boxCounts: {
+        current: highlightBoxes.length,
+        other: otherBoxes.length,
+      },
+    })
+  }
 
   // When a figure/table is active and has a merged caption_bbox, highlight the
   // caption region of the crop so the user sees what's being analyzed.

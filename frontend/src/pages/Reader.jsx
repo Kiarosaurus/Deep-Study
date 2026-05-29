@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import PdfViewer from '../components/PdfViewer'
 import Sidebar from '../components/Sidebar'
-import { buildContinuationPayloads, resolveSentenceIndices } from '../components/highlight-utils'
+import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -301,10 +301,40 @@ export default function Reader() {
     setErrorExplain(null)
     setRetryInfo(null)
 
+    logSentence('handleExplain.input', {
+      flatBlockRef,
+      role,
+      page,
+      isFigure,
+      sentenceCount: sentences?.length ?? 0,
+      sentences: (sentences ?? []).map((s, i) => ({
+        idx: i,
+        boxes: s?.boxes?.length ?? 0,
+        text: (s?.text ?? '').slice(0, 100),
+      })),
+      paragraphText: (text ?? '').slice(0, 200),
+    })
+
     const cacheOpts = { role, page, bbox }
     const cached = readCachedExplanation(decoded, text, explanationsCache.current, cacheOpts)
     if (cached) {
+      logSentence('handleExplain.cacheHit', {
+        rawItems: (cached.sentence_explanations ?? []).map((it, i) => ({
+          itemIdx: i,
+          sentence_indices: it?.sentence_indices,
+          quote: (it?.quote ?? '').slice(0, 100),
+        })),
+      })
       const alignedCached = alignExplanations(cached, sentences)
+      logSentence('handleExplain.aligned', {
+        source: 'cache',
+        alignedItems: (alignedCached.sentence_explanations ?? []).map((it, i) => ({
+          slot: i,
+          sentence_indices: it?.sentence_indices,
+          placeholder: !!it?.is_placeholder,
+          quote: (it?.quote ?? '').slice(0, 100),
+        })),
+      })
       setExplanation(alignedCached)
       if (initialIndex === 'last') {
         setCurrentIndex(Math.max(0, (alignedCached.sentence_explanations?.length || 1) - 1))
@@ -351,7 +381,26 @@ export default function Reader() {
       writeCachedExplanation(decoded, text, data, explanationsCache.current, cacheOpts)
       if (!isCurrent()) return
 
+      logSentence('handleExplain.llmResponse', {
+        rawItems: (data?.sentence_explanations ?? []).map((it, i) => ({
+          itemIdx: i,
+          sentence_indices: it?.sentence_indices,
+          quote: (it?.quote ?? '').slice(0, 100),
+          concepts: (it?.concepts ?? []).length,
+        })),
+      })
+
       const alignedData = alignExplanations(data, sentences)
+
+      logSentence('handleExplain.aligned', {
+        source: 'fresh',
+        alignedItems: (alignedData.sentence_explanations ?? []).map((it, i) => ({
+          slot: i,
+          sentence_indices: it?.sentence_indices,
+          placeholder: !!it?.is_placeholder,
+          quote: (it?.quote ?? '').slice(0, 100),
+        })),
+      })
 
       // Re-anchor currentIndex: if the user was on a skeleton slot for sentence
       // S, jump to the aligned item that covers S — keeps cursor on the same

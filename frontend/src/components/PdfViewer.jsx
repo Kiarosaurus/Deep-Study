@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import LinearReader from './LinearReader'
-import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -182,6 +182,29 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
 
         const otherBoxes     = boxesFromIndices(otherIndices)
         const highlightBoxes = boxesFromIndices(currentIndices)
+
+        if (isActive && currentExplanation && flagSentenceEnabled()) {
+          logSentence('PdfViewer.highlight', {
+            page,
+            blockIdxOnPage: i,
+            flatBlockRef: ownFlatRef,
+            ownLen,
+            ownOffset,
+            mergedSentencesCount: mergedSentences.length,
+            payloadSentencesCount: payload.sentences?.length ?? 0,
+            currentExplanation: {
+              sentence_indices: currentExplanation?.sentence_indices,
+              quote: (currentExplanation?.quote ?? '').slice(0, 100),
+              placeholder: !!currentExplanation?.is_placeholder,
+            },
+            currentIndicesLocalized: currentIndices,
+            otherIndicesLocalized: otherIndices,
+            boxCounts: {
+              current: highlightBoxes.length,
+              other: otherBoxes.length,
+            },
+          })
+        }
 
         return (
           <div key={i}>
