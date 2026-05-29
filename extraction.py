@@ -632,6 +632,42 @@ def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
         pg.blocks = kept
 
 
+def _reorder_authors_after_title(blocks: list[FullBlock]) -> None:
+    """Move author blocks into a contiguous group immediately after the title,
+    sorted by natural reading order (top-to-bottom, left-to-right). Marker
+    sometimes emits multi-column or multi-row author lists in a
+    layout-detection order that doesn't reflect natural reading order — in
+    tracking mode that places individual author lines after the abstract or
+    interleaved with affiliations. This pass forces the masthead to stay
+    coherent regardless of Marker's emission order, by re-sorting only the
+    blocks already classified as `author` and inserting them after the
+    title (or at the start of the document if no title was detected).
+
+    Only touches the linear projection — the paginated view still mirrors
+    the actual page layout.
+    """
+    if not blocks:
+        return
+    author_idxs = [i for i, b in enumerate(blocks) if b.role == "author"]
+    if not author_idxs:
+        return
+    title_idx = next((i for i, b in enumerate(blocks) if b.role == "title"), -1)
+    insert_at = title_idx + 1 if title_idx >= 0 else 0
+
+    authors = [blocks[i] for i in author_idxs]
+    for i in sorted(author_idxs, reverse=True):
+        blocks.pop(i)
+    insert_at -= sum(1 for i in author_idxs if i < insert_at)
+    authors.sort(key=lambda b: (b.page, b.bbox.y0, b.bbox.x0))
+    for k, a in enumerate(authors):
+        blocks.insert(insert_at + k, a)
+    # Reassign reading_index in array order so the cross-mode sequence
+    # builder (frontend buildLinearReadingSequence) stays consistent with
+    # the new visual order.
+    for i, b in enumerate(blocks):
+        b.reading_index = i
+
+
 def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
     """Post-pass over the linear projection. Walks every paragraph and checks
     `_is_continuation` against the most recent prior paragraph, ignoring ALL
@@ -1135,6 +1171,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     blocks = _extract_linear_from_document(document)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
+    _reorder_authors_after_title(blocks)
     _merge_continuations_linear(blocks)
     return blocks
 
@@ -1160,6 +1197,7 @@ def extract_both(
     linear = _extract_linear_from_document(document, line_cache)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
+    _reorder_authors_after_title(linear)
     _merge_figure_captions_pages(pages)
     _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
