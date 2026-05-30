@@ -101,11 +101,65 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
 
   const allItems = explanation?.sentence_explanations ?? []
 
+  // ── Same-column continuation grouping ──────────────────────────────────────
+  // A continuation chain can stitch several blocks together. When consecutive
+  // members sit in the SAME column of the SAME page — e.g. a figure split one
+  // paragraph in two — they should read as a single region: ONE union hover
+  // box and ONE ✦ button covering the whole span, not one per piece. Members
+  // that wrap to the other column keep their own box + button (a single union
+  // box would straddle the gutter); cross-page members already land in
+  // separate overlays. `groupLeader[i]` is the index of the block that owns
+  // block i's rendered box/button; followers fold their box into the leader's
+  // union and render no button of their own.
+  const pageBlocks = blocks ?? []
+  const xRange = (block) => {
+    const bs = block.boxes ?? []
+    if (!bs.length) return null
+    return [Math.min(...bs.map(b => b.x0)), Math.max(...bs.map(b => b.x1))]
+  }
+  const sameColumn = (a, b) => {
+    const ra = xRange(a), rb = xRange(b)
+    if (!ra || !rb) return false
+    const overlap  = Math.min(ra[1], rb[1]) - Math.max(ra[0], rb[0])
+    const narrower = Math.min(ra[1] - ra[0], rb[1] - rb[0])
+    return narrower > 0 && overlap / narrower >= 0.5
+  }
+  const groupLeader  = new Array(pageBlocks.length)
+  const lastChainIdx = new Map()   // chainId → last block index seen on this page
+  for (let i = 0; i < pageBlocks.length; i++) {
+    const cid     = chainIds?.[flatBase + i]
+    const prevIdx = cid != null ? lastChainIdx.get(cid) : undefined
+    groupLeader[i] = (
+      prevIdx !== undefined
+      && pageBlocks[i].continuation
+      && sameColumn(pageBlocks[prevIdx], pageBlocks[i])
+    ) ? groupLeader[prevIdx] : i
+    if (cid != null) lastChainIdx.set(cid, i)
+  }
+  // Union box per leader across all members folded into its group.
+  const groupUnion = new Map()     // leaderIdx → {x0,y0,x1,y1}
+  for (let i = 0; i < pageBlocks.length; i++) {
+    const bs = pageBlocks[i].boxes ?? []
+    if (!bs.length) continue
+    const lead = groupLeader[i]
+    const bx = {
+      x0: Math.min(...bs.map(b => b.x0)), y0: Math.min(...bs.map(b => b.y0)),
+      x1: Math.max(...bs.map(b => b.x1)), y1: Math.max(...bs.map(b => b.y1)),
+    }
+    const cur = groupUnion.get(lead)
+    groupUnion.set(lead, cur ? {
+      x0: Math.min(cur.x0, bx.x0), y0: Math.min(cur.y0, bx.y0),
+      x1: Math.max(cur.x1, bx.x1), y1: Math.max(cur.y1, bx.y1),
+    } : bx)
+  }
+
   return (
     <div className="absolute inset-0 z-10 pointer-events-none">
       {(blocks ?? []).map((block, i) => {
         const paragraphBoxes = block.boxes ?? []
         if (paragraphBoxes.length === 0) return null
+        const isLeader = groupLeader[i] === i
+        const unionBox = groupUnion.get(groupLeader[i])
 
         const ownFlatRef = flatBase + i
         // Chain payload (merged text + sentences across continuation chain).
@@ -131,9 +185,11 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                        || (activeParagraph?.flatBlockRef != null
                            && activeParagraph.flatBlockRef === ownFlatRef)
 
-        const lastBox    = paragraphBoxes[paragraphBoxes.length - 1]
-        const anchorLeft = lastBox.x1 * scale
-        const anchorTop  = lastBox.y1 * scale
+        // Button hangs off the bottom-right of the whole grouped region so it
+        // sits at the end of the (possibly multi-piece) paragraph.
+        const anchorBox  = unionBox ?? paragraphBoxes[paragraphBoxes.length - 1]
+        const anchorLeft = anchorBox.x1 * scale
+        const anchorTop  = anchorBox.y1 * scale
 
         // Localize merged-array indices back into this block's own sentence
         // array — indices outside [ownOffset, ownOffset+ownLen) belong to
@@ -205,24 +261,21 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
 
         return (
           <div key={i}>
-            {/* Hover rects — uno por columna/sección del párrafo */}
-            {paragraphBoxes.map((b, k) => {
-              const left   = b.x0 * scale
-              const top    = b.y0 * scale
-              const width  = (b.x1 - b.x0) * scale
-              const height = (b.y1 - b.y0) * scale
-              return (
-                <div
-                  key={`hov-${i}-${k}`}
-                  className="absolute rounded-sm transition-opacity duration-150"
-                  style={{
-                    left, top, width, height,
-                    background: isHovered ? 'rgba(99,102,241,0.07)' : 'transparent',
-                    border: isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent',
-                  }}
-                />
-              )
-            })}
+            {/* Hover rect — one union box per same-column group. Followers fold
+                into their leader's box, so only the leader paints it. */}
+            {isLeader && unionBox && (
+              <div
+                className="absolute rounded-sm transition-opacity duration-150"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  background: isHovered ? 'rgba(99,102,241,0.07)' : 'transparent',
+                  border: isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent',
+                }}
+              />
+            )}
 
             {/* Otras oraciones del carrusel (no la actual) — sombreado plomo, estático */}
             {otherBoxes.map((box, j) => (
@@ -254,29 +307,31 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             ))}
 
-            {/* ✦ viñeta button */}
-            <button
-              className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
-              style={{
-                left: anchorLeft,
-                top:  anchorTop,
-                background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
-                border: '1.5px solid rgba(99,102,241,0.6)',
-                color: isHovered ? 'white' : 'rgb(79,70,229)',
-                fontSize: '8px',
-                fontWeight: 700,
-                boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
-                transform: isHovered
-                  ? 'translate(-100%, -100%) scale(1.15)'
-                  : 'translate(-100%, -100%)',
-              }}
-              onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef)}
-              onMouseEnter={() => onHoveredChainChange?.(chainKey)}
-              onMouseLeave={() => onHoveredChainChange?.(null)}
-              title={t('viewer.explainParagraph')}
-            >
-              ✦
-            </button>
+            {/* ✦ viñeta button — one per same-column group, on the leader. */}
+            {isLeader && (
+              <button
+                className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
+                style={{
+                  left: anchorLeft,
+                  top:  anchorTop,
+                  background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
+                  border: '1.5px solid rgba(99,102,241,0.6)',
+                  color: isHovered ? 'white' : 'rgb(79,70,229)',
+                  fontSize: '8px',
+                  fontWeight: 700,
+                  boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                  transform: isHovered
+                    ? 'translate(-100%, -100%) scale(1.15)'
+                    : 'translate(-100%, -100%)',
+                }}
+                onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef)}
+                onMouseEnter={() => onHoveredChainChange?.(chainKey)}
+                onMouseLeave={() => onHoveredChainChange?.(null)}
+                title={t('viewer.explainParagraph')}
+              >
+                ✦
+              </button>
+            )}
           </div>
         )
       })}
