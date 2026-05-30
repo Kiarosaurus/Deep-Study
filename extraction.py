@@ -508,6 +508,24 @@ _CAPTION_LIKE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Source: ..." / "Fuente: ..." data-attribution line that sits directly under a
+# figure/table. Unlike `_CAPTION_LIKE_RE` it carries no figure number, and
+# "source" is a common body word — so it only counts as part of the image when
+# it is the block IMMEDIATELY AFTER one (the merge passes accept it in the
+# forward direction only, never above).
+# Require the trailing colon ("Source:" / "Fuente:") so a body sentence opening
+# with the word "Source" (e.g. "Source code is available …") is not mistaken
+# for an attribution and swallowed into the image.
+_SOURCE_ATTRIBUTION_RE = re.compile(r"^(?:source|fuente)\s*:", re.IGNORECASE)
+
+
+def _is_source_attribution(b) -> bool:
+    """True for a plain paragraph opening with 'Source'/'Fuente'. Duck-typed so
+    it accepts both ParagraphBlock and FullBlock."""
+    return getattr(b, "role", None) == "paragraph" and bool(
+        _SOURCE_ATTRIBUTION_RE.match((getattr(b, "text", "") or "").lstrip())
+    )
+
 
 def _is_caption_block_pages(b: ParagraphBlock) -> bool:
     if b.role == "caption":
@@ -555,7 +573,11 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                 neighbor = block_by_ri.get(ri + delta)
                 if neighbor is None or id(neighbor) in consumed_ids:
                     continue
-                if _is_caption_block_pages(neighbor):
+                # A "Source: …" attribution only attaches as the block directly
+                # after the image (delta == 1), never as a regular caption above.
+                if _is_caption_block_pages(neighbor) or (
+                    delta == 1 and _is_source_attribution(neighbor)
+                ):
                     cap = neighbor
                     found_delta = delta
                     break
@@ -678,7 +700,13 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             continue
         if b.role in ("figure", "table"):
             cap_idx = None
-            if i + 1 < len(blocks) and i + 1 not in consumed and _is_caption_block_linear(blocks[i + 1]):
+            # Forward neighbour: a Figure/Table caption OR a "Source: …"
+            # attribution line directly under the image. The backward neighbour
+            # accepts captions only — a Source line never belongs above.
+            if i + 1 < len(blocks) and i + 1 not in consumed and (
+                _is_caption_block_linear(blocks[i + 1])
+                or _is_source_attribution(blocks[i + 1])
+            ):
                 cap_idx = i + 1
             elif i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
                 cap_idx = i - 1
