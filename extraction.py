@@ -349,6 +349,69 @@ def _estimate_line_height(boxes: list[BBox]) -> float:
     return hs[len(hs) // 2]
 
 
+def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
+    """Classify a block's horizontal placement on its page: 'full' (spans the
+    content width — single-column / full-width), 'left' (left column), 'right'
+    (right column), or 'other' (ambiguous). `bounds` is the page's
+    (min_x0, max_x1) over all blocks."""
+    min_x0, max_x1 = bounds
+    w = max_x1 - min_x0
+    if w <= 0:
+        return "full"
+    if (bbox.x1 - bbox.x0) >= 0.75 * w:
+        return "full"
+    mid = min_x0 + w / 2
+    if bbox.x1 <= mid + 0.12 * w:
+        return "left"
+    if bbox.x0 >= mid - 0.12 * w:
+        return "right"
+    return "other"
+
+
+def _cross_page_columns_ok(
+    prev_bbox: BBox,
+    prev_bounds: tuple[float, float],
+    next_bbox: BBox,
+    next_bounds: tuple[float, float],
+) -> bool:
+    """A cross-page continuation flows from the LAST column of page A (bottom)
+    to the FIRST column of page B (top). So prev must be the page-A tail —
+    right column (multi-col) or full width (single-col) — and next the page-B
+    head — left column or full width. Same-side links (both left, both right)
+    are nonsensical across a page break and rejected."""
+    pk = _column_kind(prev_bbox, prev_bounds)
+    nk = _column_kind(next_bbox, next_bounds)
+    return pk in ("right", "full") and nk in ("left", "full")
+
+
+def _accumulate_bounds(
+    bounds: dict[int, tuple[float, float]], page: int, x0: float, x1: float
+) -> None:
+    mn, mx = bounds.get(page, (x0, x1))
+    bounds[page] = (min(mn, x0), max(mx, x1))
+
+
+def _page_x_bounds_linear(blocks: list) -> dict[int, tuple[float, float]]:
+    """Per-page (min_x0, max_x1) content span across all linear blocks."""
+    bounds: dict[int, tuple[float, float]] = {}
+    for b in blocks:
+        _accumulate_bounds(bounds, b.page, b.bbox.x0, b.bbox.x1)
+    return bounds
+
+
+def _page_x_bounds_pages(pages: list) -> dict[int, tuple[float, float]]:
+    """Per-page (min_x0, max_x1) content span across per-page blocks + images."""
+    bounds: dict[int, tuple[float, float]] = {}
+    for p in pages:
+        for b in p.blocks:
+            if b.boxes:
+                ub = _union_bbox(b.boxes)
+                _accumulate_bounds(bounds, p.page, ub.x0, ub.x1)
+        for img in p.images:
+            _accumulate_bounds(bounds, p.page, img.bbox.x0, img.bbox.x1)
+    return bounds
+
+
 def _continuation_geometry_ok(
     prev_bbox: BBox,
     prev_page: int,
@@ -356,6 +419,8 @@ def _continuation_geometry_ok(
     next_page: int,
     line_h: float = 0.0,
     intervening: list[BBox] = (),
+    prev_bounds: tuple[float, float] | None = None,
+    next_bounds: tuple[float, float] | None = None,
 ) -> bool:
     """Geometric gate layered on top of the lexical `_is_continuation` check.
 
@@ -364,7 +429,11 @@ def _continuation_geometry_ok(
     high in the left column chains to one mid-right-column, etc. This gate keeps
     only mergers whose physical arrangement is a real, sequential text flow:
 
-    - cross-page: next is on a later page (column-bottom → next-page-top wrap);
+    - cross-page: prev must be page A's last column (right / full width) and
+      next page B's first column (left / full width). Same-side links across a
+      break (both left, both right) are rejected. Needs `prev_bounds` /
+      `next_bounds` (per-page (min_x0, max_x1)); without them any forward page
+      step is allowed;
     - same column (x-overlap ≥ 50%): next sits just below prev — downward AND
       within `_MAX_CONT_GAP_LINES` line heights of EMPTY space. The gap is
       measured excluding any intervening floats (figure / table / equation /
@@ -381,7 +450,13 @@ def _continuation_geometry_ok(
     next on the same page (their covered height is discounted from the gap).
     """
     if next_page != prev_page:
-        return next_page > prev_page
+        if next_page <= prev_page:
+            return False
+        if prev_bounds is None or next_bounds is None:
+            return True
+        return _cross_page_columns_ok(
+            prev_bbox, prev_bounds, next_bbox, next_bounds
+        )
 
     overlap = min(prev_bbox.x1, next_bbox.x1) - max(prev_bbox.x0, next_bbox.x0)
     narrower = min(prev_bbox.x1 - prev_bbox.x0, next_bbox.x1 - next_bbox.x0)
@@ -514,6 +589,7 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
     paragraph, ignoring all intervening non-paragraph blocks (caption, equation,
     code, list). Walks across page boundaries."""
     _cont_log(f"=== pages post-pass start: {len(pages)} pages ===")
+    page_bounds = _page_x_bounds_pages(pages)
     prev_text = ""
     prev_bbox: BBox | None = None
     prev_page = 0
@@ -544,6 +620,7 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
                 and _continuation_geometry_ok(
                     prev_bbox, prev_page, next_bbox, p.page,
                     max(prev_lh, next_lh), intervening,
+                    page_bounds.get(prev_page), page_bounds.get(p.page),
                 )
             )
             fires = lexical and geom
@@ -552,8 +629,9 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
                 f"prev_end={_snip(prev_text[-80:] if prev_text else '')!r} "
                 f"next_start={_snip(b.text)!r}"
             )
-            if fires:
-                b.continuation = True
+            # Authoritative: overrides any provisional emit-time flag so the
+            # column-aware geometry here is the single source of truth.
+            b.continuation = fires
             prev_text = b.text
             if next_bbox is not None:
                 prev_bbox = next_bbox
@@ -905,6 +983,7 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
     chaining to an unrelated paragraph in another column in multi-column
     layouts."""
     _cont_log(f"=== linear post-pass start: {len(linear_blocks)} blocks ===")
+    page_bounds = _page_x_bounds_linear(linear_blocks)
     prev_para: FullBlock | None = None
     prev_idx = -1
     for i, b in enumerate(linear_blocks):
@@ -926,7 +1005,8 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
         geom = bool(
             prev_para
             and _continuation_geometry_ok(
-                prev_para.bbox, prev_para.page, b.bbox, b.page, line_h, intervening
+                prev_para.bbox, prev_para.page, b.bbox, b.page, line_h, intervening,
+                page_bounds.get(prev_para.page), page_bounds.get(b.page),
             )
         )
         fires = lexical and geom
@@ -935,8 +1015,9 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
             f"prev_end={_snip(prev_para.text[-80:] if prev_para else '')!r} "
             f"next_start={_snip(b.text)!r}"
         )
-        if fires:
-            b.continuation = True
+        # Authoritative: overrides any provisional emit-time flag so the
+        # column-aware geometry here is the single source of truth.
+        b.continuation = fires
         prev_para = b
         prev_idx = i
     _cont_log("=== linear post-pass end ===")
@@ -1097,35 +1178,69 @@ def _rescue_footnotes_on_page(page) -> set[int]:
     return rescued
 
 
-def _reorder_rescued_footnotes(blocks: list, rescued_ids: set[int]) -> list:
-    """Move rescued-footnote blocks to their visual reading slot.
+def _column_major_order(items: list[tuple[object, BBox]]) -> list:
+    """Sort (block, bbox) pairs into column-major reading order.
 
-    Marker emits footnotes at the END of a page's reading order even when the
-    block is actually mid-column body text (the misclassification case). Left
-    there, a rescued footnote lands out of sequence and the continuation merge —
-    which requires sequential, vertically-adjacent paragraphs — can neither
-    chain it to its real neighbours nor stop them merging across the gap it
-    leaves. Re-insert each rescued block among its OWN column's blocks ordered
-    by y, so the downstream merge sees the true reading order. Non-rescued
-    blocks keep Marker's order.
+    Marker's reading order can scramble within a column (a paragraph's last
+    short line emitted before the paragraph body, footnotes dumped at page end,
+    right-column blocks interleaved past the figure). That leaves the true
+    sequential neighbours non-adjacent so the continuation merge never compares
+    them. Re-derive the order purely from geometry:
+
+    - only blocks that span the full content width (title / abstract /
+      spanning figure-caption — they reach BOTH content edges) act as
+      horizontal barriers and are emitted in `y` order;
+    - every other block is assigned to the column it horizontally overlaps
+      more, and between barriers the LEFT column is emitted top-to-bottom,
+      then the RIGHT column top-to-bottom.
+
+    A wide block rooted in one column (a broad table, a paragraph that creeps
+    just past page centre) is NOT a barrier: it reaches only one content edge,
+    so it joins its own column instead of flushing the other one early. That
+    is the case that used to scramble order — a wide left block would flush the
+    accumulated RIGHT column ahead of the LEFT blocks still below it.
+
+    Single-column pages (all blocks full width) collapse to a plain top-to-
+    bottom sort, so this is a no-op there.
     """
-    if not rescued_ids:
-        return blocks
-    rescued = [b for b in blocks if id(b) in rescued_ids]
-    base = [b for b in blocks if id(b) not in rescued_ids]
-    for fn in sorted(rescued, key=lambda b: _polygon_to_bbox(b.polygon).y0):
-        fn_bb = _polygon_to_bbox(fn.polygon)
-        insert_at = len(base)
-        for idx, b in enumerate(base):
-            bb = _polygon_to_bbox(b.polygon)
-            if (
-                _x_overlaps(fn_bb.x0, fn_bb.x1, bb.x0, bb.x1)
-                and bb.y0 > fn_bb.y0 + _GEOM_TOL
-            ):
-                insert_at = idx
-                break
-        base.insert(insert_at, fn)
-    return base
+    if len(items) < 2:
+        return [b for b, _ in items]
+    min_x0 = min(bb.x0 for _, bb in items)
+    max_x1 = max(bb.x1 for _, bb in items)
+    w = max_x1 - min_x0
+    mid = min_x0 + w / 2
+
+    result: list = []
+    left: list[tuple[object, BBox]] = []
+    right: list[tuple[object, BBox]] = []
+
+    def flush() -> None:
+        result.extend(b for b, _ in sorted(left, key=lambda it: it[1].y0))
+        result.extend(b for b, _ in sorted(right, key=lambda it: it[1].y0))
+        left.clear()
+        right.clear()
+
+    def spans_columns(bb: BBox) -> bool:
+        # True barrier: reaches near both content edges (≈ full width). Any
+        # block narrower than that is rooted in one column and must not flush.
+        return bb.x0 <= min_x0 + 0.12 * w and bb.x1 >= max_x1 - 0.12 * w
+
+    for b, bb in sorted(items, key=lambda it: it[1].y0):
+        if w <= 0 or spans_columns(bb):  # full-width → barrier
+            flush()
+            result.append(b)
+            continue
+        # Assign to the column it overlaps more (page centre splits the two).
+        left_ov = min(bb.x1, mid) - bb.x0
+        right_ov = bb.x1 - max(bb.x0, mid)
+        (right if right_ov > left_ov else left).append((b, bb))
+    flush()
+    return result
+
+
+def _reorder_reading_order(blocks: list) -> list:
+    """Column-major reading-order sort over raw Marker layout blocks."""
+    return _column_major_order([(b, _polygon_to_bbox(b.polygon)) for b in blocks])
 
 
 def _latex_from_equation_block(block) -> str:
@@ -1200,9 +1315,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
         images: list[ImageBlock] = []
         reading_idx = 0
         rescued_footnotes = _rescue_footnotes_on_page(page)
-        page_blocks = _reorder_rescued_footnotes(
-            list(_iter_layout_blocks(page)), rescued_footnotes
-        )
+        page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
 
         for block in page_blocks:
             if stop_content:
@@ -1413,9 +1526,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
         cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
         rescued_footnotes = _rescue_footnotes_on_page(page)
-        page_blocks = _reorder_rescued_footnotes(
-            list(_iter_layout_blocks(page)), rescued_footnotes
-        )
+        page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
         _extract_log(f"=== page {page_no} rescued_footnotes={len(rescued_footnotes)} ===")
         for block in page_blocks:
             if stop_content:
@@ -1591,6 +1702,31 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
     return output
 
 
+def _clip_vertical_overlaps_linear(blocks: list[FullBlock]) -> None:
+    """Remove vertical overlap between same-column blocks (in place).
+
+    LinearReader renders each block as its own crop of the page canvas. When
+    two same-column blocks overlap in y (Marker's loose layout boxes, a rescued
+    footnote overrunning the block below), the shared strip is cropped twice and
+    the text appears duplicated / superimposed. Shrink the upper block's bottom
+    to the lower block's top so the crops tile seamlessly and read as one.
+    Blocks are already in reading order, so the nearest prior x-overlapping
+    block on the same page is the column neighbour directly above.
+    """
+    for i, b in enumerate(blocks):
+        for j in range(i - 1, -1, -1):
+            a = blocks[j]
+            if a.page != b.page:
+                break  # earlier blocks are on earlier pages
+            if not _x_overlaps(a.bbox.x0, a.bbox.x1, b.bbox.x0, b.bbox.x1):
+                continue
+            if a.bbox.y0 <= b.bbox.y0 and a.bbox.y1 > b.bbox.y0 + _GEOM_TOL:
+                a.bbox = BBox(
+                    x0=a.bbox.x0, y0=a.bbox.y0, x1=a.bbox.x1, y1=b.bbox.y0
+                )
+            break  # only the nearest column neighbour above
+
+
 def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
@@ -1600,6 +1736,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     blocks = _drop_decorative_icons_linear(blocks)
     _reorder_authors_after_title(blocks)
     _merge_continuations_linear(blocks)
+    _clip_vertical_overlaps_linear(blocks)
     return blocks
 
 
@@ -1631,4 +1768,5 @@ def extract_both(
     _drop_decorative_icons_pages(pages)
     _merge_continuations_pages(pages)
     _merge_continuations_linear(linear)
+    _clip_vertical_overlaps_linear(linear)
     return pages, linear
