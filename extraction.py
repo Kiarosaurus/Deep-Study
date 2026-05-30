@@ -41,6 +41,7 @@ payload that is sent to Gemini.
 """
 import os
 import re
+import sys
 import tempfile
 from threading import Lock
 
@@ -284,10 +285,22 @@ def _is_dense_name_list(text: str) -> bool:
 # caption merging) to stdout. Off by default.
 _CONT_DEBUG = os.getenv("DEEPSTUDY_CONT_DEBUG") == "1"
 
+# Debug toggle: set DEEPSTUDY_EXTRACT_DEBUG=1 to log every block Marker yields
+# during linear extraction — including blocks that are filtered out — with their
+# type, bbox y-range, and reason for being kept or discarded. Use this to find
+# content that Marker produced but the pipeline dropped (or content Marker never
+# produced at all, visible as gaps in the y-range sequence).
+_EXTRACT_DEBUG = os.getenv("DEEPSTUDY_EXTRACT_DEBUG") == "1"
+
 
 def _cont_log(msg: str) -> None:
     if _CONT_DEBUG:
         print(f"[continuation] {msg}")
+
+
+def _extract_log(msg: str) -> None:
+    if _EXTRACT_DEBUG:
+        print(f"[extract] {msg}", file=sys.stderr, flush=True)
 
 
 def _snip(text: str | None, n: int = 80) -> str:
@@ -906,6 +919,20 @@ def _collect_lines(block, document, cache: dict | None = None) -> list[LineBlock
     return out
 
 
+def _latex_from_equation_block(block) -> str:
+    """Return LaTeX text set by EquationProcessor on an Equation block.
+
+    EquationProcessor runs Surya recognition on each Equation block and stores
+    the result in block.html as <math display="block">...LaTeX...</math>.
+    Strip the tags to get the raw LaTeX for the text pipeline.
+    Returns "" if block.html is unset or contains no math content.
+    """
+    html = getattr(block, "html", None)
+    if not html:
+        return ""
+    return re.sub(r"<[^>]+>", "", html).strip()
+
+
 def _iter_layout_blocks(page):
     """Yield page top-level layout blocks in reading order, unwrapping groups."""
     if not page.structure:
@@ -1007,6 +1034,10 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
 
             inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
+            if bt == "Equation":
+                eq_latex = _latex_from_equation_block(block)
+                if eq_latex:
+                    text = eq_latex
             if not text or len(text.split()) < 3:
                 continue
 
@@ -1166,15 +1197,21 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
         page_no = page_idx + 1
         cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
+        _extract_log(f"=== page {page_no} ===")
         for block in _iter_layout_blocks(page):
             if stop_content:
                 break
 
             bt = _block_type_name(block)
-            if bt in _DROP_TYPES:
-                continue
-
             bbox = _polygon_to_bbox(block.polygon)
+            _extract_log(
+                f"  bt={bt} y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
+                f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
+            )
+
+            if bt in _DROP_TYPES:
+                _extract_log(f"    → SKIP drop_type")
+                continue
 
             # SectionHeader: emit (as title / author / section_header) unless
             # it's a stop or skip header, which we still consume for state.
@@ -1183,11 +1220,14 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                     l.text for l in _collect_lines(block, document, line_cache)
                 ).strip()
                 if not header_text:
+                    _extract_log(f"    → SKIP empty header")
                     continue
                 if _is_stop_header(header_text):
+                    _extract_log(f"    → STOP stop_header {_snip(header_text)!r}")
                     stop_content = True
                     break
                 if _is_skip_section(header_text):
+                    _extract_log(f"    → SKIP skip_section {_snip(header_text)!r}")
                     skip_section = True
                     continue
                 # First SectionHeader on page 1 is the paper title — even when
@@ -1221,10 +1261,12 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                         reading_index=reading_index,
                     )
                 )
+                _extract_log(f"    → EMIT role={role} {_snip(header_text)!r}")
                 reading_index += 1
                 continue
 
             if bt in _IMAGE_TYPES:
+                _extract_log(f"    → EMIT role={_role_for_image_block(bt)} (image)")
                 output.append(
                     FullBlock(
                         role=_role_for_image_block(bt),
@@ -1238,27 +1280,37 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 continue
 
             if bt not in _TEXT_TYPES:
+                _extract_log(f"    → SKIP not text_type")
                 continue
             if skip_section:
+                _extract_log(f"    → SKIP skip_section active")
                 continue
 
             inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
+            if bt == "Equation":
+                eq_latex = _latex_from_equation_block(block)
+                if eq_latex:
+                    text = eq_latex
             if not text or len(text.split()) < 3:
+                _extract_log(f"    → SKIP too_short {_snip(text)!r}")
                 continue
 
             if _is_stop_header(text):
+                _extract_log(f"    → STOP stop_header {_snip(text)!r}")
                 stop_content = True
                 break
 
             # License / copyright boilerplate — drop on any page.
             if _is_license_noise(text):
+                _extract_log(f"    → SKIP license_noise {_snip(text)!r}")
                 continue
 
             role = _role_for_text_block(bt)
 
             if page_idx == 0:
                 if _is_hard_noise(text):
+                    _extract_log(f"    → SKIP hard_noise {_snip(text)!r}")
                     continue
                 if pre_abstract and (
                     _is_soft_noise(text) or _looks_like_author_line(text)
@@ -1282,6 +1334,10 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
             if role != "caption":
                 cross_page_candidate = False
 
+            _extract_log(
+                f"    → EMIT role={role} continuation={is_continuation} "
+                f"{_snip(text)!r}"
+            )
             output.append(
                 FullBlock(
                     role=role,

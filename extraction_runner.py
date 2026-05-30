@@ -229,6 +229,10 @@ def _run_subprocess(
                 "marker_worker OK device=%s batch=%d (pdf=%s)",
                 device, batch, pdf_path.name,
             )
+            if os.getenv("DEEPSTUDY_EXTRACT_DEBUG") == "1" and stderr_text:
+                logger.info(
+                    "marker_worker stderr (EXTRACT_DEBUG):\n%s", stderr_text
+                )
         return rc, status, result
 
 
