@@ -919,6 +919,43 @@ def _collect_lines(block, document, cache: dict | None = None) -> list[LineBlock
     return out
 
 
+def _x_overlaps(a0: float, a1: float, b0: float, b1: float, min_ratio: float = 0.3) -> bool:
+    """True if two x-ranges share at least min_ratio of the narrower range's width."""
+    overlap = min(a1, b1) - max(a0, b0)
+    if overlap <= 0:
+        return False
+    return overlap / min(a1 - a0, b1 - b0) >= min_ratio
+
+
+def _rescue_footnotes_on_page(page) -> set[int]:
+    """Return id()s of Footnote blocks that have a non-Footnote text block
+    below them in the same column.
+
+    Real footnotes sit at the page bottom with no body text after them.
+    If Marker labels a block Footnote but body text appears below it in the
+    same column, the label is wrong — promote the block to Text.
+    The column check (x-overlap) prevents a right-column Text block from
+    rescuing a real left-column footnote.
+    """
+    blocks_info = [
+        (_block_type_name(b), _polygon_to_bbox(b.polygon), b)
+        for b in _iter_layout_blocks(page)
+    ]
+    text_boxes = [
+        bbox for bt, bbox, _ in blocks_info
+        if bt in _TEXT_TYPES  # _TEXT_TYPES never includes Footnote
+    ]
+    rescued: set[int] = set()
+    for bt, bbox, block in blocks_info:
+        if bt != "Footnote":
+            continue
+        for t_bbox in text_boxes:
+            if t_bbox.y0 > bbox.y0 and _x_overlaps(bbox.x0, bbox.x1, t_bbox.x0, t_bbox.x1):
+                rescued.add(id(block))
+                break
+    return rescued
+
+
 def _latex_from_equation_block(block) -> str:
     """Return LaTeX text set by EquationProcessor on an Equation block.
 
@@ -990,12 +1027,15 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
         paragraphs: list[ParagraphBlock] = []
         images: list[ImageBlock] = []
         reading_idx = 0
+        rescued_footnotes = _rescue_footnotes_on_page(page)
 
         for block in _iter_layout_blocks(page):
             if stop_content:
                 break
 
             bt = _block_type_name(block)
+            if bt == "Footnote" and id(block) in rescued_footnotes:
+                bt = "Text"
             if bt in _DROP_TYPES:
                 continue
 
@@ -1197,17 +1237,25 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
         page_no = page_idx + 1
         cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
-        _extract_log(f"=== page {page_no} ===")
+        rescued_footnotes = _rescue_footnotes_on_page(page)
+        _extract_log(f"=== page {page_no} rescued_footnotes={len(rescued_footnotes)} ===")
         for block in _iter_layout_blocks(page):
             if stop_content:
                 break
 
             bt = _block_type_name(block)
             bbox = _polygon_to_bbox(block.polygon)
-            _extract_log(
-                f"  bt={bt} y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
-                f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
-            )
+            if bt == "Footnote" and id(block) in rescued_footnotes:
+                _extract_log(
+                    f"  bt=Footnote→Text (rescued) y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
+                    f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
+                )
+                bt = "Text"
+            else:
+                _extract_log(
+                    f"  bt={bt} y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
+                    f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
+                )
 
             if bt in _DROP_TYPES:
                 _extract_log(f"    → SKIP drop_type")
