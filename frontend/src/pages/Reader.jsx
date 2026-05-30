@@ -270,10 +270,14 @@ export default function Reader() {
         emitted.add(itemIdx)
         aligned.push(raw[itemIdx])
       } else {
-        const sText = originalSentences[i]?.text ?? ''
+        const placeholderIndices = [i]
+        while (i + 1 < N && sentToItem.get(i + 1) === undefined) {
+          i++
+          placeholderIndices.push(i)
+        }
         aligned.push({
-          sentence_indices: [i],
-          quote: sText,
+          sentence_indices: placeholderIndices,
+          quote: placeholderIndices.map(k => originalSentences[k]?.text ?? '').join(' '),
           concepts: [],
           is_placeholder: true,
         })
