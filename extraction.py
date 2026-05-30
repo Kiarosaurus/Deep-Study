@@ -332,6 +332,89 @@ def _is_continuation(prev_text: str, new_text: str) -> bool:
     return first.isalpha() and first.islower()
 
 
+# Absorbs bbox rounding / antialias noise when comparing block edges (PDF points).
+_GEOM_TOL = 2.0
+# Max vertical gap (in line heights) between a paragraph's bottom and its
+# continuation's top within the same column. A real mid-paragraph split is
+# nearly touching (~0 lines); anything larger means another block sits between
+# them, so they are not sequential and must not merge.
+_MAX_CONT_GAP_LINES = 1.5
+
+
+def _estimate_line_height(boxes: list[BBox]) -> float:
+    """Median height of per-line boxes. 0.0 when no usable boxes."""
+    hs = sorted(b.y1 - b.y0 for b in boxes if b.y1 - b.y0 > 0)
+    if not hs:
+        return 0.0
+    return hs[len(hs) // 2]
+
+
+def _continuation_geometry_ok(
+    prev_bbox: BBox,
+    prev_page: int,
+    next_bbox: BBox,
+    next_page: int,
+    line_h: float = 0.0,
+    intervening: list[BBox] = (),
+) -> bool:
+    """Geometric gate layered on top of the lexical `_is_continuation` check.
+
+    `_is_continuation` fires on any lowercase-starting paragraph, with zero
+    geometry. In multi-column layouts that over-merges: a lowercase fragment
+    high in the left column chains to one mid-right-column, etc. This gate keeps
+    only mergers whose physical arrangement is a real, sequential text flow:
+
+    - cross-page: next is on a later page (column-bottom → next-page-top wrap);
+    - same column (x-overlap ≥ 50%): next sits just below prev — downward AND
+      within `_MAX_CONT_GAP_LINES` line heights of EMPTY space. The gap is
+      measured excluding any intervening floats (figure / table / equation /
+      caption) that the paragraph legitimately flows around, so a real
+      float-interrupted continuation still merges while a jump over genuinely
+      empty space (scrambled order / dropped block) does not;
+    - different column, same page: ONLY the genuine column wrap — next is to the
+      right of prev AND jumps upward to the top of the next column
+      (next.y0 < prev.y0). Rejects high-left ↔ mid-right style bad mergers.
+
+    `line_h` is the typical line height of the two blocks; when 0 (unmeasurable)
+    the same-column gap cap is skipped and only the downward rule applies.
+    `intervening` are bboxes of non-paragraph blocks sitting between prev and
+    next on the same page (their covered height is discounted from the gap).
+    """
+    if next_page != prev_page:
+        return next_page > prev_page
+
+    overlap = min(prev_bbox.x1, next_bbox.x1) - max(prev_bbox.x0, next_bbox.x0)
+    narrower = min(prev_bbox.x1 - prev_bbox.x0, next_bbox.x1 - next_bbox.x0)
+    same_column = narrower > 0 and overlap / narrower >= 0.5
+
+    if same_column:
+        # Must flow downward (next starts no higher than prev).
+        if next_bbox.y0 < prev_bbox.y0 - _GEOM_TOL:
+            return False
+        if line_h <= 0:
+            return True
+        # Empty gap = raw gap minus the vertical span filled by intervening
+        # floats the text flows around.
+        gap = next_bbox.y0 - prev_bbox.y1
+        for ib in intervening:
+            if not (
+                _x_overlaps(prev_bbox.x0, prev_bbox.x1, ib.x0, ib.x1)
+                or _x_overlaps(next_bbox.x0, next_bbox.x1, ib.x0, ib.x1)
+            ):
+                continue
+            lo = max(prev_bbox.y1, ib.y0)
+            hi = min(next_bbox.y0, ib.y1)
+            if hi > lo:
+                gap -= hi - lo
+        return gap <= _MAX_CONT_GAP_LINES * line_h
+
+    # Different column on the same page: only the bottom→top, left→right wrap.
+    return (
+        next_bbox.x0 > prev_bbox.x1 - _GEOM_TOL
+        and next_bbox.y0 < prev_bbox.y0 - _GEOM_TOL
+    )
+
+
 # Caption-like opener heuristic: catches paragraphs Marker missed tagging as
 # Caption but that clearly belong to a neighboring figure/table/image. Covers
 # English and Spanish forms, with or without a trailing number/Roman numeral:
@@ -431,22 +514,52 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
     paragraph, ignoring all intervening non-paragraph blocks (caption, equation,
     code, list). Walks across page boundaries."""
     _cont_log(f"=== pages post-pass start: {len(pages)} pages ===")
-    prev_para_text = ""
+    prev_text = ""
+    prev_bbox: BBox | None = None
+    prev_page = 0
+    prev_lh = 0.0
     for p in pages:
         _cont_log(f"  -- page {p.page}: {len(p.blocks)} blocks --")
+        prev_idx_in_page = -1
         for i, b in enumerate(p.blocks):
             if b.role != "paragraph":
                 _cont_log(f"    [{i}] skip role={b.role} text={_snip(b.text)!r}")
                 continue
-            fires = bool(prev_para_text and _is_continuation(prev_para_text, b.text))
+            lexical = bool(prev_text and _is_continuation(prev_text, b.text))
+            next_bbox = _union_bbox(b.boxes) if b.boxes else None
+            next_lh = _estimate_line_height(b.boxes or [])
+            # Floats between prev and this paragraph on the same page (non-
+            # paragraph blocks + images), whose covered height the gate discounts.
+            intervening: list[BBox] = []
+            if prev_page == p.page and prev_idx_in_page >= 0:
+                intervening = [
+                    _union_bbox(o.boxes)
+                    for o in p.blocks[prev_idx_in_page + 1 : i]
+                    if o.role != "paragraph" and o.boxes
+                ]
+                intervening += [img.bbox for img in p.images]
+            geom = bool(
+                prev_bbox is not None
+                and next_bbox is not None
+                and _continuation_geometry_ok(
+                    prev_bbox, prev_page, next_bbox, p.page,
+                    max(prev_lh, next_lh), intervening,
+                )
+            )
+            fires = lexical and geom
             _cont_log(
-                f"    [{i}] check paragraph fires={fires} "
-                f"prev_end={_snip(prev_para_text[-80:] if prev_para_text else '')!r} "
+                f"    [{i}] check paragraph fires={fires} lexical={lexical} geom={geom} "
+                f"prev_end={_snip(prev_text[-80:] if prev_text else '')!r} "
                 f"next_start={_snip(b.text)!r}"
             )
             if fires:
                 b.continuation = True
-            prev_para_text = b.text
+            prev_text = b.text
+            if next_bbox is not None:
+                prev_bbox = next_bbox
+                prev_page = p.page
+                prev_lh = next_lh
+                prev_idx_in_page = i
     _cont_log("=== pages post-pass end ===")
 
 
@@ -777,27 +890,55 @@ def _reorder_authors_after_title(blocks: list[FullBlock]) -> None:
 
 def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
     """Post-pass over the linear projection. Walks every paragraph and checks
-    `_is_continuation` against the most recent prior paragraph, ignoring ALL
-    intervening non-paragraph blocks (caption, equation, figure, table, code,
-    list, section_header, title, author). The `_is_continuation` heuristic
-    itself is strict (prev must end mid-word/alnum or soft-break, next must
-    start lowercase), so the bridging behavior cannot trigger on natural
-    paragraph endings."""
+    the most recent prior paragraph, ignoring ALL intervening non-paragraph
+    blocks (caption, equation, figure, table, code, list, section_header,
+    title, author).
+
+    A merge fires only when BOTH gates pass:
+    - lexical (`_is_continuation`): next paragraph starts with a lowercase
+      letter;
+    - geometric (`_continuation_geometry_ok`): the two are physically a real
+      text flow (same-column downward, the bottom→top column wrap, or a
+      cross-page wrap).
+
+    The geometric gate is what stops a lowercase fragment in one column from
+    chaining to an unrelated paragraph in another column in multi-column
+    layouts."""
     _cont_log(f"=== linear post-pass start: {len(linear_blocks)} blocks ===")
-    prev_para_text = ""
+    prev_para: FullBlock | None = None
+    prev_idx = -1
     for i, b in enumerate(linear_blocks):
         if b.role != "paragraph":
             _cont_log(f"  [{i}] skip role={b.role} text={_snip(b.text)!r}")
             continue
-        fires = bool(prev_para_text and _is_continuation(prev_para_text, b.text))
+        lexical = bool(prev_para and _is_continuation(prev_para.text, b.text))
+        line_h = max(
+            _estimate_line_height([bx for s in prev_para.sentences for bx in s.boxes]) if prev_para else 0.0,
+            _estimate_line_height([bx for s in b.sentences for bx in s.boxes]),
+        )
+        # Non-paragraph blocks between prev paragraph and this one on the same
+        # page — floats the text may flow around (discounted from the gap).
+        intervening = [
+            o.bbox
+            for o in linear_blocks[prev_idx + 1 : i]
+            if prev_para and o.page == prev_para.page == b.page
+        ]
+        geom = bool(
+            prev_para
+            and _continuation_geometry_ok(
+                prev_para.bbox, prev_para.page, b.bbox, b.page, line_h, intervening
+            )
+        )
+        fires = lexical and geom
         _cont_log(
-            f"  [{i}] check paragraph fires={fires} "
-            f"prev_end={_snip(prev_para_text[-80:] if prev_para_text else '')!r} "
+            f"  [{i}] check paragraph fires={fires} lexical={lexical} geom={geom} "
+            f"prev_end={_snip(prev_para.text[-80:] if prev_para else '')!r} "
             f"next_start={_snip(b.text)!r}"
         )
         if fires:
             b.continuation = True
-        prev_para_text = b.text
+        prev_para = b
+        prev_idx = i
     _cont_log("=== linear post-pass end ===")
 
 
@@ -956,6 +1097,37 @@ def _rescue_footnotes_on_page(page) -> set[int]:
     return rescued
 
 
+def _reorder_rescued_footnotes(blocks: list, rescued_ids: set[int]) -> list:
+    """Move rescued-footnote blocks to their visual reading slot.
+
+    Marker emits footnotes at the END of a page's reading order even when the
+    block is actually mid-column body text (the misclassification case). Left
+    there, a rescued footnote lands out of sequence and the continuation merge —
+    which requires sequential, vertically-adjacent paragraphs — can neither
+    chain it to its real neighbours nor stop them merging across the gap it
+    leaves. Re-insert each rescued block among its OWN column's blocks ordered
+    by y, so the downstream merge sees the true reading order. Non-rescued
+    blocks keep Marker's order.
+    """
+    if not rescued_ids:
+        return blocks
+    rescued = [b for b in blocks if id(b) in rescued_ids]
+    base = [b for b in blocks if id(b) not in rescued_ids]
+    for fn in sorted(rescued, key=lambda b: _polygon_to_bbox(b.polygon).y0):
+        fn_bb = _polygon_to_bbox(fn.polygon)
+        insert_at = len(base)
+        for idx, b in enumerate(base):
+            bb = _polygon_to_bbox(b.polygon)
+            if (
+                _x_overlaps(fn_bb.x0, fn_bb.x1, bb.x0, bb.x1)
+                and bb.y0 > fn_bb.y0 + _GEOM_TOL
+            ):
+                insert_at = idx
+                break
+        base.insert(insert_at, fn)
+    return base
+
+
 def _latex_from_equation_block(block) -> str:
     """Return LaTeX text set by EquationProcessor on an Equation block.
 
@@ -1028,8 +1200,11 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
         images: list[ImageBlock] = []
         reading_idx = 0
         rescued_footnotes = _rescue_footnotes_on_page(page)
+        page_blocks = _reorder_rescued_footnotes(
+            list(_iter_layout_blocks(page)), rescued_footnotes
+        )
 
-        for block in _iter_layout_blocks(page):
+        for block in page_blocks:
             if stop_content:
                 break
 
@@ -1238,19 +1413,24 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
         cross_page_candidate = page_idx > 0 and bool(last_emitted_text)
 
         rescued_footnotes = _rescue_footnotes_on_page(page)
+        page_blocks = _reorder_rescued_footnotes(
+            list(_iter_layout_blocks(page)), rescued_footnotes
+        )
         _extract_log(f"=== page {page_no} rescued_footnotes={len(rescued_footnotes)} ===")
-        for block in _iter_layout_blocks(page):
+        for block in page_blocks:
             if stop_content:
                 break
 
             bt = _block_type_name(block)
             bbox = _polygon_to_bbox(block.polygon)
+            was_rescued = False
             if bt == "Footnote" and id(block) in rescued_footnotes:
                 _extract_log(
                     f"  bt=Footnote→Text (rescued) y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
                     f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
                 )
                 bt = "Text"
+                was_rescued = True
             else:
                 _extract_log(
                     f"  bt={bt} y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
@@ -1336,6 +1516,11 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
 
             inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
+            # Marker's Footnote layout polygon is loose and can overrun the
+            # block below; tighten a rescued block to its real text extent so
+            # its render crop / highlight doesn't overlap the next paragraph.
+            if was_rescued and inner_lines:
+                bbox = _union_bbox([l.bbox for l in inner_lines])
             if bt == "Equation":
                 eq_latex = _latex_from_equation_block(block)
                 if eq_latex:
