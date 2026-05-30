@@ -166,6 +166,49 @@ export default function LinearReader({
     return ids
   }, [linearBlocks, chainPayloads])
 
+  // Non-paragraph blocks (figures, captions, etc.) between two paragraphs that
+  // belong to the same continuation chain are deferred to render after the chain
+  // ends, so they don't visually interrupt merged paragraphs.
+  const renderList = useMemo(() => {
+    const result = []
+    const deferred = []
+    let lastRenderedIdx = -1
+
+    const emit = (origIdx) => {
+      result.push({ origIdx, prevOrigIdx: lastRenderedIdx })
+      lastRenderedIdx = origIdx
+    }
+
+    const flushDeferred = () => {
+      for (const di of deferred) emit(di)
+      deferred.length = 0
+    }
+
+    const nextParaIsContinuation = (from) => {
+      for (let k = from + 1; k < linearBlocks.length; k++) {
+        if (linearBlocks[k]?.role === 'paragraph') return linearBlocks[k].continuation === true
+      }
+      return false
+    }
+
+    for (let i = 0; i < linearBlocks.length; i++) {
+      const b = linearBlocks[i]
+      if (b?.role !== 'paragraph') {
+        if (nextParaIsContinuation(i)) {
+          deferred.push(i)
+        } else {
+          flushDeferred()
+          emit(i)
+        }
+      } else {
+        emit(i)
+        if (!nextParaIsContinuation(i)) flushDeferred()
+      }
+    }
+    flushDeferred()
+    return result
+  }, [linearBlocks])
+
   return (
     <div
       ref={rootDivRef}
@@ -180,26 +223,27 @@ export default function LinearReader({
           alignItems: 'center',
         }}
       >
-        {linearBlocks.map((block, i) => {
-          const chainKey = chainIds[i] != null ? `c-${chainIds[i]}` : `__b-${i}`
+        {renderList.map(({ origIdx, prevOrigIdx }) => {
+          const block = linearBlocks[origIdx]
+          const chainKey = chainIds[origIdx] != null ? `c-${chainIds[origIdx]}` : `__b-${origIdx}`
           return (
             <BlockCrop
-              key={`${block.page}-${block.reading_index}-${i}`}
-              blockIdx={i}
+              key={`${block.page}-${block.reading_index}-${origIdx}`}
+              blockIdx={origIdx}
               block={block}
-              prevBlock={i > 0 ? linearBlocks[i - 1] : null}
+              prevBlock={prevOrigIdx >= 0 ? linearBlocks[prevOrigIdx] : null}
               srcCanvas={pageCanvases[block.page]}
               pageDim={pageDims?.[block.page]}
               displayWidth={displayWidth}
               maxBoxWidth={maxBoxWidth}
-              visible={visibleSet.has(i)}
+              visible={visibleSet.has(origIdx)}
               observer={observerInstance}
               requestPage={requestPage}
               hovered={hoveredChain === chainKey}
               chainKey={chainKey}
               onHoverChange={handleHoverChange}
               onExplain={onExplain}
-              chainPayload={chainPayloads[i]}
+              chainPayload={chainPayloads[origIdx]}
               activeParagraph={activeParagraph}
               currentExplanation={currentExplanation}
               explanation={explanation}
