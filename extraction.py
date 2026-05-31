@@ -47,6 +47,7 @@ from threading import Lock
 
 from models import (
     BBox,
+    FootnoteAnnotation,
     FullBlock,
     ImageBlock,
     LineBlock,
@@ -412,6 +413,131 @@ def _is_footnote_by_font(inner_lines, bbox: BBox, body_lh: float, body_bboxes) -
         if bb.y0 > bbox.y1 - _GEOM_TOL and _x_overlaps(bbox.x0, bbox.x1, bb.x0, bb.x1):
             return False  # body text continues below → mid-column, not a footnote
     return True
+
+
+# ── Symbol-marked footnote → paragraph linking (Phase 1) ─────────────────────
+# Only symbol markers are handled. Numeric markers (Phase 2) collide with
+# citation numbers and need disambiguation, so they're intentionally excluded.
+# The classic footnote sequence is * † ‡ § ‖ ¶, then doubled (**, ††, …); the
+# run logic in `_FOOTNOTE_MARKER_RE` covers any doubled form automatically.
+# "‖" (U+2016) and its look-alike "∥" (U+2225) are the "parallels" marker.
+_FOOTNOTE_SYMBOLS = "*†‡§¶‖∥#⁂⁑⁎∗"
+_FOOTNOTE_MARKER_RE = re.compile(r"^\s*([" + re.escape(_FOOTNOTE_SYMBOLS) + r"]+)")
+
+
+def _leading_footnote_symbol(text: str) -> str:
+    """The symbol marker a footnote opens with ("*", "†", "‡‡", …) or ""."""
+    m = _FOOTNOTE_MARKER_RE.match(text or "")
+    return m.group(1) if m else ""
+
+
+def _superscript_symbols(block, document, cache: dict | None = None) -> set[str]:
+    """Footnote symbols that appear as a SUPERSCRIPT span inside `block` — the
+    in-text references. Uses Marker's per-span superscript flag/format. Returns
+    both the full run ("††") and its individual chars so matching is lenient."""
+    if cache is not None:
+        hit = cache.get(id(block))
+        if hit is not None:
+            return hit
+    from marker.schema import BlockTypes
+
+    out: set[str] = set()
+    try:
+        spans = block.contained_blocks(document, (BlockTypes.Span,))
+    except Exception:
+        spans = []
+    for sp in spans:
+        if getattr(sp, "removed", False):
+            continue
+        is_sup = ("superscript" in (getattr(sp, "formats", None) or [])) or getattr(
+            sp, "has_superscript", False
+        )
+        if not is_sup:
+            continue
+        syms = "".join(ch for ch in (sp.text or "") if ch in _FOOTNOTE_SYMBOLS)
+        if syms:
+            out.add(syms)
+            out.update(syms)
+    if cache is not None:
+        cache[id(block)] = out
+    return out
+
+
+def _host_bbox(host) -> BBox | None:
+    """Bounding box of a footnote host — FullBlock (.bbox) or ParagraphBlock
+    (.boxes union)."""
+    bb = getattr(host, "bbox", None)
+    if bb is not None:
+        return bb
+    boxes = getattr(host, "boxes", None)
+    return _union_bbox(boxes) if boxes else None
+
+
+def _try_attach_footnote(text, bbox, page_paras, document, sup_cache) -> bool:
+    """If `text` is a symbol-marked footnote AND a paragraph already emitted on
+    this page cites that symbol, attach it (text + distinct bbox) to that
+    paragraph and return True. Otherwise return False so the caller drops the
+    footnote as before. `page_paras` is a list of (host_block, marker_block) in
+    emission order.
+
+    Three matching tiers:
+      1. a paragraph carries the symbol as a SUPERSCRIPT span (Marker's flag —
+         most precise; nearest such host above wins);
+      2. exactly ONE paragraph carries the symbol in plain text (unambiguous);
+      3. the symbol recurs (e.g. "§"/"¶" double as section/paragraph signs):
+         for an unambiguous-footnote symbol, link the paragraph carrying it that
+         sits NEAREST ABOVE the footnote in the same column. Bare "*"/"#" stay
+         unique-only (tier 2) — too noisy (math, emphasis) for the proximity
+         guess."""
+    sym = _leading_footnote_symbol(text)
+    if not sym or not text:
+        return False
+    # Tier 1 — superscript-tagged reference.
+    for host, marker_block in reversed(page_paras):
+        if sym in _superscript_symbols(marker_block, document, sup_cache):
+            host.footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
+            _cont_log(f"    footnote {sym!r} → host (sup) {_snip(host.text)!r}")
+            return True
+    hits = [host for host, _ in page_paras if sym in (host.text or "")]
+    # Tier 2 — exactly one paragraph carries the symbol.
+    if len(hits) == 1:
+        hits[0].footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
+        _cont_log(f"    footnote {sym!r} → host (text) {_snip(hits[0].text)!r}")
+        return True
+    # Tier 3 — recurring unambiguous-footnote symbol: nearest carrier above.
+    if len(hits) > 1 and (len(sym) >= 2 or sym in "†‡§¶‖∥"):
+        above = [
+            (hb.y0, h) for h in hits
+            if (hb := _host_bbox(h)) is not None
+            and hb.y0 < bbox.y0
+            and _x_overlaps(hb.x0, hb.x1, bbox.x0, bbox.x1)
+        ]
+        if above:
+            host = max(above, key=lambda c: c[0])[1]
+            host.footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
+            _cont_log(f"    footnote {sym!r} → host (nearest above) {_snip(host.text)!r}")
+            return True
+    return False
+
+
+def _strong_footnote_prefix(text: str) -> bool:
+    """True when `text` opens with an UNAMBIGUOUS footnote marker, so the block
+    is a footnote even at body font size (caught by neither Marker's Footnote
+    tag nor the small-font test). Two conditions:
+      - the marker is a dagger-family symbol (†‡§¶‖∥) or a multi-char run (**,
+        ††, *†, …). A bare "*" or "#" is excluded — too common in body text
+        (math, emphasis); those rely on the small-font path.
+      - the marker is NOT IMMEDIATELY followed by a digit ("§2", "¶3"), which
+        signals an inline section/numeric reference rather than a footnote. A
+        space or letter after it is fine — "§ 2017 data" / "¶ The note" are
+        footnotes, so a number later in the line no longer rejects them."""
+    m = _FOOTNOTE_MARKER_RE.match(text or "")
+    if not m:
+        return False
+    sym = m.group(1)
+    if len(sym) < 2 and sym not in "†‡§¶‖∥":
+        return False
+    return not text[m.end():m.end() + 1].isdigit()
 
 
 def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
@@ -1437,6 +1563,8 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
         rescued_footnotes = _rescue_footnotes_on_page(page)
         page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
         body_lh, body_bboxes = _page_footnote_context(page, document, line_cache)
+        page_paras: list = []   # (emitted paragraph, marker block) for footnote linking
+        sup_cache: dict = {}
 
         for block in page_blocks:
             if stop_content:
@@ -1445,6 +1573,17 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
             bt = _block_type_name(block)
             if bt == "Footnote" and id(block) in rescued_footnotes:
                 bt = "Text"
+            # Marker-tagged footnote: link a symbol-marked one to its citing
+            # paragraph (Phase 1) before it would be dropped.
+            if bt == "Footnote":
+                f_lines = _collect_lines(block, document, line_cache)
+                f_text = " ".join(l.text for l in f_lines).strip()
+                f_bbox = (
+                    _union_bbox([l.bbox for l in f_lines])
+                    if f_lines else _polygon_to_bbox(block.polygon)
+                )
+                _try_attach_footnote(f_text, f_bbox, page_paras, document, sup_cache)
+                continue
             if bt in _DROP_TYPES:
                 continue
 
@@ -1497,6 +1636,17 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
+                _try_attach_footnote(text, bbox, page_paras, document, sup_cache)
+                continue
+
+            # Body-size footnote opening with an unambiguous symbol marker
+            # (**, ††, †, ‡ …) — attach or drop, never leak as a paragraph.
+            if (
+                bt in _BODY_TEXT_TYPES
+                and id(block) not in rescued_footnotes
+                and _strong_footnote_prefix(text)
+            ):
+                _try_attach_footnote(text, bbox, page_paras, document, sup_cache)
                 continue
 
             if _is_stop_header(text):
@@ -1526,16 +1676,17 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
 
             sentences = _build_sentences(text, inner_lines)
 
-            paragraphs.append(
-                ParagraphBlock(
-                    text=text,
-                    boxes=[bbox],
-                    sentences=sentences,
-                    reading_index=reading_idx,
-                    continuation=is_cont,
-                    role=_role_for_text_block(bt),
-                )
+            pblock = ParagraphBlock(
+                text=text,
+                boxes=[bbox],
+                sentences=sentences,
+                reading_index=reading_idx,
+                continuation=is_cont,
+                role=_role_for_text_block(bt),
             )
+            paragraphs.append(pblock)
+            if pblock.role == "paragraph":
+                page_paras.append((pblock, block))
             reading_idx += 1
             last_emitted_text = text
 
@@ -1658,6 +1809,8 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
         rescued_footnotes = _rescue_footnotes_on_page(page)
         page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
         body_lh, body_bboxes = _page_footnote_context(page, document, line_cache)
+        page_paras: list = []   # (emitted paragraph, marker block) for footnote linking
+        sup_cache: dict = {}
         _extract_log(f"=== page {page_no} rescued_footnotes={len(rescued_footnotes)} ===")
         for block in page_blocks:
             if stop_content:
@@ -1678,6 +1831,18 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                     f"  bt={bt} y=[{bbox.y0:.1f},{bbox.y1:.1f}] "
                     f"x=[{bbox.x0:.1f},{bbox.x1:.1f}]"
                 )
+
+            # Marker-tagged footnote: try to link a symbol-marked one to the
+            # paragraph that cites it (Phase 1) before it would be dropped.
+            if bt == "Footnote":
+                f_lines = _collect_lines(block, document, line_cache)
+                f_text = " ".join(l.text for l in f_lines).strip()
+                f_bbox = _union_bbox([l.bbox for l in f_lines]) if f_lines else bbox
+                if _try_attach_footnote(f_text, f_bbox, page_paras, document, sup_cache):
+                    _extract_log(f"    → FOOTNOTE attached {_snip(f_text)!r}")
+                else:
+                    _extract_log(f"    → SKIP footnote (no symbol/host) {_snip(f_text)!r}")
+                continue
 
             if bt in _DROP_TYPES:
                 _extract_log(f"    → SKIP drop_type")
@@ -1778,7 +1943,24 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
-                _extract_log(f"    → SKIP footnote_by_font {_snip(text)!r}")
+                if _try_attach_footnote(text, bbox, page_paras, document, sup_cache):
+                    _extract_log(f"    → FOOTNOTE attached (by font) {_snip(text)!r}")
+                else:
+                    _extract_log(f"    → SKIP footnote_by_font {_snip(text)!r}")
+                continue
+
+            # Footnote that evaded the font test (body-size) but opens with an
+            # unambiguous symbol marker (**, ††, †, ‡ …). Attach or drop — never
+            # leak it as a body paragraph.
+            if (
+                bt in _BODY_TEXT_TYPES
+                and not was_rescued
+                and _strong_footnote_prefix(text)
+            ):
+                if _try_attach_footnote(text, bbox, page_paras, document, sup_cache):
+                    _extract_log(f"    → FOOTNOTE attached (by marker) {_snip(text)!r}")
+                else:
+                    _extract_log(f"    → SKIP footnote (marker, no host) {_snip(text)!r}")
                 continue
 
             if _is_stop_header(text):
@@ -1823,17 +2005,18 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 f"    → EMIT role={role} continuation={is_continuation} "
                 f"{_snip(text)!r}"
             )
-            output.append(
-                FullBlock(
-                    role=role,
-                    text=text,
-                    page=page_no,
-                    bbox=bbox,
-                    reading_index=reading_index,
-                    sentences=sentences,
-                    continuation=is_continuation,
-                )
+            emitted = FullBlock(
+                role=role,
+                text=text,
+                page=page_no,
+                bbox=bbox,
+                reading_index=reading_index,
+                sentences=sentences,
+                continuation=is_continuation,
             )
+            output.append(emitted)
+            if role == "paragraph":
+                page_paras.append((emitted, block))
             reading_index += 1
             last_emitted_text = text
 

@@ -294,6 +294,15 @@ export function buildContinuationPayloads(blocks) {
 
     const { mergedSentences, mergedToOrig } = buildMergedSentences(sentences, boundaries)
 
+    // Symbol-marked footnotes cited anywhere in the chain — fed (labeled
+    // "Footnote") into the shared explain payload so the AI sees them.
+    const footnotes = []
+    for (const idx of chainIdxs) {
+      for (const fn of (blocks[idx].footnotes ?? [])) {
+        if (fn?.text) footnotes.push(fn.text)
+      }
+    }
+
     for (let k = 0; k < chainIdxs.length; k++) {
       out[chainIdxs[k]] = {
         text,
@@ -302,6 +311,7 @@ export function buildContinuationPayloads(blocks) {
         boundaries,
         mergedSentences,
         mergedToOrig,
+        footnotes,
       }
     }
     chainIdxs = []

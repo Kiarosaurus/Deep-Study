@@ -20,6 +20,16 @@ class SentenceBlock(BaseModel):
     boxes: list[BBox]
 
 
+class FootnoteAnnotation(BaseModel):
+    # A symbol-marked footnote (Phase 1: * † ‡ § ¶ …) linked to the paragraph
+    # that cites it via a matching in-text superscript. Kept as a DISTINCT box
+    # (rendered green) — never folded into the paragraph's own bbox — but its
+    # text rides along into that paragraph's AI explanation, labeled "Footnote".
+    text: str
+    bbox: BBox
+    marker: str = ""
+
+
 class ParagraphBlock(BaseModel):
     text: str
     boxes: list[BBox]
@@ -38,6 +48,9 @@ class ParagraphBlock(BaseModel):
     # Default "paragraph" preserves backward compatibility with analysis.json
     # files generated before this field was introduced.
     role: Literal["paragraph", "caption", "equation", "code"] = "paragraph"
+    # Symbol-marked footnotes cited by this paragraph (Phase 1). Each is a
+    # distinct green box in the reader and is fed into the explanation.
+    footnotes: list[FootnoteAnnotation] = []
 
 
 class ImageBlock(BaseModel):
@@ -106,6 +119,9 @@ class FullBlock(BaseModel):
     # renders the caption beneath the image and uses these for the explain flow.
     caption_text: str = ""
     caption_bbox: BBox | None = None
+    # Symbol-marked footnotes cited by this paragraph (Phase 1). Distinct green
+    # boxes in the reader; their text is fed into the explanation.
+    footnotes: list[FootnoteAnnotation] = []
 
 
 class UploadResponse(BaseModel):
@@ -139,6 +155,9 @@ class ExplainRequest(BaseModel):
     page: int | None = None
     bbox: BBox | None = None
     caption_text: str = ""
+    # Symbol-marked footnotes cited by the paragraph. Injected into the prompt
+    # labeled "Footnote" so the explanation accounts for them.
+    footnotes: list[str] = []
     # Explanation language for this request (es | en | zh-Hant). Drives the
     # Gemini output language; independent of the UI language. Defaults to es
     # for older clients that don't send it.

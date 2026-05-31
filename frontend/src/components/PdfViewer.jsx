@@ -171,6 +171,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           boundaries: [],
           mergedSentences: block.sentences ?? [],
           mergedToOrig: (block.sentences ?? []).map((_, i) => [i]),
+          footnotes: (block.footnotes ?? []).map(f => f.text),
         }
         const chainId   = chainIds?.[ownFlatRef]
         const chainKey  = chainId != null ? `c-${chainId}` : `__b-${page}-${i}`
@@ -307,6 +308,32 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             ))}
 
+            {/* Footnote boxes — distinct GREEN region, never folded into the
+                paragraph's union box (kept separate even in the same column).
+                Hidden by default; shown only while hovering the footnote itself
+                OR its paragraph (shared chainKey). Hovering the footnote lights
+                up the paragraph too, and vice-versa. */}
+            {(block.footnotes ?? []).map((fn, j) => {
+              const fb = fn.bbox
+              if (!fb) return null
+              return (
+                <div
+                  key={`fn-${i}-${j}`}
+                  className="absolute pointer-events-auto rounded-sm transition-opacity duration-150"
+                  style={{
+                    left:   fb.x0 * scale,
+                    top:    fb.y0 * scale,
+                    width:  (fb.x1 - fb.x0) * scale,
+                    height: (fb.y1 - fb.y0) * scale,
+                    background: isHovered ? 'rgba(34,197,94,0.20)' : 'transparent',
+                    border: isHovered ? '1px solid rgba(34,197,94,0.45)' : '1px solid transparent',
+                  }}
+                  onMouseEnter={() => onHoveredChainChange?.(chainKey)}
+                  onMouseLeave={() => onHoveredChainChange?.(null)}
+                />
+              )
+            })}
+
             {/* ✦ viñeta button — one per same-column group, on the leader. */}
             {isLeader && (
               <button
@@ -324,7 +351,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                     ? 'translate(-100%, -100%) scale(1.15)'
                     : 'translate(-100%, -100%)',
                 }}
-                onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef)}
+                onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
                 onMouseEnter={() => onHoveredChainChange?.(chainKey)}
                 onMouseLeave={() => onHoveredChainChange?.(null)}
                 title={t('viewer.explainParagraph')}

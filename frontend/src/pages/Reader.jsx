@@ -316,7 +316,7 @@ export default function Reader() {
 
   const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
-    const { initialIndex = 0, role, page, bbox, caption_text } = opts
+    const { initialIndex = 0, role, page, bbox, caption_text, footnotes = [] } = opts
     const isFigure = role === 'figure' || role === 'table' || role === 'algorithm'
     // Explanation language chosen at upload (persisted in the analysis). Drives
     // the Gemini output language; independent of the UI language. Older
@@ -401,6 +401,7 @@ export default function Reader() {
         : {
             paragraph_sentences: (sentences ?? []).map(s => s.text),
             global_map: analysis.global_map,
+            footnotes: footnotes ?? [],
             language: explainLang,
           }
       const data = await postExplainWithRetry(

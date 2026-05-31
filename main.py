@@ -639,6 +639,14 @@ async def explain_paragraph(req: ExplainRequest):
         f"Mapa Global del paper:\n{json.dumps(req.global_map, ensure_ascii=False)}"
         f"\n\nPárrafo a explicar (numerado por oraciones):\n{numbered}"
     )
+    # Symbol-marked footnotes the paragraph cites — extra context for the
+    # explanation, explicitly labeled so the model treats them as footnotes.
+    if req.footnotes:
+        foot = "\n".join(f"[Footnote] {f}" for f in req.footnotes)
+        prompt += (
+            "\n\nFootnotes referenced by this paragraph (additional context, "
+            f"not part of the sentence numbering):\n{foot}"
+        )
     try:
         return _generate_json(
             _EXPLAIN_MODEL, prompt, _build_explain_config(EXPLAIN_PROMPT, req.language)
