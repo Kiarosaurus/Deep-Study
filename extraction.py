@@ -146,6 +146,19 @@ _STOP_SECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same stop sections, but glued to their body text on one line. Marker often
+# emits "Acknowledgments. This work was supported by …" as a single paragraph
+# rather than a standalone SectionHeader, so the end-anchored regex above misses
+# it. Require the stop word at the very start (optional Arabic/Roman section
+# number) followed by sentence punctuation + body, so a mid-sentence "…we
+# acknowledge that…" or "References [1] show…" never trips it.
+_STOP_SECTION_INLINE_RE = re.compile(
+    r"^(?:(?:\d+|[ivxlcdm]+)[.\s]+)?"
+    r"(?:acknowledg(?:e)?ments?|references?|bibliography|works?\s+cited)"
+    r"\s*[.:—]\s+\S",
+    re.IGNORECASE,
+)
+
 # Section headers whose CONTENT must be skipped (boilerplate sections that
 # precede or follow the abstract on conference templates).
 _SKIP_SECTION_RE = re.compile(
@@ -175,7 +188,8 @@ _BODY_SECTION_RE = re.compile(
 
 
 def _is_stop_header(text: str) -> bool:
-    return bool(_STOP_SECTION_RE.match(text.strip()))
+    t = text.strip()
+    return bool(_STOP_SECTION_RE.match(t) or _STOP_SECTION_INLINE_RE.match(t))
 
 
 def _is_skip_section(text: str) -> bool:
