@@ -5,6 +5,7 @@ import PdfViewer from '../components/PdfViewer'
 import Sidebar from '../components/Sidebar'
 import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
 import { useUiLang } from '../i18n/LanguageContext'
+import { ThemeButton } from '../theme/ThemeToggle'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -723,6 +724,8 @@ export default function Reader() {
           explanation={explanation}
           onHome={handleHome}
         />
+        {/* Theme cycle: normal → sepia → soft-dark (bottom-left). */}
+        <ThemeButton className="absolute bottom-4 left-4 z-30" />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
         <button

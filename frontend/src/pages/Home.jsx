@@ -5,6 +5,7 @@ import PdfUploader from '../components/PdfUploader'
 import OverwriteModal from '../components/OverwriteModal'
 import LanguageSwitcher from '../i18n/LanguageSwitcher'
 import { useUiLang } from '../i18n/LanguageContext'
+import { ThemeSwitch } from '../theme/ThemeToggle'
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -517,7 +518,8 @@ export default function Home() {
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center gap-2.5">
           <span className="text-xl">🔬</span>
           <span className="text-lg font-bold text-slate-800 tracking-tight">DeepStudy</span>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2.5">
+            <ThemeSwitch />
             <LanguageSwitcher />
           </div>
         </div>

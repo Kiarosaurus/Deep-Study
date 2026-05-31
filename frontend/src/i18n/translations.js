@@ -64,6 +64,10 @@ export const TRANSLATIONS = {
     'viewer.explainParagraph': 'Explain paragraph',
     'viewer.hidePanel': 'Hide panel (.)',
     'viewer.showPanel': 'Show panel (.)',
+    'theme.label': 'Theme',
+    'theme.normal': 'Normal',
+    'theme.sepia': 'Sepia (low contrast)',
+    'theme.dark': 'Soft dark',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? 'Explain table' : role === 'algorithm' ? 'Explain algorithm' : 'Explain figure',
     'viewer.backToMenu': 'Back to main menu',
@@ -189,6 +193,10 @@ export const TRANSLATIONS = {
     'viewer.explainParagraph': 'Explicar párrafo',
     'viewer.hidePanel': 'Ocultar panel (.)',
     'viewer.showPanel': 'Mostrar panel (.)',
+    'theme.label': 'Tema',
+    'theme.normal': 'Normal',
+    'theme.sepia': 'Sepia (bajo contraste)',
+    'theme.dark': 'Oscuro suave',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? 'Explicar tabla' : role === 'algorithm' ? 'Explicar algoritmo' : 'Explicar figura',
     'viewer.backToMenu': 'Volver al menú principal',
@@ -312,6 +320,10 @@ export const TRANSLATIONS = {
     'viewer.explainParagraph': '解說段落',
     'viewer.hidePanel': '隱藏面板（.）',
     'viewer.showPanel': '顯示面板（.）',
+    'theme.label': '主題',
+    'theme.normal': '正常',
+    'theme.sepia': '低對比（米色）',
+    'theme.dark': '柔和深色',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? '解說表格' : role === 'algorithm' ? '解說演算法' : '解說圖表',
     'viewer.backToMenu': '返回主選單',

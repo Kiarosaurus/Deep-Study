@@ -1,5 +1,114 @@
 @import "tailwindcss";
 
+/* ── Theming: Normal / Sepia (low-contrast warm) / Soft-Dark ────────────────
+   Background + text are driven by CSS custom properties. Normal mirrors the
+   current Tailwind palette (no visual change). The theme class lives on <html>
+   (set by ThemeProvider) so vars + overrides + the PDF-canvas filter cascade
+   over everything. */
+:root {
+  --bg: #f8fafc;          /* page background (slate-50) */
+  --surface: #ffffff;     /* cards / panels / toolbars */
+  --surface-2: #f8fafc;   /* slate-50 */
+  --surface-3: #f1f5f9;   /* slate-100 */
+  --text: #0f172a;        /* slate-900 */
+  --text-muted: #475569;  /* slate-600 */
+  --text-faint: #94a3b8;  /* slate-400 */
+  --border: #e2e8f0;      /* slate-200 */
+  --accent: #4f46e5;      /* indigo-600 — kept across themes */
+  --pdf-filter: none;     /* recolour applied to PDF canvases */
+}
+
+/* Sepia: a warm cream background + dark warm-brown text. Cuts blue light. */
+.theme-sepia {
+  --bg: #F4ECD8;
+  --surface: #FAF3E1;
+  --surface-2: #EFE6CF;
+  --surface-3: #E7DBBF;
+  --text: #4A3B2A;        /* dark warm brown — not pure black */
+  --text-muted: #6B5A45;
+  --text-faint: #9B8A6F;
+  --border: #DCCBA6;
+  /* Dim FIRST so sepia doesn't clamp white to a pale tint, then warm + saturate
+     → bright whites become a real yellow/amber cream, not light. */
+  --pdf-filter: brightness(0.74) sepia(1) saturate(1.35);
+}
+
+/* Soft dark: pure-black background, ash-grey text (never pure white). */
+.theme-dark {
+  --bg: #000000;
+  --surface: #0c0c0e;
+  --surface-2: #141417;
+  --surface-3: #1c1c21;
+  --text: #a6abb4;        /* dim ash grey — darker than before, capped, never white */
+  --text-muted: #868b94;
+  --text-faint: #585d66;
+  --border: #2a2a31;
+  /* Invert the page, mute the figure colours (saturate), then dim hard so the
+     brightest inverted content stays low — double the previous dimming
+     (15% → 30%) to pull the most-lit elements down. */
+  --pdf-filter: invert(0.92) hue-rotate(180deg) saturate(0.78) brightness(0.70);
+}
+
+body { background-color: var(--bg); color: var(--text); }
+
+/* Re-map the dominant Tailwind surfaces / text / borders to the theme vars.
+   Scoped to the theme classes, so Normal keeps Tailwind's defaults untouched. */
+.theme-sepia .bg-white,     .theme-dark .bg-white,
+.theme-sepia .bg-white\/80, .theme-dark .bg-white\/80,
+.theme-sepia .bg-white\/90, .theme-dark .bg-white\/90,
+.theme-sepia .bg-white\/95, .theme-dark .bg-white\/95 { background-color: var(--surface) !important; }
+.theme-sepia .bg-slate-50,  .theme-dark .bg-slate-50,
+.theme-sepia .bg-gray-50,   .theme-dark .bg-gray-50  { background-color: var(--surface-2) !important; }
+.theme-sepia .bg-slate-100, .theme-dark .bg-slate-100,
+.theme-sepia .bg-gray-100,  .theme-dark .bg-gray-100 { background-color: var(--surface-3) !important; }
+
+.theme-sepia .text-slate-900, .theme-dark .text-slate-900,
+.theme-sepia .text-slate-800, .theme-dark .text-slate-800,
+.theme-sepia .text-gray-900,  .theme-dark .text-gray-900,
+.theme-sepia .text-gray-800,  .theme-dark .text-gray-800 { color: var(--text) !important; }
+.theme-sepia .text-slate-700, .theme-dark .text-slate-700,
+.theme-sepia .text-slate-600, .theme-dark .text-slate-600,
+.theme-sepia .text-slate-500, .theme-dark .text-slate-500,
+.theme-sepia .text-gray-700,  .theme-dark .text-gray-700,
+.theme-sepia .text-gray-600,  .theme-dark .text-gray-600,
+.theme-sepia .text-gray-500,  .theme-dark .text-gray-500 { color: var(--text-muted) !important; }
+.theme-sepia .text-slate-400, .theme-dark .text-slate-400,
+.theme-sepia .text-slate-300, .theme-dark .text-slate-300,
+.theme-sepia .text-gray-400,  .theme-dark .text-gray-400 { color: var(--text-faint) !important; }
+
+.theme-sepia .border-slate-200, .theme-dark .border-slate-200,
+.theme-sepia .border-slate-100, .theme-dark .border-slate-100,
+.theme-sepia .border-slate-300, .theme-dark .border-slate-300,
+.theme-sepia .border-gray-200,  .theme-dark .border-gray-200 { border-color: var(--border) !important; }
+
+/* PDF canvases (paginated page + tracking-mode crops) get the theme's recolour
+   filter — the only <canvas> elements in the app. */
+.theme-sepia canvas, .theme-dark canvas { filter: var(--pdf-filter); }
+
+/* Sepia: warm light accent surfaces onto the cream palette. */
+.theme-sepia .bg-indigo-50, .theme-sepia .bg-emerald-50, .theme-sepia .bg-red-50,
+.theme-sepia .bg-amber-50,  .theme-sepia .bg-yellow-50 { background-color: var(--surface-2) !important; }
+
+/* Dark: light accent surfaces (bg-*-50, light greys) otherwise read as white
+   "objects" → push to a dark surface; broaden the white/opacity catch too. */
+.theme-dark .bg-indigo-50, .theme-dark .bg-emerald-50, .theme-dark .bg-red-50,
+.theme-dark .bg-amber-50,  .theme-dark .bg-yellow-50, .theme-dark .bg-blue-50,
+.theme-dark .bg-sky-50,    .theme-dark .bg-green-50,  .theme-dark .bg-slate-200,
+.theme-dark .bg-slate-100, .theme-dark .bg-white\/70, .theme-dark .bg-white\/60,
+.theme-dark .bg-white\/50 { background-color: var(--surface-3) !important; }
+
+/* Dark: tone vibrant accent fills down so they aren't harsh on black. */
+.theme-dark .bg-indigo-600 { background-color: #3b3a63 !important; }
+.theme-dark .bg-indigo-700, .theme-dark .hover\:bg-indigo-700:hover { background-color: #46447a !important; }
+.theme-dark .bg-emerald-600 { background-color: #2f6b52 !important; }
+.theme-dark .bg-red-600, .theme-dark .bg-red-500 { background-color: #8f3b3b !important; }
+
+/* Dark: desaturate AND cap accent text / icons → muted, never bright. */
+.theme-dark .text-indigo-600, .theme-dark .text-indigo-500,
+.theme-dark .text-emerald-600, .theme-dark .text-emerald-500,
+.theme-dark .text-red-500, .theme-dark .text-red-600,
+.theme-dark .text-amber-600, .theme-dark .text-amber-500 { filter: saturate(0.5) brightness(0.88); }
+
 @keyframes slide-indeterminate {
   0%   { transform: translateX(-100%); width: 45%; }
   50%  { width: 55%; }
