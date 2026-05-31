@@ -562,16 +562,18 @@ def _union_bbox(bs: list[BBox]) -> BBox:
 
 def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
     """Per-page mirror of `_merge_figure_captions_linear`. For each ImageBlock,
-    look at adjacent ParagraphBlocks (by reading_index) to find an attached
-    caption. The caption may be Marker-tagged role='caption' or a paragraph
-    matching `_CAPTION_LIKE_RE` (EN + ES forms). Direction is bidirectional:
-    prefers the block AFTER (typical figure layout) then BEFORE (typical
-    table layout). Allows up to ±2 reading_index slots to tolerate an
-    intervening image in multi-panel figures.
+    look at adjacent ParagraphBlocks (by reading_index) to find its attached
+    text. Two kinds attach, and a single visual can carry BOTH:
+      - a caption — Marker-tagged role='caption' or a paragraph matching
+        `_CAPTION_LIKE_RE` (Figure/Table/Image …, EN + ES) — above (tables) or
+        below (figures);
+      - a "Source: …" / "Fuente: …" attribution line directly below.
+    Allows up to ±2 reading_index slots to tolerate an intervening image in
+    multi-panel figures.
 
-    When merged, the caption's text/bbox is absorbed into ImageBlock and the
-    caption block is removed from `page.blocks` so the frontend overlay no
-    longer hovers it as a standalone paragraph."""
+    When merged, the pieces' text/bboxes are absorbed into the ImageBlock
+    (joined top→bottom, bbox unioned) and the pieces are removed from
+    `page.blocks` so the frontend overlay no longer hovers them standalone."""
     _cont_log(f"=== pages figure-caption merge start: {len(pages)} pages ===")
     for p in pages:
         block_by_ri: dict[int, ParagraphBlock] = {
@@ -581,29 +583,37 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
         _cont_log(f"  -- page {p.page}: {len(p.images)} images, {len(p.blocks)} blocks --")
         for img in p.images:
             ri = img.reading_index
-            cap: ParagraphBlock | None = None
-            found_delta = None
+            # Gather the visual's text pieces: its Figure/Table caption (above
+            # OR below) PLUS a "Source: …" attribution line directly below. A
+            # table with a "Table N" caption above AND a Source line below keeps
+            # BOTH — they're all part of the same figure/table.
+            pieces: list[ParagraphBlock] = []
+            have_caption = False
+            have_source = False
             for delta in (1, -1, 2, -2):
                 neighbor = block_by_ri.get(ri + delta)
                 if neighbor is None or id(neighbor) in consumed_ids:
                     continue
-                # A "Source: …" attribution only attaches as the block directly
-                # after the image (delta == 1), never as a regular caption above.
-                if _is_caption_block_pages(neighbor) or (
-                    delta == 1 and _is_source_attribution(neighbor)
-                ):
-                    cap = neighbor
-                    found_delta = delta
+                if not have_caption and _is_caption_block_pages(neighbor):
+                    pieces.append(neighbor)
+                    have_caption = True
+                elif not have_source and delta > 0 and _is_source_attribution(neighbor):
+                    # Source attribution only attaches directly below the image.
+                    pieces.append(neighbor)
+                    have_source = True
+                if have_caption and have_source:
                     break
-            if cap is None:
+            if not pieces:
                 _cont_log(f"    image ri={ri} role={img.role}: no caption found")
                 continue
+            # Order top→bottom so a caption above reads before a source below.
+            pieces.sort(key=lambda b: _union_bbox(b.boxes).y0 if b.boxes else 0.0)
+            img.caption_text = "\n".join(b.text for b in pieces)
             _cont_log(
-                f"    image ri={ri} role={img.role} merge caption from delta={found_delta} "
-                f"role={cap.role} text={_snip(cap.text)!r}"
+                f"    image ri={ri} role={img.role} merge {len(pieces)} piece(s): "
+                f"{[_snip(b.text) for b in pieces]}"
             )
-            img.caption_text = cap.text
-            cap_bboxes = list(cap.boxes or [])
+            cap_bboxes = [bb for b in pieces for bb in (b.boxes or [])]
             if cap_bboxes:
                 cap_union = _union_bbox(cap_bboxes)
                 img.caption_bbox = cap_union
@@ -613,7 +623,8 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                     x1=max(img.bbox.x1, cap_union.x1),
                     y1=max(img.bbox.y1, cap_union.y1),
                 )
-            consumed_ids.add(id(cap))
+            for b in pieces:
+                consumed_ids.add(id(b))
         if consumed_ids:
             p.blocks = [b for b in p.blocks if id(b) not in consumed_ids]
     _cont_log("=== pages figure-caption merge end ===")
@@ -691,20 +702,18 @@ def _is_caption_block_linear(b: FullBlock) -> bool:
 
 
 def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
-    """Merge each figure/table with its caption — checked BOTH directions in
-    reading order. The caption may be:
-      - Marker-tagged with role='caption', or
-      - A paragraph whose text matches `_CAPTION_LIKE_RE` (EN + ES forms,
-        with or without numbering).
+    """Merge each figure/table with its attached text in reading order. A single
+    visual can carry BOTH a caption and a source line, and they're all absorbed:
+      - a caption — Marker role='caption' or a paragraph matching
+        `_CAPTION_LIKE_RE` (EN + ES, with or without numbering). Tables/schemes
+        put it ABOVE; figures put it BELOW. Both layouts are handled.
+      - a "Source: …" / "Fuente: …" attribution line directly below.
 
-    Tables and schemes commonly put captions ABOVE the visual; figures usually
-    put captions BELOW. Both layouts are handled.
-
-    Returns a new list with the caption block removed and its text/bbox stored
-    on the figure block as `caption_text` / `caption_bbox`. The figure block's
-    own `bbox` is expanded to the union so a single canvas crop on the
-    frontend renders figure + caption together (and so the explain raster
-    sent to Gemini includes the caption text alongside the image)."""
+    Returns a new list with the absorbed blocks removed and their text/bboxes
+    stored on the figure block as `caption_text` (joined top→bottom) /
+    `caption_bbox` (unioned). The figure's own `bbox` is expanded to the union
+    so a single canvas crop renders figure + caption + source together (and the
+    explain raster sent to Gemini includes that text alongside the image)."""
     _cont_log(f"=== linear figure-caption merge start: {len(blocks)} blocks ===")
     consumed: set[int] = set()
     merged: list[FullBlock] = []
@@ -713,36 +722,54 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             _cont_log(f"  [{i}] already consumed as caption")
             continue
         if b.role in ("figure", "table"):
-            cap_idx = None
-            # Forward neighbour: a Figure/Table caption OR a "Source: …"
-            # attribution line directly under the image. The backward neighbour
-            # accepts captions only — a Source line never belongs above.
-            if i + 1 < len(blocks) and i + 1 not in consumed and (
-                _is_caption_block_linear(blocks[i + 1])
-                or _is_source_attribution(blocks[i + 1])
-            ):
-                cap_idx = i + 1
-            elif i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
-                cap_idx = i - 1
-                if merged and merged[-1] is blocks[i - 1]:
+            # Collect the visual's text pieces: a Figure/Table caption (ABOVE
+            # for tables, BELOW for figures) PLUS a "Source: …" attribution line
+            # below. A table with a caption above AND a Source line below keeps
+            # BOTH. A Source line never belongs above the image.
+            piece_idxs: list[int] = []
+            have_caption = False
+            have_source = False
+            # ABOVE: caption only.
+            if i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
+                piece_idxs.append(i - 1)
+                have_caption = True
+            # BELOW: contiguous caption and/or source (e.g. "Figure N: …" then
+            # "Source: …"). Stop at the first block that is neither.
+            for j in (i + 1, i + 2):
+                if j >= len(blocks) or j in consumed:
+                    break
+                nb = blocks[j]
+                if not have_caption and _is_caption_block_linear(nb):
+                    piece_idxs.append(j)
+                    have_caption = True
+                elif not have_source and _is_source_attribution(nb):
+                    piece_idxs.append(j)
+                    have_source = True
+                else:
+                    break
+            if piece_idxs:
+                # The above-caption was already appended to `merged` on its own
+                # iteration — drop it so it isn't emitted as a standalone block.
+                if (i - 1) in piece_idxs and merged and merged[-1] is blocks[i - 1]:
                     merged.pop()
-            if cap_idx is not None:
-                cap = blocks[cap_idx]
+                caps = sorted((blocks[j] for j in piece_idxs), key=lambda c: c.bbox.y0)
                 _cont_log(
-                    f"  [{i}] {b.role} merge caption from [{cap_idx}] role={cap.role} "
-                    f"text={_snip(cap.text)!r}"
+                    f"  [{i}] {b.role} merge {len(caps)} piece(s) from {piece_idxs}: "
+                    f"{[_snip(c.text) for c in caps]}"
                 )
-                b.caption_text = cap.text
-                b.caption_bbox = cap.bbox
+                b.caption_text = "\n".join(c.text for c in caps)
+                b.caption_bbox = _union_bbox([c.bbox for c in caps])
                 b.bbox = BBox(
-                    x0=min(b.bbox.x0, cap.bbox.x0),
-                    y0=min(b.bbox.y0, cap.bbox.y0),
-                    x1=max(b.bbox.x1, cap.bbox.x1),
-                    y1=max(b.bbox.y1, cap.bbox.y1),
+                    x0=min(b.bbox.x0, b.caption_bbox.x0),
+                    y0=min(b.bbox.y0, b.caption_bbox.y0),
+                    x1=max(b.bbox.x1, b.caption_bbox.x1),
+                    y1=max(b.bbox.y1, b.caption_bbox.y1),
                 )
-                if cap.sentences:
-                    b.sentences = cap.sentences
-                consumed.add(cap_idx)
+                for c in caps:
+                    if c.sentences:
+                        b.sentences = c.sentences
+                        break
+                consumed.update(piece_idxs)
             else:
                 _cont_log(f"  [{i}] {b.role} no adjacent caption found")
         merged.append(b)
