@@ -166,13 +166,15 @@ export default function LinearReader({
     return ids
   }, [linearBlocks, chainPayloads])
 
-  // Non-paragraph blocks (figures, captions, etc.) between two paragraphs that
-  // belong to the same continuation chain are deferred to render after the chain
-  // ends, so they don't visually interrupt merged paragraphs.
+  // Non-paragraph blocks between two paragraphs of the same continuation chain
+  // are relocated so they don't visually break the merged paragraph:
+  //   - callouts (boxed/shaded inserts) render ABOVE the merged paragraph;
+  //   - everything else (figures, captions, …) defers to AFTER the chain.
   const renderList = useMemo(() => {
     const result = []
     const deferred = []
     let lastRenderedIdx = -1
+    let chainHeadResultIdx = -1   // result index of the open chain's head, or -1
 
     const emit = (origIdx) => {
       result.push({ origIdx, prevOrigIdx: lastRenderedIdx })
@@ -194,7 +196,13 @@ export default function LinearReader({
     for (let i = 0; i < linearBlocks.length; i++) {
       const b = linearBlocks[i]
       if (b?.role !== 'paragraph') {
-        if (nextParaIsContinuation(i)) {
+        if (b?.role === 'callout' && chainHeadResultIdx >= 0 && nextParaIsContinuation(i)) {
+          // A callout that interrupted a merged paragraph → hoist it above the
+          // chain head (out of band; doesn't touch lastRenderedIdx).
+          const headEntry = result[chainHeadResultIdx]
+          result.splice(chainHeadResultIdx, 0, { origIdx: i, prevOrigIdx: headEntry?.prevOrigIdx ?? -1 })
+          chainHeadResultIdx++
+        } else if (nextParaIsContinuation(i)) {
           deferred.push(i)
         } else {
           flushDeferred()
@@ -202,7 +210,13 @@ export default function LinearReader({
         }
       } else {
         emit(i)
-        if (!nextParaIsContinuation(i)) flushDeferred()
+        if (chainHeadResultIdx === -1 && nextParaIsContinuation(i)) {
+          chainHeadResultIdx = result.length - 1   // this paragraph opened a chain
+        }
+        if (!nextParaIsContinuation(i)) {
+          flushDeferred()
+          chainHeadResultIdx = -1                  // chain closed
+        }
       }
     }
     flushDeferred()

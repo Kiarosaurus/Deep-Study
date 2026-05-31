@@ -50,7 +50,9 @@ class ParagraphBlock(BaseModel):
     # equation) when chaining continuations and reset on structural breaks.
     # Default "paragraph" preserves backward compatibility with analysis.json
     # files generated before this field was introduced.
-    role: Literal["paragraph", "caption", "equation", "code"] = "paragraph"
+    # "callout": a boxed/shaded text insert (border, distinct background or font
+    # colour) that interrupts the body. Excluded from continuation merging.
+    role: Literal["paragraph", "caption", "equation", "code", "callout"] = "paragraph"
     # Symbol-marked footnotes cited by this paragraph (Phase 1). Each is a
     # distinct green box in the reader and is fed into the explanation.
     footnotes: list[FootnoteAnnotation] = []
@@ -101,6 +103,7 @@ FullBlockRole = Literal[
     "code",
     "list",
     "algorithm",
+    "callout",
 ]
 
 

@@ -551,6 +551,95 @@ def _strong_footnote_prefix(text: str) -> bool:
     return not text[m.end():m.end() + 1].isdigit()
 
 
+# ── Callout boxes ────────────────────────────────────────────────────────────
+# A "callout" is a boxed/shaded text insert that interrupts the body — set off
+# by a rectangular border, a distinct background, or a distinct font colour.
+# Marker exposes none of these, so they're detected with PyMuPDF vector drawings
+# (fills/strokes) whose coordinate space matches Marker's (both PDF points,
+# top-left origin). Thresholds are conservative; tune on real atypical papers.
+_CALLOUT_MIN_W = 60.0           # pt — narrower ⇒ a rule/line, not a box
+_CALLOUT_MIN_H = 18.0           # pt
+_CALLOUT_MAX_AREA_FRAC = 0.7    # bigger ⇒ page background, not a callout
+_CALLOUT_INSIDE_FRAC = 0.6      # a text block this much inside a region ⇒ callout
+
+
+def _is_whiteish(rgb) -> bool:
+    """A PyMuPDF colour (0..1 float tuple) that is white / near-white / unset."""
+    if not rgb:
+        return True
+    return all(c >= 0.92 for c in rgb[:3])
+
+
+def _merge_callout_boxes(boxes: list[BBox]) -> list[BBox]:
+    """Union overlapping/nested rects (a callout often comes as separate fill +
+    border drawings)."""
+    merged: list[BBox] = []
+    for b in sorted(boxes, key=lambda x: (x.y0, x.x0)):
+        for i, m in enumerate(merged):
+            if not (b.x1 < m.x0 or b.x0 > m.x1 or b.y1 < m.y0 or b.y0 > m.y1):
+                merged[i] = BBox(
+                    x0=min(m.x0, b.x0), y0=min(m.y0, b.y0),
+                    x1=max(m.x1, b.x1), y1=max(m.y1, b.y1),
+                )
+                break
+        else:
+            merged.append(b)
+    return merged
+
+
+def _detect_callout_regions(pdf_bytes: bytes) -> dict[int, list[BBox]]:
+    """Per-page bboxes of callout boxes (shaded fill OR rectangular border, of
+    plausible size). Returns {page_no: [BBox, …]}. Best-effort — returns {} if
+    PyMuPDF is unavailable or the PDF can't be opened."""
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return {}
+    regions: dict[int, list[BBox]] = {}
+    try:
+        for pno, page in enumerate(doc, start=1):
+            page_area = max(1.0, page.rect.width * page.rect.height)
+            boxes: list[BBox] = []
+            try:
+                drawings = page.get_drawings()
+            except Exception:
+                drawings = []
+            for d in drawings:
+                r = d.get("rect")
+                if r is None:
+                    continue
+                if r.width < _CALLOUT_MIN_W or r.height < _CALLOUT_MIN_H:
+                    continue
+                if r.width * r.height > _CALLOUT_MAX_AREA_FRAC * page_area:
+                    continue
+                shaded = not _is_whiteish(d.get("fill"))
+                bordered = d.get("type") in ("s", "fs") and d.get("color") is not None
+                if shaded or bordered:
+                    boxes.append(BBox(
+                        x0=round(r.x0, 2), y0=round(r.y0, 2),
+                        x1=round(r.x1, 2), y1=round(r.y1, 2),
+                    ))
+            if boxes:
+                regions[pno] = _merge_callout_boxes(boxes)
+    finally:
+        doc.close()
+    return regions
+
+
+def _in_callout_region(bbox: BBox, regions: list[BBox] | None) -> bool:
+    """True when most of `bbox`'s area sits inside a callout region."""
+    if not regions:
+        return False
+    area = max(1e-6, (bbox.x1 - bbox.x0) * (bbox.y1 - bbox.y0))
+    for r in regions:
+        ix = max(0.0, min(bbox.x1, r.x1) - max(bbox.x0, r.x0))
+        iy = max(0.0, min(bbox.y1, r.y1) - max(bbox.y0, r.y0))
+        if ix * iy >= _CALLOUT_INSIDE_FRAC * area:
+            return True
+    return False
+
+
 def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
     """Classify a block's horizontal placement on its page: 'full' (spans the
     content width — single-column / full-width), 'left' (left column), 'right'
@@ -1547,7 +1636,7 @@ def _run_marker(pdf_bytes: bytes, *, disable_ocr: bool = False):
             pass
 
 
-def _extract_pages_from_document(document, line_cache: dict | None = None) -> list[PageBlocks]:
+def _extract_pages_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None) -> list[PageBlocks]:
     output: list[PageBlocks] = []
     stop_content = False
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
@@ -1677,12 +1766,21 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 ):
                     continue
 
+            role = _role_for_text_block(bt)
+            # Boxed/shaded insert interrupting the body → callout (excluded from
+            # continuation merging; kept transparent to cross-page state).
+            if role == "paragraph" and _in_callout_region(
+                bbox, (callout_regions or {}).get(page_idx + 1)
+            ):
+                role = "callout"
+
             is_cont = (
-                cross_page_candidate
+                role == "paragraph"
+                and cross_page_candidate
                 and bt != "Caption"
                 and _is_continuation(last_emitted_text, text)
             )
-            if bt != "Caption":
+            if role != "callout" and bt != "Caption":
                 cross_page_candidate = False
 
             sentences = _build_sentences(text, inner_lines)
@@ -1693,13 +1791,14 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 sentences=sentences,
                 reading_index=reading_idx,
                 continuation=is_cont,
-                role=_role_for_text_block(bt),
+                role=role,
             )
             paragraphs.append(pblock)
-            if pblock.role == "paragraph":
+            if role == "paragraph":
                 page_paras.append((pblock, block))
             reading_idx += 1
-            last_emitted_text = text
+            if role != "callout":
+                last_emitted_text = text
 
         if page_idx == 0:
             pre_abstract = False
@@ -1720,7 +1819,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
 def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
-    pages = _extract_pages_from_document(document)
+    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes))
     _merge_figure_captions_pages(pages)
     _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
@@ -1786,7 +1885,7 @@ def _drop_decorative_icons_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     ]
 
 
-def _extract_linear_from_document(document, line_cache: dict | None = None) -> list[FullBlock]:
+def _extract_linear_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None) -> list[FullBlock]:
     """Walk the whole Marker document in global reading order.
 
     Emits a FullBlock for every layout block (title, authors, headers, paragraphs,
@@ -1985,6 +2084,12 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 continue
 
             role = _role_for_text_block(bt)
+            # Boxed/shaded insert interrupting the body → callout (excluded from
+            # continuation merging; kept transparent to cross-page state).
+            if role == "paragraph" and _in_callout_region(
+                bbox, (callout_regions or {}).get(page_no)
+            ):
+                role = "callout"
 
             if page_idx == 0:
                 if _is_hard_noise(text):
@@ -2009,7 +2114,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
             # but their text still updates `last_emitted_text` so a later
             # paragraph on the same page can check continuation against it —
             # same behaviour as the per-page pipeline.
-            if role != "caption":
+            if role not in ("caption", "callout"):
                 cross_page_candidate = False
 
             _extract_log(
@@ -2029,7 +2134,8 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
             if role == "paragraph":
                 page_paras.append((emitted, block))
             reading_index += 1
-            last_emitted_text = text
+            if role != "callout":
+                last_emitted_text = text
 
         if page_idx == 0:
             pre_abstract = False
@@ -2065,7 +2171,7 @@ def _clip_vertical_overlaps_linear(blocks: list[FullBlock]) -> None:
 def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
-    blocks = _extract_linear_from_document(document)
+    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes))
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
     blocks = _drop_decorative_icons_linear(blocks)
@@ -2092,8 +2198,9 @@ def extract_both(
     """
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     line_cache: dict[int, list[LineBlock]] = {}
-    pages  = _extract_pages_from_document(document, line_cache)
-    linear = _extract_linear_from_document(document, line_cache)
+    callout_regions = _detect_callout_regions(pdf_bytes)
+    pages  = _extract_pages_from_document(document, line_cache, callout_regions)
+    linear = _extract_linear_from_document(document, line_cache, callout_regions)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
     linear = _drop_decorative_icons_linear(linear)
