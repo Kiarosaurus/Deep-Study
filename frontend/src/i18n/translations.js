@@ -62,6 +62,8 @@ export const TRANSLATIONS = {
     'viewer.fit100': 'Fit to 100%',
     'viewer.zoomLarger': 'Larger text (+)',
     'viewer.explainParagraph': 'Explain paragraph',
+    'viewer.hidePanel': 'Hide panel (.)',
+    'viewer.showPanel': 'Show panel (.)',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? 'Explain table' : role === 'algorithm' ? 'Explain algorithm' : 'Explain figure',
     'viewer.backToMenu': 'Back to main menu',
@@ -185,6 +187,8 @@ export const TRANSLATIONS = {
     'viewer.fit100': 'Ajustar a 100%',
     'viewer.zoomLarger': 'Texto más grande (+)',
     'viewer.explainParagraph': 'Explicar párrafo',
+    'viewer.hidePanel': 'Ocultar panel (.)',
+    'viewer.showPanel': 'Mostrar panel (.)',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? 'Explicar tabla' : role === 'algorithm' ? 'Explicar algoritmo' : 'Explicar figura',
     'viewer.backToMenu': 'Volver al menú principal',
@@ -306,6 +310,8 @@ export const TRANSLATIONS = {
     'viewer.fit100': '還原 100%',
     'viewer.zoomLarger': '放大文字（+）',
     'viewer.explainParagraph': '解說段落',
+    'viewer.hidePanel': '隱藏面板（.）',
+    'viewer.showPanel': '顯示面板（.）',
     'viewer.explainBlock': ({ role }) =>
       role === 'table' ? '解說表格' : role === 'algorithm' ? '解說演算法' : '解說圖表',
     'viewer.backToMenu': '返回主選單',

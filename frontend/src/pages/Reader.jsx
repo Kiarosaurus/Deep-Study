@@ -131,6 +131,9 @@ export default function Reader() {
 
   const [tab, setTab] = useState('global')
   const [explainMode, setExplainMode] = useState('conceptos')
+  // Right panel (global map / explanation) visibility. Toggled by the viewer
+  // button and the "." shortcut; auto-opened by the content shortcuts.
+  const [panelHidden, setPanelHidden] = useState(false)
 
   const uiStateRef = useRef({ tab, explainMode })
   useEffect(() => {
@@ -316,6 +319,7 @@ export default function Reader() {
 
   const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
+    setPanelHidden(false)  // explaining always reveals the panel
     const { initialIndex = 0, role, page, bbox, caption_text, footnotes = [] } = opts
     const isFigure = role === 'figure' || role === 'table' || role === 'algorithm'
     // Explanation language chosen at upload (persisted in the analysis). Drives
@@ -587,6 +591,7 @@ export default function Reader() {
 
       if (e.key === '<') {
         e.preventDefault()
+        setPanelHidden(false)  // a closed panel opens onto the explanation
         const currentTab = uiStateRef.current.tab
         const currentMode = uiStateRef.current.explainMode
 
@@ -611,20 +616,21 @@ export default function Reader() {
       }
 
       if (e.key === '-') {
+        setPanelHidden(false)  // a closed panel opens onto the global map
         setTab('global')
         uiStateRef.current = { ...uiStateRef.current, tab: 'global' }
         return
       }
       if (e.key === ',') {
+        setPanelHidden(false)
         setTab('explain')
         setExplainMode('contexto')
         uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
         return
       }
       if (e.key === '.') {
-        setTab('explain')
-        setExplainMode('conceptos')
-        uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' }
+        e.preventDefault()
+        setPanelHidden(h => !h)  // toggle the right panel
         return
       }
       if (e.key === 'ArrowRight') {
@@ -717,25 +723,43 @@ export default function Reader() {
           explanation={explanation}
           onHome={handleHome}
         />
+        {/* Toggle the right panel (global map / explanation). Icon flips to the
+            opposite chevron when the panel is hidden. Also bound to "." */}
+        <button
+          onClick={() => setPanelHidden(h => !h)}
+          title={panelHidden ? t('viewer.showPanel') : t('viewer.hidePanel')}
+          aria-label={panelHidden ? t('viewer.showPanel') : t('viewer.hidePanel')}
+          className="absolute bottom-4 right-4 z-30 w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="15" y1="3" x2="15" y2="21" />
+            {panelHidden
+              ? <polyline points="10 9 7 12 10 15" />
+              : <polyline points="7 9 10 12 7 15" />}
+          </svg>
+        </button>
       </div>
 
-      <div className="border-l border-slate-200 overflow-hidden min-w-0" style={{ flex: 3 }}>
-        <Sidebar
-          globalMap={analysis?.global_map}
-          explanation={explanation}
-          loadingGlobal={false}
-          loadingExplain={loadingExplain}
-          errorGlobal={null}
-          errorExplain={errorExplain}
-          currentIndex={currentIndex}
-          onIndexChange={setCurrentIndex}
-          retryInfo={retryInfo}
-          tab={tab}
-          onTabChange={setTab}
-          explainMode={explainMode}
-          onExplainModeChange={setExplainMode}
-        />
-      </div>
+      {!panelHidden && (
+        <div className="border-l border-slate-200 overflow-hidden min-w-0" style={{ flex: 3 }}>
+          <Sidebar
+            globalMap={analysis?.global_map}
+            explanation={explanation}
+            loadingGlobal={false}
+            loadingExplain={loadingExplain}
+            errorGlobal={null}
+            errorExplain={errorExplain}
+            currentIndex={currentIndex}
+            onIndexChange={setCurrentIndex}
+            retryInfo={retryInfo}
+            tab={tab}
+            onTabChange={setTab}
+            explainMode={explainMode}
+            onExplainModeChange={setExplainMode}
+          />
+        </div>
+      )}
     </div>
   )
 }
