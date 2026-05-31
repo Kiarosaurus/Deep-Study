@@ -28,6 +28,9 @@ class FootnoteAnnotation(BaseModel):
     text: str
     bbox: BBox
     marker: str = ""
+    # Enlargement so the footnote's (smaller) font renders at body-text size in
+    # the reflow reader: body line-height / footnote line-height, clamped ≥ 1.
+    font_scale: float = 1.0
 
 
 class ParagraphBlock(BaseModel):

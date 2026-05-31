@@ -473,12 +473,21 @@ def _host_bbox(host) -> BBox | None:
     return _union_bbox(boxes) if boxes else None
 
 
-def _try_attach_footnote(text, bbox, page_paras, document, sup_cache) -> bool:
+def _footnote_font_scale(lines, body_lh: float) -> float:
+    """Enlargement so a footnote's (smaller) font renders at body size in the
+    reflow reader: body line-height / footnote line-height, clamped [1.0, 2.0]."""
+    fl = _estimate_line_height([l.bbox for l in lines]) if lines else 0.0
+    if fl <= 0 or body_lh <= 0:
+        return 1.0
+    return max(1.0, min(2.0, body_lh / fl))
+
+
+def _try_attach_footnote(text, bbox, lines, body_lh, page_paras, document, sup_cache) -> bool:
     """If `text` is a symbol-marked footnote AND a paragraph already emitted on
-    this page cites that symbol, attach it (text + distinct bbox) to that
-    paragraph and return True. Otherwise return False so the caller drops the
-    footnote as before. `page_paras` is a list of (host_block, marker_block) in
-    emission order.
+    this page cites that symbol, attach it (text + distinct bbox + font scale)
+    to that paragraph and return True. Otherwise return False so the caller
+    drops the footnote as before. `page_paras` is a list of (host_block,
+    marker_block) in emission order; `lines`/`body_lh` size the font scale.
 
     Three matching tiers:
       1. a paragraph carries the symbol as a SUPERSCRIPT span (Marker's flag —
@@ -492,18 +501,23 @@ def _try_attach_footnote(text, bbox, page_paras, document, sup_cache) -> bool:
     sym = _leading_footnote_symbol(text)
     if not sym or not text:
         return False
+    scale = _footnote_font_scale(lines, body_lh)
+
+    def _attach(host, how) -> bool:
+        host.footnotes.append(
+            FootnoteAnnotation(text=text, bbox=bbox, marker=sym, font_scale=scale)
+        )
+        _cont_log(f"    footnote {sym!r} → host ({how}) {_snip(host.text)!r}")
+        return True
+
     # Tier 1 — superscript-tagged reference.
     for host, marker_block in reversed(page_paras):
         if sym in _superscript_symbols(marker_block, document, sup_cache):
-            host.footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
-            _cont_log(f"    footnote {sym!r} → host (sup) {_snip(host.text)!r}")
-            return True
+            return _attach(host, "sup")
     hits = [host for host, _ in page_paras if sym in (host.text or "")]
     # Tier 2 — exactly one paragraph carries the symbol.
     if len(hits) == 1:
-        hits[0].footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
-        _cont_log(f"    footnote {sym!r} → host (text) {_snip(hits[0].text)!r}")
-        return True
+        return _attach(hits[0], "text")
     # Tier 3 — recurring unambiguous-footnote symbol: nearest carrier above.
     if len(hits) > 1 and (len(sym) >= 2 or sym in "†‡§¶‖∥"):
         above = [
@@ -513,10 +527,7 @@ def _try_attach_footnote(text, bbox, page_paras, document, sup_cache) -> bool:
             and _x_overlaps(hb.x0, hb.x1, bbox.x0, bbox.x1)
         ]
         if above:
-            host = max(above, key=lambda c: c[0])[1]
-            host.footnotes.append(FootnoteAnnotation(text=text, bbox=bbox, marker=sym))
-            _cont_log(f"    footnote {sym!r} → host (nearest above) {_snip(host.text)!r}")
-            return True
+            return _attach(max(above, key=lambda c: c[0])[1], "nearest above")
     return False
 
 
@@ -1582,7 +1593,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                     _union_bbox([l.bbox for l in f_lines])
                     if f_lines else _polygon_to_bbox(block.polygon)
                 )
-                _try_attach_footnote(f_text, f_bbox, page_paras, document, sup_cache)
+                _try_attach_footnote(f_text, f_bbox, f_lines, body_lh, page_paras, document, sup_cache)
                 continue
             if bt in _DROP_TYPES:
                 continue
@@ -1636,7 +1647,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
-                _try_attach_footnote(text, bbox, page_paras, document, sup_cache)
+                _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache)
                 continue
 
             # Body-size footnote opening with an unambiguous symbol marker
@@ -1646,7 +1657,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 and id(block) not in rescued_footnotes
                 and _strong_footnote_prefix(text)
             ):
-                _try_attach_footnote(text, bbox, page_paras, document, sup_cache)
+                _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache)
                 continue
 
             if _is_stop_header(text):
@@ -1838,7 +1849,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 f_lines = _collect_lines(block, document, line_cache)
                 f_text = " ".join(l.text for l in f_lines).strip()
                 f_bbox = _union_bbox([l.bbox for l in f_lines]) if f_lines else bbox
-                if _try_attach_footnote(f_text, f_bbox, page_paras, document, sup_cache):
+                if _try_attach_footnote(f_text, f_bbox, f_lines, body_lh, page_paras, document, sup_cache):
                     _extract_log(f"    → FOOTNOTE attached {_snip(f_text)!r}")
                 else:
                     _extract_log(f"    → SKIP footnote (no symbol/host) {_snip(f_text)!r}")
@@ -1943,7 +1954,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
-                if _try_attach_footnote(text, bbox, page_paras, document, sup_cache):
+                if _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache):
                     _extract_log(f"    → FOOTNOTE attached (by font) {_snip(text)!r}")
                 else:
                     _extract_log(f"    → SKIP footnote_by_font {_snip(text)!r}")
@@ -1957,7 +1968,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                 and not was_rescued
                 and _strong_footnote_prefix(text)
             ):
-                if _try_attach_footnote(text, bbox, page_paras, document, sup_cache):
+                if _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache):
                     _extract_log(f"    → FOOTNOTE attached (by marker) {_snip(text)!r}")
                 else:
                     _extract_log(f"    → SKIP footnote (marker, no host) {_snip(text)!r}")

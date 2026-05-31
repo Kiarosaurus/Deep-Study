@@ -255,6 +255,83 @@ export default function LinearReader({
   )
 }
 
+// A symbol-marked footnote rendered beneath its paragraph in tracking mode.
+// Crops the same page canvas at the footnote bbox (so the real footnote text
+// shows) and is ALWAYS visible. The green bbox is an overlay ON TOP, revealed
+// only while the footnote or its paragraph is hovered (shared chainKey) — the
+// reflow counterpart of the PDF overlay's green box. No button — the footnote
+// text rides into the explanation via the paragraph's ✦ payload.
+const FootnoteCrop = memo(function FootnoteCrop({
+  fnBbox, srcCanvas, pageDim, displayWidth, maxBoxWidth, fontScale = 1,
+  hovered, onHoverChange, chainKey,
+}) {
+  const canvasRef = useRef(null)
+  const bbW = Math.max(0, fnBbox.x1 - fnBbox.x0)
+  const bbH = Math.max(0, fnBbox.y1 - fnBbox.y0)
+  const aspect = bbW > 0 ? bbH / bbW : 0
+  const pxPerPt = pageDim
+    ? displayWidth / Math.max(1, pageDim.width * SINGLE_COL_PT_RATIO)
+    : null
+  // Footnotes are set in a smaller font; `fontScale` (body lh / footnote lh)
+  // enlarges the crop so its text renders at body size. Clamp to at least the
+  // paragraph width and at most the max reading width.
+  const naturalPx = pxPerPt ? Math.max(1, Math.round(bbW * pxPerPt * fontScale)) : displayWidth
+  const cap = Math.max(displayWidth, maxBoxWidth || displayWidth)
+  const canvasWidth = Math.max(displayWidth, Math.min(naturalPx, cap))
+  const displayHeight = Math.max(1, Math.round(canvasWidth * aspect))
+
+  useEffect(() => {
+    if (!srcCanvas) return
+    const canvas = canvasRef.current
+    if (!canvas || canvasWidth <= 0 || bbW <= 0 || bbH <= 0) return
+    const dpr = window.devicePixelRatio || 1
+    const pw = Math.max(1, Math.round(canvasWidth * dpr))
+    const ph = Math.max(1, Math.round(displayHeight * dpr))
+    if (canvas.width !== pw) canvas.width = pw
+    if (canvas.height !== ph) canvas.height = ph
+    canvas.style.width = `${canvasWidth}px`
+    canvas.style.height = `${displayHeight}px`
+    const ctx = canvas.getContext('2d')
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    ctx.clearRect(0, 0, pw, ph)
+    ctx.drawImage(
+      srcCanvas,
+      fnBbox.x0 * PDF_RENDER_SCALE, fnBbox.y0 * PDF_RENDER_SCALE,
+      bbW * PDF_RENDER_SCALE, bbH * PDF_RENDER_SCALE,
+      0, 0, pw, ph,
+    )
+  }, [srcCanvas, canvasWidth, displayHeight, fnBbox.x0, fnBbox.y0, bbW, bbH])
+
+  if (!srcCanvas || bbW <= 0 || bbH <= 0) return null
+  return (
+    <div
+      className="relative rounded-sm"
+      style={{
+        marginTop: 4,
+        width: canvasWidth,
+        // Centre on the paragraph's axis; a crop wider than the column spills
+        // symmetrically into the reading margins.
+        marginLeft: (displayWidth - canvasWidth) / 2,
+      }}
+      onMouseEnter={() => onHoverChange?.(chainKey, true)}
+      onMouseLeave={() => onHoverChange?.(chainKey, false)}
+    >
+      <canvas ref={canvasRef} style={{ display: 'block', borderRadius: 2 }} />
+      {/* green bbox — overlaid on top, only while hovered */}
+      <div
+        className="absolute inset-0 rounded-sm pointer-events-none transition-opacity duration-150"
+        style={{
+          background: 'rgba(34,197,94,0.18)',
+          border: '1px solid rgba(34,197,94,0.6)',
+          opacity: hovered ? 1 : 0,
+        }}
+      />
+    </div>
+  )
+})
+
+
 // Shallow-prop memo. Stable refs for callbacks (handleHoverChange/onExplain/
 // requestPage are useCallback) + per-page srcCanvas references mean a cache
 // publish only re-renders blocks of the page that was just rendered/evicted,
@@ -408,6 +485,7 @@ const BlockCrop = memo(function BlockCrop({
     boundaries: [],
     mergedSentences: block.sentences ?? [],
     mergedToOrig: (block.sentences ?? []).map((_, i) => [i]),
+    footnotes: (block.footnotes ?? []).map(f => f.text),
   }
   const isActive  = isInteractive && (
     (!!payload.text && activeParagraph?.text === payload.text)
@@ -642,6 +720,7 @@ const BlockCrop = memo(function BlockCrop({
                     payload.text,
                     payload.mergedSentences ?? payload.sentences,
                     block.flat_block_ref ?? block.paragraph_ref ?? null,
+                    { footnotes: payload.footnotes ?? [] },
                   )
                 }
               }}
@@ -652,6 +731,27 @@ const BlockCrop = memo(function BlockCrop({
           )}
         </div>
       )}
+
+      {/* Symbol-marked footnotes — always shown beneath the paragraph. The
+          green bbox overlay (inside FootnoteCrop) only appears while the
+          footnote or its paragraph is hovered (shared chainKey). */}
+      {block.role === 'paragraph' && isRendered
+        && (block.footnotes ?? []).map((fn, k) => (
+          fn?.bbox ? (
+            <FootnoteCrop
+              key={`fn-${k}`}
+              fnBbox={fn.bbox}
+              srcCanvas={srcCanvas}
+              pageDim={pageDim}
+              displayWidth={boxWidth}
+              maxBoxWidth={maxBoxWidth}
+              fontScale={fn.font_scale ?? 1}
+              hovered={hovered}
+              onHoverChange={onHoverChange}
+              chainKey={chainKey}
+            />
+          ) : null
+        ))}
     </div>
   )
 })
