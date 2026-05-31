@@ -363,6 +363,57 @@ def _estimate_line_height(boxes: list[BBox]) -> float:
     return hs[len(hs) // 2]
 
 
+# ── Footnote-by-font detection ───────────────────────────────────────────────
+# Marker sometimes labels a real footnote as body "Text", so it slips past
+# `_DROP_TYPES` and surfaces as a paragraph. Footnotes are set in a smaller
+# font than the body and sit at the column bottom — require BOTH so a normal
+# last paragraph or a mid-column small block is never dropped.
+_BODY_TEXT_TYPES = frozenset({"Text", "TextInlineMath", "ListItem", "ListGroup"})
+_FOOTNOTE_FONT_RATIO = 0.82   # block line height ≤ this × body line height → small
+
+
+def _page_footnote_context(page, document, line_cache=None):
+    """Per-page (body_line_height, [body-sized block bboxes]) for footnote-by-
+    font detection. The body line height is the median over all body-text lines
+    (a font-size proxy); `body_bboxes` holds only blocks whose own font is body-
+    sized, so a footnote stacked above another footnote isn't kept alive by the
+    smaller block beneath it."""
+    rows: list[tuple[list, float]] = []  # (line bboxes, block median height)
+    heights: list[float] = []
+    for block in _iter_layout_blocks(page):
+        if _block_type_name(block) not in _BODY_TEXT_TYPES:
+            continue
+        lines = _collect_lines(block, document, line_cache)
+        hs = [l.bbox.y1 - l.bbox.y0 for l in lines if l.bbox.y1 - l.bbox.y0 > 0]
+        if not hs:
+            continue
+        heights.extend(hs)
+        rows.append(([l.bbox for l in lines], sorted(hs)[len(hs) // 2]))
+    heights.sort()
+    body_lh = heights[len(heights) // 2] if heights else 0.0
+    body_bboxes = [
+        _union_bbox(boxes)
+        for boxes, blk_lh in rows
+        if body_lh > 0 and blk_lh >= _FOOTNOTE_FONT_RATIO * body_lh
+    ]
+    return body_lh, body_bboxes
+
+
+def _is_footnote_by_font(inner_lines, bbox: BBox, body_lh: float, body_bboxes) -> bool:
+    """True when a body Text block is really a footnote: its font is clearly
+    smaller than the body AND nothing body-sized sits below it in the same
+    column (i.e. it is the trailing block of its column)."""
+    if body_lh <= 0 or not inner_lines:
+        return False
+    lh = _estimate_line_height([l.bbox for l in inner_lines])
+    if lh <= 0 or lh > _FOOTNOTE_FONT_RATIO * body_lh:
+        return False
+    for bb in body_bboxes:
+        if bb.y0 > bbox.y1 - _GEOM_TOL and _x_overlaps(bbox.x0, bbox.x1, bb.x0, bb.x1):
+            return False  # body text continues below → mid-column, not a footnote
+    return True
+
+
 def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
     """Classify a block's horizontal placement on its page: 'full' (spans the
     content width — single-column / full-width), 'left' (left column), 'right'
@@ -1385,6 +1436,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
         reading_idx = 0
         rescued_footnotes = _rescue_footnotes_on_page(page)
         page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
+        body_lh, body_bboxes = _page_footnote_context(page, document, line_cache)
 
         for block in page_blocks:
             if stop_content:
@@ -1436,6 +1488,15 @@ def _extract_pages_from_document(document, line_cache: dict | None = None) -> li
                 if eq_latex:
                     text = eq_latex
             if not text or len(text.split()) < 3:
+                continue
+
+            if (
+                bt in _BODY_TEXT_TYPES
+                and id(block) not in rescued_footnotes
+                and not _CAPTION_LIKE_RE.match(text)
+                and not _SOURCE_ATTRIBUTION_RE.match(text)
+                and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
+            ):
                 continue
 
             if _is_stop_header(text):
@@ -1596,6 +1657,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
 
         rescued_footnotes = _rescue_footnotes_on_page(page)
         page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
+        body_lh, body_bboxes = _page_footnote_context(page, document, line_cache)
         _extract_log(f"=== page {page_no} rescued_footnotes={len(rescued_footnotes)} ===")
         for block in page_blocks:
             if stop_content:
@@ -1707,6 +1769,16 @@ def _extract_linear_from_document(document, line_cache: dict | None = None) -> l
                     text = eq_latex
             if not text or len(text.split()) < 3:
                 _extract_log(f"    → SKIP too_short {_snip(text)!r}")
+                continue
+
+            if (
+                bt in _BODY_TEXT_TYPES
+                and not was_rescued
+                and not _CAPTION_LIKE_RE.match(text)
+                and not _SOURCE_ATTRIBUTION_RE.match(text)
+                and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
+            ):
+                _extract_log(f"    → SKIP footnote_by_font {_snip(text)!r}")
                 continue
 
             if _is_stop_header(text):
