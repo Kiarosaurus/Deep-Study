@@ -1,5 +1,6 @@
 import { forwardRef } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
+import { useSettings } from '../settings/SettingsContext'
 
 function SkeletonGlobal() {
   return (
@@ -111,6 +112,7 @@ function GlobalMapView({ globalMap }) {
 
 function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) {
   const { t } = useUiLang()
+  const { settings } = useSettings()
   const total = items.length
 
   if (total === 0) {
@@ -175,29 +177,31 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) 
         )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => onIndexChange(i => i - 1)}
-          disabled={!canPrev}
-          title={t('sidebar.prev')}
-          className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-        >
-          ←
-        </button>
+      {settings.visibility.conceptScroll && (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onIndexChange(i => i - 1)}
+            disabled={!canPrev}
+            title={t('sidebar.prev')}
+            className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+          >
+            ←
+          </button>
 
-        <span className="flex-1 text-center text-[11px] text-slate-400 font-medium tabular-nums select-none">
-          {t('sidebar.sentenceCounter', { i: currentIndex + 1, total })}
-        </span>
+          <span className="flex-1 text-center text-[11px] text-slate-400 font-medium tabular-nums select-none">
+            {t('sidebar.sentenceCounter', { i: currentIndex + 1, total })}
+          </span>
 
-        <button
-          onClick={() => onIndexChange(i => i + 1)}
-          disabled={!canNext}
-          title={t('sidebar.next')}
-          className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
-        >
-          →
-        </button>
-      </div>
+          <button
+            onClick={() => onIndexChange(i => i + 1)}
+            disabled={!canNext}
+            title={t('sidebar.next')}
+            className="w-8 h-8 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+          >
+            →
+          </button>
+        </div>
+      )}
     </div>
   )
 }

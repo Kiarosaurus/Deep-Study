@@ -6,6 +6,7 @@ import OverwriteModal from '../components/OverwriteModal'
 import LanguageSwitcher from '../i18n/LanguageSwitcher'
 import { useUiLang } from '../i18n/LanguageContext'
 import { ThemeSwitch } from '../theme/ThemeToggle'
+import { SettingsButton } from '../settings/SettingsModal'
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -519,6 +520,10 @@ export default function Home() {
           <span className="text-xl">🔬</span>
           <span className="text-lg font-bold text-slate-800 tracking-tight">DeepStudy</span>
           <div className="ml-auto flex items-center gap-2.5">
+            <SettingsButton
+              className="w-9 h-9 flex items-center justify-center rounded-xl border transition-colors hover:text-indigo-600"
+              style={{ borderColor: 'var(--border)', background: 'var(--surface-2)', color: 'var(--text-muted)' }}
+            />
             <ThemeSwitch />
             <LanguageSwitcher />
           </div>

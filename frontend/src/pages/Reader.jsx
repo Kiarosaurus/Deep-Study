@@ -6,6 +6,7 @@ import Sidebar from '../components/Sidebar'
 import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
 import { useUiLang } from '../i18n/LanguageContext'
 import { ThemeButton } from '../theme/ThemeToggle'
+import { ACTIONS, useSettings } from '../settings/SettingsContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -119,6 +120,8 @@ function buildExplainError(err, t) {
 
 export default function Reader() {
   const { t } = useUiLang()
+  const { settings, isOpen: settingsOpen } = useSettings()
+  const { visibility, panelSide } = settings
   const { filename } = useParams()
   const navigate = useNavigate()
   const decoded = decodeURIComponent(filename)
@@ -172,6 +175,22 @@ export default function Reader() {
   const sidebarScrollRef = useRef(null)   // → Sidebar's inner scroll container
   useEffect(() => { focusAreaRef.current     = focusArea     }, [focusArea])
   useEffect(() => { isSidebarOpenRef.current = isSidebarOpen }, [isSidebarOpen])
+
+  // Active keybindings come from the selected hand in SettingsContext. Build a
+  // key→action lookup for the keydown handler; mirror the scroll keys + the
+  // modal-open flag into refs for the once-bound continuous-scroll listener.
+  const activeShortcuts = settings.shortcuts[settings.handMode]
+  const keyToAction = useMemo(() => {
+    const m = {}
+    for (const a of ACTIONS) { const key = activeShortcuts[a]; if (key) m[key] = a }
+    return m
+  }, [activeShortcuts])
+  const scrollKeysRef   = useRef({ up: 'w', down: 's' })
+  const settingsOpenRef = useRef(false)
+  useEffect(() => {
+    scrollKeysRef.current = { up: activeShortcuts.scrollUp, down: activeShortcuts.scrollDown }
+  }, [activeShortcuts])
+  useEffect(() => { settingsOpenRef.current = settingsOpen }, [settingsOpen])
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
 
@@ -501,6 +520,7 @@ export default function Reader() {
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {
     function onKey(e) {
+      if (settingsOpenRef.current) return  // settings modal owns the keyboard
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
@@ -598,28 +618,56 @@ export default function Reader() {
         }
       }
 
-      if (e.key === ' ' || e.code === 'Space') {
-        // Space is reserved for "center the current highlight" only — always
-        // swallow it so it can never fall through to the browser's native
-        // page-scroll (the cause of the stray scroll-down on repeated taps).
-        e.preventDefault()
-        const cur = items[currentIndex]
-        if (cur && activeParagraph) {
-          centerForItem(cur, false)
+      // Navigate concepts — shared by the configurable conceptPrev/Next keys
+      // and the fixed arrow keys. dir = +1 next, -1 previous.
+      const navConcept = (dir) => {
+        if (!activeParagraph) {
+          if (paragraphList[0]) dispatch(paragraphList[0], 0)
+          return
         }
-        return
+        if (dir > 0) {
+          if (currentIndex < items.length - 1) {
+            const nextIdx = currentIndex + 1
+            setCurrentIndex(nextIdx)
+            centerForItem(items[nextIdx], true)
+          } else {
+            const curIdx = paragraphList.findIndex(matchActive)
+            dispatch(paragraphList[curIdx + 1], 0)
+          }
+        } else {
+          if (currentIndex > 0) {
+            const nextIdx = currentIndex - 1
+            setCurrentIndex(nextIdx)
+            centerForItem(items[nextIdx], true)
+          } else {
+            const curIdx = paragraphList.findIndex(matchActive)
+            dispatch(paragraphList[curIdx - 1], 'last')
+          }
+        }
       }
 
-      // ── Immersive focus + panel shortcuts ────────────────────────────────
-      // Q: flip keyboard focus between the canvas and the sidebar.
-      if (e.key === 'q' || e.key === 'Q') {
+      // ── Configurable shortcut actions ────────────────────────────────────
+      // Keys come from SettingsContext (active hand) — never hard-coded
+      // letters. scrollUp/scrollDown are owned by the continuous-scroll effect.
+      const k = (e.key === ' ' || e.code === 'Space') ? ' '
+              : (typeof e.key === 'string' && e.key.length === 1) ? e.key.toLowerCase()
+              : null
+      const action = k ? keyToAction[k] : null
+
+      if (action === 'centerHighlight') {
+        // Center the current highlight only — always swallow so it never falls
+        // through to the browser's native page-scroll.
+        e.preventDefault()
+        const cur = items[currentIndex]
+        if (cur && activeParagraph) centerForItem(cur, false)
+        return
+      }
+      if (action === 'focusToggle') {
         e.preventDefault()
         setFocusArea(f => (f === 'canvas' ? 'sidebar' : 'canvas'))
         return
       }
-      // E: jump to the Explanation tab and toggle Contexto ⇄ Conceptos,
-      // force-opening the panel if it was hidden.
-      if (e.key === 'e' || e.key === 'E') {
+      if (action === 'explainTab') {
         e.preventDefault()
         setIsSidebarOpen(true)
         isSidebarOpenRef.current = true
@@ -629,8 +677,7 @@ export default function Reader() {
         uiStateRef.current = { tab: 'explain', explainMode: nextMode }
         return
       }
-      // R: jump to the Global Map tab, force-opening the panel if hidden.
-      if (e.key === 'r' || e.key === 'R') {
+      if (action === 'globalTab') {
         e.preventDefault()
         setIsSidebarOpen(true)
         isSidebarOpenRef.current = true
@@ -638,9 +685,7 @@ export default function Reader() {
         uiStateRef.current = { ...uiStateRef.current, tab: 'global' }
         return
       }
-      // Z: toggle the sidebar. Closing while it held focus hands focus back to
-      // the canvas so the ring and W/S never point at an invisible target.
-      if (e.key === 'z' || e.key === 'Z') {
+      if (action === 'toggleSidebar') {
         e.preventDefault()
         const next = !isSidebarOpenRef.current
         isSidebarOpenRef.current = next
@@ -651,6 +696,8 @@ export default function Reader() {
         }
         return
       }
+      if (action === 'conceptNext') { e.preventDefault(); navConcept(1); return }
+      if (action === 'conceptPrev') { e.preventDefault(); navConcept(-1); return }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -696,52 +743,17 @@ export default function Reader() {
         setIsSidebarOpen(o => !o)  // toggle the right panel
         return
       }
-      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
-        if (!activeParagraph) {
-          if (paragraphList[0]) {
-            e.preventDefault()
-            dispatch(paragraphList[0], 0)
-          }
-          return
-        }
-
-        e.preventDefault()
-        if (currentIndex < items.length - 1) {
-          const nextIdx = currentIndex + 1
-          setCurrentIndex(nextIdx)
-          centerForItem(items[nextIdx], true)
-        } else {
-          const curIdx = paragraphList.findIndex(matchActive)
-          dispatch(paragraphList[curIdx + 1], 0)
-        }
-      }
-
-      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
-        if (!activeParagraph) {
-          if (paragraphList[0]) {
-            e.preventDefault()
-            dispatch(paragraphList[0], 0)
-          }
-          return
-        }
-
-        e.preventDefault()
-        if (currentIndex > 0) {
-          const nextIdx = currentIndex - 1
-          setCurrentIndex(nextIdx)
-          centerForItem(items[nextIdx], true)
-        } else {
-          const curIdx = paragraphList.findIndex(matchActive)
-          dispatch(paragraphList[curIdx - 1], 'last')
-        }
-      }
+      // Fixed arrow keys always mirror conceptPrev/Next, regardless of the
+      // configured letter keys.
+      if (e.key === 'ArrowRight') { e.preventDefault(); navConcept(1); return }
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); navConcept(-1); return }
     }
 
     // Capture phase so focused Sidebar buttons don't swallow Space (their
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and
@@ -757,10 +769,10 @@ export default function Reader() {
     const SIDEBAR_STEP  = 64
 
     let rafId = null
-    let dir = 0                   // -1 up | +1 down | 0 idle
+    let dir = 0                       // -1 up | +1 down | 0 idle
     let speed = NORMAL
-    let activeKey = null          // 'w' | 's' currently driving the loop
-    const lastUp = { w: 0, s: 0 } // last keyup time per key → double-tap window
+    let activeKey = null              // 'up' | 'down' currently driving the loop
+    const lastUp = { up: 0, down: 0 } // last keyup time per key → double-tap window
 
     const loop = () => {
       const el = viewerRef.current?.getScrollContainer?.()
@@ -770,41 +782,50 @@ export default function Reader() {
     const start = () => { if (rafId == null) rafId = requestAnimationFrame(loop) }
     const stop  = () => { if (rafId != null) { cancelAnimationFrame(rafId); rafId = null } }
 
-    const norm = (e) => {
-      const k = e.key?.toLowerCase()
-      return k === 'w' || k === 's' ? k : null
+    // Resolve the event against the user's configured scroll keys (read live
+    // through a ref so remapping in settings takes effect without rebinding).
+    const dirOf = (e) => {
+      const k = (e.key === ' ' || e.code === 'Space') ? ' '
+              : (typeof e.key === 'string' && e.key.length === 1) ? e.key.toLowerCase()
+              : null
+      if (!k) return null
+      const { up, down } = scrollKeysRef.current
+      if (up && k === up) return 'up'
+      if (down && k === down) return 'down'
+      return null
     }
 
     const onKeyDown = (e) => {
+      if (settingsOpenRef.current) return
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
-      const k = norm(e)
-      if (!k) return
+      const which = dirOf(e)
+      if (!which) return
       e.preventDefault()
 
       if (focusAreaRef.current === 'sidebar') {
         const el = sidebarScrollRef.current
-        if (el) el.scrollBy({ top: k === 's' ? SIDEBAR_STEP : -SIDEBAR_STEP, behavior: 'smooth' })
+        if (el) el.scrollBy({ top: which === 'down' ? SIDEBAR_STEP : -SIDEBAR_STEP, behavior: 'smooth' })
         return
       }
 
       // Canvas: ignore OS auto-repeat (the rAF loop drives the hold).
       if (e.repeat) return
-      const fast = performance.now() - lastUp[k] < DOUBLE_TAP_MS
-      dir = k === 's' ? 1 : -1
+      const fast = performance.now() - lastUp[which] < DOUBLE_TAP_MS
+      dir = which === 'down' ? 1 : -1
       speed = fast ? FAST : NORMAL
-      activeKey = k
+      activeKey = which
       start()
     }
 
     const onKeyUp = (e) => {
-      const k = norm(e)
-      if (!k) return
-      lastUp[k] = performance.now()   // arm the double-tap window
-      if (k === activeKey) {
+      const which = dirOf(e)
+      if (!which) return
+      lastUp[which] = performance.now()   // arm the double-tap window
+      if (which === activeKey) {
         dir = 0
         activeKey = null
-        stop()                        // clean up the rAF on release
+        stop()                            // clean up the rAF on release
       }
     }
 
@@ -847,7 +868,7 @@ export default function Reader() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
+    <div className={`flex h-screen overflow-hidden bg-white ${panelSide === 'left' ? 'flex-row-reverse' : 'flex-row'}`}>
       <div
         className={`relative min-w-0 flex-1 overflow-hidden transition-shadow duration-200 ${
           focusArea === 'canvas' ? 'ring-2 ring-inset ring-indigo-400/60' : ''
@@ -868,20 +889,22 @@ export default function Reader() {
         <ThemeButton className="absolute bottom-4 left-4 z-30" />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
-        <button
-          onClick={() => setIsSidebarOpen(o => !o)}
-          title={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
-          aria-label={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
-          className="absolute bottom-4 right-4 z-30 w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <line x1="15" y1="3" x2="15" y2="21" />
-            {isSidebarOpen
-              ? <polyline points="7 9 10 12 7 15" />
-              : <polyline points="10 9 7 12 10 15" />}
-          </svg>
-        </button>
+        {visibility.hidePanel && (
+          <button
+            onClick={() => setIsSidebarOpen(o => !o)}
+            title={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
+            aria-label={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
+            className="absolute bottom-4 right-4 z-30 w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <line x1="15" y1="3" x2="15" y2="21" />
+              {isSidebarOpen
+                ? <polyline points="7 9 10 12 7 15" />
+                : <polyline points="10 9 7 12 10 15" />}
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Sidebar wrapper animates its width to 0 (100% to the canvas) when
@@ -889,7 +912,7 @@ export default function Reader() {
           clip rather than reflowing. Ring marks it as the active focus area. */}
       <div
         className={`relative shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out ${
-          isSidebarOpen ? 'border-l border-slate-200' : ''
+          isSidebarOpen ? (panelSide === 'left' ? 'border-r border-slate-200' : 'border-l border-slate-200') : ''
         } ${focusArea === 'sidebar' ? 'ring-2 ring-inset ring-indigo-400/60' : ''}`}
         style={{ width: isSidebarOpen ? SIDEBAR_WIDTH : 0 }}
       >

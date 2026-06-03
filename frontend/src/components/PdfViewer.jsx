@@ -5,6 +5,8 @@ import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig,
 import { usePdfDocument } from './use-pdf-document'
 import { usePageCache } from './use-page-cache'
 import { useUiLang } from '../i18n/LanguageContext'
+import { useSettings } from '../settings/SettingsContext'
+import { SettingsButton } from '../settings/SettingsModal'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 3.0
@@ -515,6 +517,12 @@ function PdfPage({
 
 const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }, ref) {
   const { t } = useUiLang()
+  const { settings, isOpen: settingsOpen } = useSettings()
+  const visibility = settings.visibility
+  // Global shortcut handlers (incl. tracking) must go quiet while the settings
+  // modal is open so capturing a key in a field never fires a reader action.
+  const settingsOpenRef = useRef(false)
+  useEffect(() => { settingsOpenRef.current = settingsOpen }, [settingsOpen])
   const [hoveredChain, setHoveredChain]       = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
@@ -960,9 +968,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
     }
 
     function onKey(e) {
+      if (settingsOpenRef.current) return
       const tag = (e.target?.tagName || '').toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
-      
+
       const viewportFactor = tracking ? 0.1 : 0.55
       
       if (e.key === 'ArrowDown') {
@@ -1142,7 +1151,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
 
   return (
     <div className="relative h-full bg-gray-100">
-      {tracking ? (
+      {visibility.zoom && (tracking ? (
         <ZoomToolbar
           displayZoom={1 / userZoom}
           onIncrease={zoomOut}
@@ -1160,62 +1169,69 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
           canIncrease={userZoom < ZOOM_MAX - 1e-3}
           canDecrease={userZoom > ZOOM_MIN + 1e-3}
         />
-      )}
+      ))}
 
-      {/* Tracking toolbar */}
-      <div ref={trackingToolbarRef} className="absolute top-4 left-4 z-30 flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
-        {onHome && (
-          <button
-            onClick={onHome}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-            title={t('viewer.backToMenu')}
-            aria-label={t('viewer.backToMenu')}
-          >
-            <svg
-              className="w-4 h-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+      {/* Top-left navigation: the tracking toolbar row, with the Settings
+          button stacked directly beneath the Home button. */}
+      <div className="absolute top-4 left-4 z-30 flex flex-col items-start gap-2">
+        <div ref={trackingToolbarRef} className="flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
+          {onHome && (
+            <button
+              onClick={onHome}
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+              title={t('viewer.backToMenu')}
+              aria-label={t('viewer.backToMenu')}
             >
-              <path d="M3 12l9-9 9 9" />
-              <path d="M5 10v10h14V10" />
-            </svg>
-          </button>
-        )}
-        <button
-          onClick={handleToggleTracking}
-          disabled={readingSequence.length === 0}
-          className={`px-3 h-8 rounded-lg text-xs font-semibold transition-colors disabled:opacity-30 disabled:pointer-events-none ${
-            tracking
-              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-              : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
-          }`}
-          title={tracking ? t('viewer.trackingExit') : t('viewer.trackingActivate')}
-        >
-          {tracking ? t('viewer.trackingOn') : t('viewer.trackingOff')}
-        </button>
-        {tracking && (
-          <>
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 12l9-9 9 9" />
+                <path d="M5 10v10h14V10" />
+              </svg>
+            </button>
+          )}
+          {visibility.tracking && (
             <button
-              onClick={() => setCurrentStop(s => Math.max(0, s - 1))}
-              disabled={currentStop <= 0}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
-              title={t('viewer.prevStop')}
-            >↑</button>
-            <span className="text-[11px] font-bold tabular-nums text-slate-600 min-w-[3.5rem] text-center">
-              {currentStop + 1}/{readingSequence.length}
-            </span>
-            <button
-              onClick={() => setCurrentStop(s => Math.min(readingSequence.length - 1, s + 1))}
-              disabled={currentStop >= readingSequence.length - 1}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
-              title={t('viewer.nextStop')}
-            >↓</button>
-          </>
-        )}
+              onClick={handleToggleTracking}
+              disabled={readingSequence.length === 0}
+              className={`px-3 h-8 rounded-lg text-xs font-semibold transition-colors disabled:opacity-30 disabled:pointer-events-none ${
+                tracking
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                  : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
+              }`}
+              title={tracking ? t('viewer.trackingExit') : t('viewer.trackingActivate')}
+            >
+              {tracking ? t('viewer.trackingOn') : t('viewer.trackingOff')}
+            </button>
+          )}
+          {tracking && visibility.viewType && (
+            <>
+              <button
+                onClick={() => setCurrentStop(s => Math.max(0, s - 1))}
+                disabled={currentStop <= 0}
+                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
+                title={t('viewer.prevStop')}
+              >↑</button>
+              <span className="text-[11px] font-bold tabular-nums text-slate-600 min-w-[3.5rem] text-center">
+                {currentStop + 1}/{readingSequence.length}
+              </span>
+              <button
+                onClick={() => setCurrentStop(s => Math.min(readingSequence.length - 1, s + 1))}
+                disabled={currentStop >= readingSequence.length - 1}
+                className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 disabled:opacity-30 disabled:pointer-events-none transition-colors font-semibold"
+                title={t('viewer.nextStop')}
+              >↓</button>
+            </>
+          )}
+        </div>
+        {/* Configuración — directly below the Home button. */}
+        <SettingsButton className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors" />
       </div>
 
       <div
