@@ -291,7 +291,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
             {otherBoxes.map((box, j) => (
               <div
                 key={`ot-${i}-${j}`}
-                className="absolute pointer-events-none rounded-sm carousel-other-shade"
+                className="absolute pointer-events-none rounded-sm pg-hl-other"
                 style={{
                   left:   box.left,
                   top:    box.top,
@@ -306,7 +306,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
             {highlightBoxes.map((box, j) => (
               <div
                 key={`hl-${i}-${j}`}
-                className="absolute pointer-events-none rounded-sm bg-yellow-300/40 transition-all duration-300 ease-out"
+                className="absolute pointer-events-none rounded-sm pg-hl-current transition-all duration-300 ease-out"
                 style={{
                   left:   box.left,
                   top:    box.top,
@@ -404,7 +404,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
             />
             {cap && (
               <div
-                className="absolute pointer-events-none rounded-sm bg-yellow-300/40 transition-all duration-300 ease-out"
+                className="absolute pointer-events-none rounded-sm pg-hl-current transition-all duration-300 ease-out"
                 style={{
                   left:   cap.x0 * scale,
                   top:    cap.y0 * scale,
