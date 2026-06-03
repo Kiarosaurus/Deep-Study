@@ -926,9 +926,15 @@ export default function Reader() {
       <div
         className={`relative shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out ${
           isSidebarOpen ? (panelSide === 'left' ? 'border-r border-slate-200' : 'border-l border-slate-200') : ''
-        } ${focusArea === 'sidebar' ? 'ring-2 ring-inset ring-indigo-400/60' : ''}`}
+        }`}
         style={{ width: isSidebarOpen ? sidebarWidth : 0 }}
       >
+        {/* Focus ring painted as a separate overlay so it sits ABOVE the panel
+            content. As an inset ring on the wrapper it would render under the
+            child backgrounds (concept explanations), which hid it. */}
+        {focusArea === 'sidebar' && (
+          <div className="pointer-events-none absolute inset-0 z-50 ring-2 ring-inset ring-indigo-400/60" />
+        )}
         <div className="h-full min-w-0" style={{ width: sidebarWidth }}>
           <Sidebar
             ref={sidebarScrollRef}
