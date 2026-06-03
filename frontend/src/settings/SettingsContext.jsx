@@ -19,6 +19,7 @@ export const ACTIONS = [
   'globalTab',
   'toggleSidebar',
   'trackingToggle',
+  'themeToggle',
   'home',
   'settings',
 ]
@@ -26,34 +27,33 @@ export const ACTIONS = [
 // Actions whose on-screen button can be hidden (see VISIBILITY_ITEMS), so the
 // keyboard shortcut is the only remaining way to reach them — it may never be
 // left empty. The Shortcuts editor hard-blocks Confirm if any of these is unset.
-export const REQUIRED_ACTIONS = ['trackingToggle', 'home', 'settings']
+export const REQUIRED_ACTIONS = ['trackingToggle', 'themeToggle', 'home', 'settings']
 
 // Two presets. 'right' = right-handed: left hand drives the Q/W/A/S/D cluster
 // while the right hand holds the mouse. 'left' = mirrored onto the I/J/K/L
 // cluster on the right side of the keyboard for a left-hand mouse grip. Space
 // (center highlight) is shared by both.
-// trackingToggle mirrors the home-row cluster: right a-s-d-f ↔ left j-k-l-;, so
-// 'f' / ';' sit one key past conceptNext (d / l) and leave it untouched. home /
-// settings share 1 / 2 on both hands (digits are hand-agnostic).
+// The digit row is hand-agnostic and shared by both presets: home 1, settings 2,
+// trackingToggle 3, toggleSidebar 4, themeToggle 5.
 export const DEFAULT_SHORTCUTS = {
   right: {
     focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
     conceptPrev: 'a', conceptNext: 'd', centerHighlight: ' ',
-    explainTab: 'e', globalTab: 'r', toggleSidebar: 'z',
-    trackingToggle: 'f', home: '1', settings: '2',
+    explainTab: 'e', globalTab: 'r', toggleSidebar: '4',
+    trackingToggle: '3', themeToggle: '5', home: '1', settings: '2',
   },
   left: {
     focusToggle: 'o', scrollUp: 'i', scrollDown: 'k',
     conceptPrev: 'j', conceptNext: 'l', centerHighlight: ' ',
-    explainTab: 'u', globalTab: 'p', toggleSidebar: 'm',
-    trackingToggle: ';', home: '1', settings: '2',
+    explainTab: 'u', globalTab: 'p', toggleSidebar: '4',
+    trackingToggle: '3', themeToggle: '5', home: '1', settings: '2',
   },
 }
 
 // On-screen elements that can be individually shown/hidden. Hiding 'home' or
 // 'settings' leaves their keyboard shortcut as the only entry point, so the
 // SettingsModal surfaces those bindings in an info popup when toggled off.
-export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'hidePanel', 'zoom', 'conceptScroll', 'home', 'settings']
+export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'theme', 'hidePanel', 'zoom', 'conceptScroll', 'home', 'settings']
 
 // Panel (global map + explanation) width as a percentage of the viewport.
 // Slider-controlled in settings; clamped so the panel stays usable without
@@ -67,7 +67,7 @@ export const DEFAULT_SETTINGS = {
   handMode: 'right',          // 'right' | 'left'
   panelSide: 'right',         // sidebar on the 'right' | 'left'
   panelWidthPct: PANEL_WIDTH_DEFAULT,   // panel width as % of viewport width
-  visibility: { tracking: true, viewType: true, hidePanel: true, zoom: true, conceptScroll: true, home: true, settings: true },
+  visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, home: true, settings: true },
 }
 
 const SettingsCtx = createContext(null)

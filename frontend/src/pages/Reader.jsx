@@ -6,6 +6,7 @@ import Sidebar from '../components/Sidebar'
 import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
 import { useUiLang } from '../i18n/LanguageContext'
 import { ThemeButton } from '../theme/ThemeToggle'
+import { useTheme } from '../theme/ThemeContext'
 import { ACTIONS, useSettings } from '../settings/SettingsContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
@@ -117,6 +118,7 @@ export default function Reader() {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen, openSettings } = useSettings()
   const { visibility, panelSide, panelWidthPct } = settings
+  const { cycleTheme } = useTheme()
   const { filename } = useParams()
 
   // Panel occupies a user-configurable share of the viewport (settings slider),
@@ -709,6 +711,7 @@ export default function Reader() {
       if (action === 'conceptPrev') { e.preventDefault(); navConcept(-1); return }
       // Tracking toggle lives in PdfViewer (local state); reach it imperatively.
       if (action === 'trackingToggle') { e.preventDefault(); viewerRef.current?.toggleTracking?.(); return }
+      if (action === 'themeToggle') { e.preventDefault(); cycleTheme(); return }
       if (action === 'home') { e.preventDefault(); navigate('/'); return }
       if (action === 'settings') { e.preventDefault(); openSettings(); return }
 
@@ -766,7 +769,7 @@ export default function Reader() {
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and
@@ -898,8 +901,9 @@ export default function Reader() {
           explanation={explanation}
           onHome={handleHome}
         />
-        {/* Theme cycle: normal → sepia → soft-dark (bottom-left). */}
-        <ThemeButton className="absolute bottom-4 left-4 z-30" />
+        {/* Theme cycle: normal → sepia → soft-dark (bottom-left). Hideable via
+            settings; the themeToggle shortcut ("5") still cycles when hidden. */}
+        {visibility.theme && <ThemeButton className="absolute bottom-4 left-4 z-30" />}
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
         {visibility.hidePanel && (
