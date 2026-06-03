@@ -711,6 +711,8 @@ export default function Reader() {
       if (action === 'conceptPrev') { e.preventDefault(); navConcept(-1); return }
       // Tracking toggle lives in PdfViewer (local state); reach it imperatively.
       if (action === 'trackingToggle') { e.preventDefault(); viewerRef.current?.toggleTracking?.(); return }
+      // Index dropdown also lives in PdfViewer; toggle it imperatively.
+      if (action === 'index') { e.preventDefault(); viewerRef.current?.toggleIndex?.(); return }
       if (action === 'themeToggle') { e.preventDefault(); cycleTheme(); return }
       if (action === 'home') { e.preventDefault(); navigate('/'); return }
       if (action === 'settings') { e.preventDefault(); openSettings(); return }

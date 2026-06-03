@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import LinearReader from './LinearReader'
 import PaginatedCanvas from './PaginatedCanvas'
 import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
@@ -535,6 +535,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   const [userZoom, setUserZoom]               = useState(1.0)
   const [tracking, setTracking]               = useState(false)
   const [currentStop, setCurrentStop]         = useState(0)
+  // Document index (table of contents) dropdown — toggled by its button and the
+  // 'index' shortcut. Lists every section/subsection header; clicking one
+  // scrolls it into view.
+  const [indexOpen, setIndexOpen]             = useState(false)
   // Shared IntersectionObserver for both PaginatedCanvas instances and
   // (eventually) any other lazy-render component on the page. Held in
   // state so child effects rebind when it's available.
@@ -576,6 +580,24 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   const linearSequence    = useMemo(() => buildLinearReadingSequence(linearBlocks), [linearBlocks])
   const readingSequence   = tracking ? linearSequence : paginatedSequence
 
+  // Document index: every section/subsection header in reading order. Depth is
+  // inferred from the leading numbering ("2" → 0, "2.1" → 1, "2.1.3" → 2); an
+  // unnumbered header sits at depth 0. `linearIdx` feeds centerBlock for the
+  // click-to-scroll.
+  const sections = useMemo(() => {
+    const out = []
+    for (let i = 0; i < linearBlocks.length; i++) {
+      const b = linearBlocks[i]
+      if (b?.role !== 'section_header') continue
+      const text = (b.text || '').trim()
+      if (!text) continue
+      const m = text.match(/^\s*(\d+(?:\.\d+)*)/)
+      const depth = m ? Math.min(3, (m[1].match(/\./g) || []).length) : 0
+      out.push({ linearIdx: i, text, depth })
+    }
+    return out
+  }, [linearBlocks])
+
   const pageDims = useMemo(
     () => pages
       ? Object.fromEntries(pages.map(p => [p.page, { width: p.width, height: p.height }]))
@@ -600,99 +622,108 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   // pageWidth recomputado abajo; capturamos vía ref para usar en scrollToStop
   const pageWidthRef = useRef(0)
 
-  // Imperative scroll API for Reader.jsx. centerBlock(linearIdx, opts) brings
-  // a specific linearBlocks entry into view; routes to tracking or paginated
-  // logic based on current mode. onlyIfHidden skips the scroll when the block
-  // is already on screen, used for paragraph-change auto-follow.
-  useImperativeHandle(ref, () => ({
-    centerBlock(linearIdx, options = {}) {
-      const { onlyIfHidden = false, smooth = true, alternatives = null } = options
-      const container = containerRef.current
-      if (!container || linearIdx == null || !linearBlocks[linearIdx]) return
+  // centerBlock(linearIdx, opts) brings a specific linearBlocks entry into
+  // view; routes to tracking or paginated logic based on current mode.
+  // onlyIfHidden skips the scroll when the block is already on screen, used for
+  // paragraph-change auto-follow. Shared by the imperative handle (Reader's
+  // auto-follow) and the index dropdown's click-to-scroll.
+  const centerBlock = useCallback((linearIdx, options = {}) => {
+    const { onlyIfHidden = false, smooth = true, alternatives = null } = options
+    const container = containerRef.current
+    if (!container || linearIdx == null || !linearBlocks[linearIdx]) return
 
-      // Effective top of the viewable area — tracking toolbar overlays the
-      // container top, so blocks under it aren't really visible.
-      const effectiveTop = () => {
-        const cTop = container.getBoundingClientRect().top
-        if (tracking && trackingToolbarRef.current) {
-          const t = trackingToolbarRef.current
-          return cTop + t.offsetTop + t.offsetHeight
-        }
-        return cTop
+    // Effective top of the viewable area — tracking toolbar overlays the
+    // container top, so blocks under it aren't really visible.
+    const effectiveTop = () => {
+      const cTop = container.getBoundingClientRect().top
+      if (tracking && trackingToolbarRef.current) {
+        const t = trackingToolbarRef.current
+        return cTop + t.offsetTop + t.offsetHeight
       }
+      return cTop
+    }
 
-      // ≥50% of block height inside the (toolbar-adjusted) viewport.
-      const isBlockVisible = (idx) => {
-        if (idx == null || !linearBlocks[idx]) return false
-        const cRect = container.getBoundingClientRect()
-        const topClip = effectiveTop()
-        const botClip = cRect.bottom
-        let elTop, elBot
-        if (tracking) {
-          const el = container.querySelector(`[data-block-idx="${idx}"]`)
-          if (!el) return false
-          const eRect = el.getBoundingClientRect()
-          elTop = eRect.top
-          elBot = eRect.bottom
-        } else {
-          const block = linearBlocks[idx]
-          const pageEl = container.querySelector(`[data-page="${block.page}"]`)
-          if (!pageEl) return false
-          const dim = pageDims[block.page]
-          const pw  = pageWidthRef.current
-          if (!dim?.width || !pw) return false
-          const scale = pw / dim.width
-          const pRect = pageEl.getBoundingClientRect()
-          elTop = pRect.top + block.bbox.y0 * scale
-          elBot = pRect.top + block.bbox.y1 * scale
-        }
-        const overlap = Math.max(0, Math.min(elBot, botClip) - Math.max(elTop, topClip))
-        const blockH  = Math.max(1, elBot - elTop)
-        const viewH   = Math.max(1, botClip - topClip)
-        return overlap >= Math.min(blockH, viewH) * 0.5
-      }
-
-      if (onlyIfHidden) {
-        const candidates = Array.isArray(alternatives) && alternatives.length
-          ? alternatives
-          : [linearIdx]
-        if (candidates.some(isBlockVisible)) return
-      }
-
+    // ≥50% of block height inside the (toolbar-adjusted) viewport.
+    const isBlockVisible = (idx) => {
+      if (idx == null || !linearBlocks[idx]) return false
       const cRect = container.getBoundingClientRect()
       const topClip = effectiveTop()
-      const viewH   = Math.max(1, cRect.bottom - topClip)
-
-      let elTopAbs, elH
+      const botClip = cRect.bottom
+      let elTop, elBot
       if (tracking) {
-        const el = container.querySelector(`[data-block-idx="${linearIdx}"]`)
-        if (!el) return
+        const el = container.querySelector(`[data-block-idx="${idx}"]`)
+        if (!el) return false
         const eRect = el.getBoundingClientRect()
-        elTopAbs = eRect.top
-        elH = eRect.height
+        elTop = eRect.top
+        elBot = eRect.bottom
       } else {
-        const block = linearBlocks[linearIdx]
+        const block = linearBlocks[idx]
         const pageEl = container.querySelector(`[data-page="${block.page}"]`)
-        if (!pageEl) return
+        if (!pageEl) return false
         const dim = pageDims[block.page]
         const pw  = pageWidthRef.current
-        if (!dim?.width || !pw) return
+        if (!dim?.width || !pw) return false
         const scale = pw / dim.width
         const pRect = pageEl.getBoundingClientRect()
-        elTopAbs = pRect.top + block.bbox.y0 * scale
-        elH = (block.bbox.y1 - block.bbox.y0) * scale
+        elTop = pRect.top + block.bbox.y0 * scale
+        elBot = pRect.top + block.bbox.y1 * scale
       }
-      // Center vertically inside the toolbar-adjusted viewport. If block is
-      // taller than the viewport, align its top to the top of the area instead
-      // so the start of the content lands in view rather than the middle.
-      const offsetIntoView = elH >= viewH
-        ? 12
-        : (viewH - elH) / 2
-      const targetY = container.scrollTop
-                    + (elTopAbs - cRect.top)
-                    - (topClip - cRect.top + offsetIntoView)
-      container.scrollTo({ top: Math.max(0, targetY), behavior: smooth ? 'smooth' : 'auto' })
-    },
+      const overlap = Math.max(0, Math.min(elBot, botClip) - Math.max(elTop, topClip))
+      const blockH  = Math.max(1, elBot - elTop)
+      const viewH   = Math.max(1, botClip - topClip)
+      return overlap >= Math.min(blockH, viewH) * 0.5
+    }
+
+    if (onlyIfHidden) {
+      const candidates = Array.isArray(alternatives) && alternatives.length
+        ? alternatives
+        : [linearIdx]
+      if (candidates.some(isBlockVisible)) return
+    }
+
+    const cRect = container.getBoundingClientRect()
+    const topClip = effectiveTop()
+    const viewH   = Math.max(1, cRect.bottom - topClip)
+
+    let elTopAbs, elH
+    if (tracking) {
+      const el = container.querySelector(`[data-block-idx="${linearIdx}"]`)
+      if (!el) return
+      const eRect = el.getBoundingClientRect()
+      elTopAbs = eRect.top
+      elH = eRect.height
+    } else {
+      const block = linearBlocks[linearIdx]
+      const pageEl = container.querySelector(`[data-page="${block.page}"]`)
+      if (!pageEl) return
+      const dim = pageDims[block.page]
+      const pw  = pageWidthRef.current
+      if (!dim?.width || !pw) return
+      const scale = pw / dim.width
+      const pRect = pageEl.getBoundingClientRect()
+      elTopAbs = pRect.top + block.bbox.y0 * scale
+      elH = (block.bbox.y1 - block.bbox.y0) * scale
+    }
+    // Center vertically inside the toolbar-adjusted viewport. If block is
+    // taller than the viewport, align its top to the top of the area instead
+    // so the start of the content lands in view rather than the middle.
+    const offsetIntoView = elH >= viewH
+      ? 12
+      : (viewH - elH) / 2
+    const targetY = container.scrollTop
+                  + (elTopAbs - cRect.top)
+                  - (topClip - cRect.top + offsetIntoView)
+    container.scrollTo({ top: Math.max(0, targetY), behavior: smooth ? 'smooth' : 'auto' })
+  }, [tracking, linearBlocks, pageDims])
+
+  // Toggle the index dropdown — exposed so Reader's 'index' shortcut can open
+  // it even when the on-screen button is hidden.
+  const toggleIndex = useCallback(() => setIndexOpen(o => !o), [])
+
+  // Imperative scroll API for Reader.jsx.
+  useImperativeHandle(ref, () => ({
+    centerBlock,
+    toggleIndex,
 
     // Sentence-level scroll. boxes are sentence rects in PDF-point coords
     // (same units as block.bbox). onlyIfNotFullyVisible skips when the entire
@@ -777,7 +808,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
     toggleTracking() {
       handleToggleTracking()
     },
-  }), [tracking, linearBlocks, pageDims])
+  }), [tracking, linearBlocks, pageDims, centerBlock, toggleIndex])
 
   function scrollToStop(stop) {
     const container = containerRef.current
@@ -1172,10 +1203,14 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
 
   // Hide the nav pill entirely when every control inside it is hidden, so a
   // bare floating chrome bar never shows. Settings sits below it, gated alone.
-  const showNavRow = (onHome && visibility.home) || visibility.tracking || (tracking && visibility.viewType)
+  const showNavRow = (onHome && visibility.home) || visibility.tracking || visibility.index || (tracking && visibility.viewType)
 
   return (
     <div className="relative h-full bg-gray-100 pdf-canvas-backdrop">
+      {/* Click-away overlay for the index dropdown. */}
+      {indexOpen && (
+        <div className="fixed inset-0 z-20" onClick={() => setIndexOpen(false)} />
+      )}
       {visibility.zoom && (tracking ? (
         <ZoomToolbar
           displayZoom={1 / userZoom}
@@ -1255,7 +1290,54 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
               >↓</button>
             </>
           )}
+          {visibility.index && (
+            <button
+              onClick={() => setIndexOpen(o => !o)}
+              disabled={sections.length === 0}
+              className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors disabled:opacity-30 disabled:pointer-events-none ${
+                indexOpen
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                  : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
+              }`}
+              title={t('viewer.index')}
+              aria-label={t('viewer.index')}
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <line x1="3" y1="6" x2="3.01" y2="6" />
+                <line x1="3" y1="12" x2="3.01" y2="12" />
+                <line x1="3" y1="18" x2="3.01" y2="18" />
+              </svg>
+            </button>
+          )}
         </div>
+        )}
+        {/* Document index dropdown — sections + subsections (indented by depth).
+            Click scrolls the header into view. Reachable via the 'index'
+            shortcut even when the button above is hidden. */}
+        {indexOpen && (
+          <div className="w-72 max-h-[60vh] overflow-auto bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 py-1.5 select-none">
+            <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+              {t('viewer.indexTitle')}
+            </div>
+            {sections.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-slate-400">{t('viewer.indexEmpty')}</div>
+            ) : (
+              sections.map(s => (
+                <button
+                  key={s.linearIdx}
+                  onClick={() => { centerBlock(s.linearIdx, { smooth: true }); setIndexOpen(false) }}
+                  className="block w-full text-left pr-3 py-1.5 text-[13px] text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors truncate"
+                  style={{ paddingLeft: 12 + s.depth * 16 }}
+                  title={s.text}
+                >
+                  {s.text}
+                </button>
+              ))
+            )}
+          </div>
         )}
         {/* Configuración — directly below the Home button. Hideable; reachable
             via its keyboard shortcut once hidden. */}

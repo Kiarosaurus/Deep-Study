@@ -24,13 +24,13 @@ const L = {
       conceptPrev: 'Concepto anterior', conceptNext: 'Concepto siguiente', centerHighlight: 'Centrar resaltado',
       explainTab: 'Explicación', globalTab: 'Mapa Global', toggleSidebar: 'Ocultar/mostrar panel',
       trackingToggle: 'Activar/salir seguimiento', themeToggle: 'Cambiar modo de visualización',
-      home: 'Ir a inicio', settings: 'Abrir configuración',
+      index: 'Abrir índice', home: 'Ir a inicio', settings: 'Abrir configuración',
     },
     vis: {
       tracking: 'Botón de tracking', viewType: 'Navegación de vista (parada / contador)',
       theme: 'Botón de modo de visualización (claro/sepia/oscuro)',
       hidePanel: 'Botón ocultar panel', zoom: 'Botones de zoom', conceptScroll: 'Botones de scroll entre conceptos',
-      home: 'Botón de inicio', settings: 'Botón de configuración',
+      index: 'Botón de índice', home: 'Botón de inicio', settings: 'Botón de configuración',
     },
   },
   en: {
@@ -51,13 +51,13 @@ const L = {
       conceptPrev: 'Previous concept', conceptNext: 'Next concept', centerHighlight: 'Center highlight',
       explainTab: 'Explanation', globalTab: 'Global Map', toggleSidebar: 'Toggle panel',
       trackingToggle: 'Toggle tracking', themeToggle: 'Cycle view mode',
-      home: 'Go to home', settings: 'Open settings',
+      index: 'Open index', home: 'Go to home', settings: 'Open settings',
     },
     vis: {
       tracking: 'Tracking button', viewType: 'View navigation (stop / counter)',
       theme: 'View-mode button (light/sepia/dark)',
       hidePanel: 'Hide-panel button', zoom: 'Zoom buttons', conceptScroll: 'Concept scroll buttons',
-      home: 'Home button', settings: 'Settings button',
+      index: 'Index button', home: 'Home button', settings: 'Settings button',
     },
   },
 }
