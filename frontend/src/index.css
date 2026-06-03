@@ -109,6 +109,12 @@ body { background-color: var(--bg); color: var(--text); }
 .theme-dark .text-red-500, .theme-dark .text-red-600,
 .theme-dark .text-amber-600, .theme-dark .text-amber-500 { filter: saturate(0.5) brightness(0.88); }
 
+/* Carousel sibling-sentence shading ("sombreado plomo") — slate-400 @ 30%.
+   In soft-dark it sits over the inverted page and reads too heavy, so halve
+   its opacity (30% → 15%, 50% more transparent). */
+.carousel-other-shade { background-color: rgb(148 163 184 / 0.30); }
+.theme-dark .carousel-other-shade { background-color: rgb(148 163 184 / 0.15); }
+
 /* Themed scrollbars — driven by the palette vars, so they follow the active
    mode (normal / sepia / dark) instead of the browser default. */
 * {

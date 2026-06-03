@@ -291,7 +291,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
             {otherBoxes.map((box, j) => (
               <div
                 key={`ot-${i}-${j}`}
-                className="absolute pointer-events-none rounded-sm bg-slate-400/30"
+                className="absolute pointer-events-none rounded-sm carousel-other-shade"
                 style={{
                   left:   box.left,
                   top:    box.top,
