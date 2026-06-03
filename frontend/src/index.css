@@ -118,6 +118,14 @@ body { background-color: var(--bg); color: var(--text); }
 .theme-dark .pg-hl-current { background-color: rgb(253 224 71 / 0.12); }
 .theme-dark .pg-hl-other   { background-color: rgb(148 163 184 / 0.12); }
 
+/* Sepia: match the viewer gutter behind the page sheets to the colour the
+   white paper becomes under the sepia canvas filter — #fff through
+   brightness(0.74) sepia(1) saturate(1.35) = #FFE29E — so the sheets blend into
+   the background instead of sitting on a paler tan. Overrides the generic
+   `.theme-sepia .bg-gray-100 → --surface-3`. Keep in sync if --pdf-filter
+   (sepia) changes. */
+.theme-sepia .pdf-canvas-backdrop { background-color: #FFE29E !important; }
+
 /* Themed scrollbars — driven by the palette vars, so they follow the active
    mode (normal / sepia / dark) instead of the browser default. */
 * {

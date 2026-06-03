@@ -1175,7 +1175,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   const showNavRow = (onHome && visibility.home) || visibility.tracking || (tracking && visibility.viewType)
 
   return (
-    <div className="relative h-full bg-gray-100">
+    <div className="relative h-full bg-gray-100 pdf-canvas-backdrop">
       {visibility.zoom && (tracking ? (
         <ZoomToolbar
           displayZoom={1 / userZoom}

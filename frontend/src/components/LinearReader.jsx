@@ -226,7 +226,7 @@ export default function LinearReader({
   return (
     <div
       ref={rootDivRef}
-      className="bg-white"
+      className="bg-white pdf-canvas-backdrop"
       style={{ paddingLeft: 48, paddingRight: 48 }}
     >
       <div
