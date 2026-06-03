@@ -10,10 +10,13 @@ import { SettingsButton } from '../settings/SettingsModal'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 4.0   // paginated zoom-in ceiling (400%)
-// Tracking inverts zoom (display = 1/userZoom), so its userZoom upper bound is
-// the most-zoomed-OUT state. Pinned at 3.0 so tracking's zoom-out min stays 33%
-// (unchanged) even though paginated zoom-in now reaches higher.
+// Tracking inverts zoom (display = 1/userZoom): userZoom's UPPER bound is the
+// most-zoomed-OUT state, its LOWER bound the most-zoomed-IN. ZOOM_MAX_TRACKING
+// 3.0 keeps zoom-out min at 33%; ZOOM_MIN_TRACKING 0.25 lets zoom-in reach 400%
+// (1/0.25) — matching paginated's ceiling. LinearReader drops its column-width
+// cap so this zoom-in genuinely grows the page (overflow scrolls horizontally).
 const ZOOM_MAX_TRACKING = 3.0
+const ZOOM_MIN_TRACKING = 0.25
 const ZOOM_STEP = 0.2
 
 // ── Reading sequence (tracking mode) ──────────────────────────────────────────
@@ -914,6 +917,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       // When initialIdx is set, the auto-scroll effect below scrolls to it
       // once the linear blocks mount.
     } else {
+      // Leaving tracking: userZoom may sit below the paginated floor (tracking
+      // zoom-in reaches 0.25). Clamp back into [ZOOM_MIN, ZOOM_MAX] so the
+      // paginated page never renders below its documented minimum.
+      setUserZoom(z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)))
       const stop = linearSequence[currentStop]
       if (stop) lastLinearBlockIdxRef.current = stop.blockIdx
       const ref = stop?.flat_block_ref
@@ -1048,7 +1055,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
         // Without this, pinch-to-zoom is reversed only while tracking is on.
         const factor = trackingRef.current ? 1 / ratio : ratio
         const next   = pinchStartZoom * factor
-        setUserZoom(Math.max(ZOOM_MIN, Math.min(trackingRef.current ? ZOOM_MAX_TRACKING : ZOOM_MAX, next)))
+        setUserZoom(Math.max(trackingRef.current ? ZOOM_MIN_TRACKING : ZOOM_MIN, Math.min(trackingRef.current ? ZOOM_MAX_TRACKING : ZOOM_MAX, next)))
       }
     }
 
@@ -1071,7 +1078,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       const clamped = Math.max(-20, Math.min(20, e.deltaY))
       const sign    = trackingRef.current ? -1 : 1
       const factor  = Math.exp(-clamped * 0.005 * sign)
-      setUserZoom(z => Math.max(ZOOM_MIN, Math.min(trackingRef.current ? ZOOM_MAX_TRACKING : ZOOM_MAX, z * factor)))
+      setUserZoom(z => Math.max(trackingRef.current ? ZOOM_MIN_TRACKING : ZOOM_MIN, Math.min(trackingRef.current ? ZOOM_MAX_TRACKING : ZOOM_MAX, z * factor)))
     }
 
     // passive:false necesario para que preventDefault sea efectivo durante pinch
@@ -1118,7 +1125,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   useEffect(() => { trackingRef.current = tracking }, [tracking])
 
   function zoomIn()  { setUserZoom(z => Math.min(z + ZOOM_STEP, tracking ? ZOOM_MAX_TRACKING : ZOOM_MAX)) }
-  function zoomOut() { setUserZoom(z => Math.max(z - ZOOM_STEP, ZOOM_MIN)) }
+  function zoomOut() { setUserZoom(z => Math.max(z - ZOOM_STEP, tracking ? ZOOM_MIN_TRACKING : ZOOM_MIN)) }
   function zoomFit() { setUserZoom(1.0) }
 
   // pageWidth = ancho base ajustado a contenedor * factor de zoom del usuario.
@@ -1175,7 +1182,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
           onIncrease={zoomOut}
           onDecrease={zoomIn}
           onFit={zoomFit}
-          canIncrease={userZoom > ZOOM_MIN + 1e-3}
+          canIncrease={userZoom > ZOOM_MIN_TRACKING + 1e-3}
           canDecrease={userZoom < ZOOM_MAX_TRACKING - 1e-3}
         />
       ) : (

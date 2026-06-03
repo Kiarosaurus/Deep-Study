@@ -131,12 +131,12 @@ export default function LinearReader({
 
   // Tracking-mode zoom semantics differ from paginated: zoom up shrinks the
   // reading column (widening the side margins) and scales text down, zoom
-  // down expands the column toward the container edges (less margin) and
-  // scales text up. displayWidth never exceeds the column the parent gave
-  // us, so zooming out far enough flattens against contentWidth.
+  // down expands the column toward the container edges and scales text up.
+  // Past contentWidth the column keeps growing and the container scrolls
+  // horizontally — same as paginated zoom-in — so tracking can reach 400%.
   const baseWidth = Math.max(1, contentWidth || 0)
   const desired   = (baseWidth * DEFAULT_COLUMN_FACTOR) / Math.max(0.1, userZoom)
-  const displayWidth = Math.max(1, Math.min(baseWidth, desired))
+  const displayWidth = Math.max(1, desired)
   // Full-width figures are still allowed to bleed up to the absolute outer
   // bound the parent provided (basePageWidth). Independent of userZoom — the
   // figure scales proportionally via pxPerPt derived from displayWidth.
