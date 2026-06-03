@@ -10,11 +10,6 @@ import { ACTIONS, useSettings } from '../settings/SettingsContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
-// Fixed sidebar width. The wrapper animates between this and 0; the inner
-// panel keeps this width so its content slides under the clip instead of
-// reflowing during the open/close transition.
-const SIDEBAR_WIDTH = 420
-
 async function postExplainWithRetry(payload, onRetry, maxAttempts = 3) {
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -121,8 +116,22 @@ function buildExplainError(err, t) {
 export default function Reader() {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen, openSettings } = useSettings()
-  const { visibility, panelSide } = settings
+  const { visibility, panelSide, panelWidthPct } = settings
   const { filename } = useParams()
+
+  // Panel occupies a user-configurable share of the viewport (settings slider),
+  // tracked off window width so it follows live resizes. The wrapper animates
+  // between this width and 0; the inner panel keeps the same width so its
+  // content slides under the clip instead of reflowing during the transition.
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1280,
+  )
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const sidebarWidth = Math.round(viewportWidth * (panelWidthPct / 100))
   const navigate = useNavigate()
   const decoded = decodeURIComponent(filename)
 
@@ -918,9 +927,9 @@ export default function Reader() {
         className={`relative shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out ${
           isSidebarOpen ? (panelSide === 'left' ? 'border-r border-slate-200' : 'border-l border-slate-200') : ''
         } ${focusArea === 'sidebar' ? 'ring-2 ring-inset ring-indigo-400/60' : ''}`}
-        style={{ width: isSidebarOpen ? SIDEBAR_WIDTH : 0 }}
+        style={{ width: isSidebarOpen ? sidebarWidth : 0 }}
       >
-        <div className="h-full min-w-0" style={{ width: SIDEBAR_WIDTH }}>
+        <div className="h-full min-w-0" style={{ width: sidebarWidth }}>
           <Sidebar
             ref={sidebarScrollRef}
             globalMap={analysis?.global_map}

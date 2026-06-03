@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
-import { ACTIONS, DEFAULT_SHORTCUTS, REQUIRED_ACTIONS, VISIBILITY_ITEMS, useSettings } from './SettingsContext'
+import { ACTIONS, DEFAULT_SHORTCUTS, PANEL_WIDTH_MAX, PANEL_WIDTH_MIN, REQUIRED_ACTIONS, VISIBILITY_ITEMS, useSettings } from './SettingsContext'
 
 // ── Localized labels ─────────────────────────────────────────────────────────
 // Self-contained so the feature ships without touching the global translations
@@ -17,6 +17,7 @@ const L = {
     requiredBody: 'No es posible dejar estos campos vacíos:',
     hiddenTitle: 'Botón oculto', hiddenBody: 'Aún puedes usar estas acciones con el teclado:',
     visibility: 'Visibilidad de la interfaz', layout: 'Posición de los paneles',
+    panelWidth: 'Ancho del panel (% de pantalla)',
     panelRight: 'Derecha', panelLeft: 'Izquierda', close: 'Cerrar', space: 'Espacio', unset: 'Vacío',
     actions: {
       focusToggle: 'Cambiar foco (Canvas/Panel)', scrollUp: 'Scroll arriba', scrollDown: 'Scroll abajo',
@@ -41,6 +42,7 @@ const L = {
     requiredBody: 'These fields cannot be left empty:',
     hiddenTitle: 'Button hidden', hiddenBody: 'You can still use these actions from the keyboard:',
     visibility: 'Interface visibility', layout: 'Panel position',
+    panelWidth: 'Panel width (% of screen)',
     panelRight: 'Right', panelLeft: 'Left', close: 'Close', space: 'Space', unset: 'Unset',
     actions: {
       focusToggle: 'Toggle focus (Canvas/Panel)', scrollUp: 'Scroll up', scrollDown: 'Scroll down',
@@ -143,6 +145,23 @@ function Segmented({ value, options, onChange }) {
   )
 }
 
+function Slider({ value, min, max, step = 1, onChange, suffix = '' }) {
+  return (
+    <div className="flex items-center gap-3">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="flex-1 accent-indigo-600 cursor-pointer"
+      />
+      <span className="text-xs font-bold tabular-nums text-slate-600 min-w-[3rem] text-right">{value}{suffix}</span>
+    </div>
+  )
+}
+
 function Toggle({ checked, onChange, label }) {
   return (
     <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className="flex items-center justify-between w-full gap-3 py-2.5 group">
@@ -163,7 +182,7 @@ export default function SettingsModal() {
 }
 
 function SettingsPanel() {
-  const { settings, setHandMode, setPanelSide, setVisibility, commitShortcuts, closeSettings } = useSettings()
+  const { settings, setHandMode, setPanelSide, setPanelWidthPct, setVisibility, commitShortcuts, closeSettings } = useSettings()
   const labels = useLabels()
   const hand = settings.handMode
 
@@ -279,6 +298,11 @@ function SettingsPanel() {
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <p className="text-[12px] font-semibold text-slate-500">{labels.layout}</p>
               <Segmented value={settings.panelSide} onChange={setPanelSide} options={[{ value: 'right', label: labels.panelRight }, { value: 'left', label: labels.panelLeft }]} />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <p className="text-[12px] font-semibold text-slate-500">{labels.panelWidth}</p>
+              <Slider value={settings.panelWidthPct} min={PANEL_WIDTH_MIN} max={PANEL_WIDTH_MAX} onChange={setPanelWidthPct} suffix="%" />
             </div>
           </section>
         </div>

@@ -55,16 +55,30 @@ export const DEFAULT_SHORTCUTS = {
 // SettingsModal surfaces those bindings in an info popup when toggled off.
 export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'hidePanel', 'zoom', 'conceptScroll', 'home', 'settings']
 
+// Panel (global map + explanation) width as a percentage of the viewport.
+// Slider-controlled in settings; clamped so the panel stays usable without
+// dominating the reading canvas.
+export const PANEL_WIDTH_MIN = 20
+export const PANEL_WIDTH_MAX = 60
+export const PANEL_WIDTH_DEFAULT = 30
+
 export const DEFAULT_SETTINGS = {
   shortcuts: DEFAULT_SHORTCUTS,
   handMode: 'right',          // 'right' | 'left'
   panelSide: 'right',         // sidebar on the 'right' | 'left'
+  panelWidthPct: PANEL_WIDTH_DEFAULT,   // panel width as % of viewport width
   visibility: { tracking: true, viewType: true, hidePanel: true, zoom: true, conceptScroll: true, home: true, settings: true },
 }
 
 const SettingsCtx = createContext(null)
 
 const clone = (o) => JSON.parse(JSON.stringify(o))
+
+const clampPanelWidth = (v) => {
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n)) return PANEL_WIDTH_DEFAULT
+  return Math.min(PANEL_WIDTH_MAX, Math.max(PANEL_WIDTH_MIN, n))
+}
 
 // Merge a persisted blob over the defaults so newly added fields/keys always
 // have a value, even when an older settings object is in localStorage.
@@ -73,6 +87,7 @@ function mergeWithDefaults(saved) {
   return {
     handMode:  saved.handMode  === 'left' ? 'left' : 'right',
     panelSide: saved.panelSide === 'left' ? 'left' : 'right',
+    panelWidthPct: clampPanelWidth(saved.panelWidthPct),
     visibility: { ...DEFAULT_SETTINGS.visibility, ...(saved.visibility || {}) },
     shortcuts: {
       right: { ...DEFAULT_SHORTCUTS.right, ...((saved.shortcuts || {}).right || {}) },
@@ -105,6 +120,10 @@ export function SettingsProvider({ children }) {
     setSettings(s => ({ ...s, panelSide: side === 'left' ? 'left' : 'right' }))
   }, [])
 
+  const setPanelWidthPct = useCallback((pct) => {
+    setSettings(s => ({ ...s, panelWidthPct: clampPanelWidth(pct) }))
+  }, [])
+
   const setVisibility = useCallback((key, value) => {
     setSettings(s => ({ ...s, visibility: { ...s.visibility, [key]: !!value } }))
   }, [])
@@ -120,9 +139,9 @@ export function SettingsProvider({ children }) {
 
   const value = useMemo(() => ({
     settings,
-    setHandMode, setPanelSide, setVisibility, commitShortcuts,
+    setHandMode, setPanelSide, setPanelWidthPct, setVisibility, commitShortcuts,
     isOpen, openSettings, closeSettings,
-  }), [settings, setHandMode, setPanelSide, setVisibility, commitShortcuts, isOpen, openSettings, closeSettings])
+  }), [settings, setHandMode, setPanelSide, setPanelWidthPct, setVisibility, commitShortcuts, isOpen, openSettings, closeSettings])
 
   return <SettingsCtx.Provider value={value}>{children}</SettingsCtx.Provider>
 }
