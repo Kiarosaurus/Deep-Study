@@ -750,6 +750,12 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                     - (topClip - cRect.top + offsetIntoView)
       container.scrollTo({ top: Math.max(0, targetY), behavior: smooth ? 'smooth' : 'auto' })
     },
+
+    // Raw scroll element for Reader's continuous W/S scroll loop. Same node in
+    // both paginated and tracking mode (it IS the overflow-auto root).
+    getScrollContainer() {
+      return containerRef.current
+    },
   }), [tracking, linearBlocks, pageDims])
 
   function scrollToStop(stop) {
@@ -965,7 +971,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         node.scrollBy({ top: -node.clientHeight * viewportFactor, behavior: 'smooth' })
-      } else if (e.key === ' ' || e.key === 'PageDown') {
+      } else if (e.key === 'PageDown') {
+        // Space intentionally NOT bound here: it is reserved globally for
+        // "center current highlight" (Reader.onKey). PageDown still steps.
         e.preventDefault(); step(1)
       } else if (e.key === 'PageUp') {
         e.preventDefault(); step(-1)

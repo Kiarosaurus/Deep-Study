@@ -9,6 +9,11 @@ import { ThemeButton } from '../theme/ThemeToggle'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
+// Fixed sidebar width. The wrapper animates between this and 0; the inner
+// panel keeps this width so its content slides under the clip instead of
+// reflowing during the open/close transition.
+const SIDEBAR_WIDTH = 420
+
 async function postExplainWithRetry(payload, onRetry, maxAttempts = 3) {
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -133,8 +138,12 @@ export default function Reader() {
   const [tab, setTab] = useState('global')
   const [explainMode, setExplainMode] = useState('conceptos')
   // Right panel (global map / explanation) visibility. Toggled by the viewer
-  // button and the "." shortcut; auto-opened by the content shortcuts.
-  const [panelHidden, setPanelHidden] = useState(false)
+  // button, "." and "Z"; auto-opened by the content shortcuts (E / R / ✦).
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true)
+  // Keyboard focus target for immersive navigation. 'canvas' drives the
+  // continuous W/S scroll over the PDF; 'sidebar' routes W/S into the panel's
+  // own scroll. Toggled with Q. Space never changes it.
+  const [focusArea, setFocusArea] = useState('canvas')
 
   const uiStateRef = useRef({ tab, explainMode })
   useEffect(() => {
@@ -155,6 +164,14 @@ export default function Reader() {
   const currentIndexRef   = useRef(0)
   useEffect(() => { explanationRef.current  = explanation  }, [explanation])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
+
+  // Mirror focus + panel state into refs so the once-bound global W/S scroll
+  // listener and the Z handler read fresh values without rebinding.
+  const focusAreaRef     = useRef('canvas')
+  const isSidebarOpenRef = useRef(true)
+  const sidebarScrollRef = useRef(null)   // → Sidebar's inner scroll container
+  useEffect(() => { focusAreaRef.current     = focusArea     }, [focusArea])
+  useEffect(() => { isSidebarOpenRef.current = isSidebarOpen }, [isSidebarOpen])
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
 
@@ -320,7 +337,7 @@ export default function Reader() {
 
   const handleExplain = useCallback(async (text, sentences, flatBlockRef = null, opts = {}) => {
     if (!analysis) return
-    setPanelHidden(false)  // explaining always reveals the panel
+    setIsSidebarOpen(true)  // explaining always reveals the panel
     const { initialIndex = 0, role, page, bbox, caption_text, footnotes = [] } = opts
     const isFigure = role === 'figure' || role === 'table' || role === 'algorithm'
     // Explanation language chosen at upload (persisted in the analysis). Drives
@@ -582,17 +599,62 @@ export default function Reader() {
       }
 
       if (e.key === ' ' || e.code === 'Space') {
+        // Space is reserved for "center the current highlight" only — always
+        // swallow it so it can never fall through to the browser's native
+        // page-scroll (the cause of the stray scroll-down on repeated taps).
+        e.preventDefault()
         const cur = items[currentIndex]
         if (cur && activeParagraph) {
-          e.preventDefault()
           centerForItem(cur, false)
+        }
+        return
+      }
+
+      // ── Immersive focus + panel shortcuts ────────────────────────────────
+      // Q: flip keyboard focus between the canvas and the sidebar.
+      if (e.key === 'q' || e.key === 'Q') {
+        e.preventDefault()
+        setFocusArea(f => (f === 'canvas' ? 'sidebar' : 'canvas'))
+        return
+      }
+      // E: jump to the Explanation tab and toggle Contexto ⇄ Conceptos,
+      // force-opening the panel if it was hidden.
+      if (e.key === 'e' || e.key === 'E') {
+        e.preventDefault()
+        setIsSidebarOpen(true)
+        isSidebarOpenRef.current = true
+        const nextMode = uiStateRef.current.explainMode === 'contexto' ? 'conceptos' : 'contexto'
+        setTab('explain')
+        setExplainMode(nextMode)
+        uiStateRef.current = { tab: 'explain', explainMode: nextMode }
+        return
+      }
+      // R: jump to the Global Map tab, force-opening the panel if hidden.
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault()
+        setIsSidebarOpen(true)
+        isSidebarOpenRef.current = true
+        setTab('global')
+        uiStateRef.current = { ...uiStateRef.current, tab: 'global' }
+        return
+      }
+      // Z: toggle the sidebar. Closing while it held focus hands focus back to
+      // the canvas so the ring and W/S never point at an invisible target.
+      if (e.key === 'z' || e.key === 'Z') {
+        e.preventDefault()
+        const next = !isSidebarOpenRef.current
+        isSidebarOpenRef.current = next
+        setIsSidebarOpen(next)
+        if (!next && focusAreaRef.current === 'sidebar') {
+          focusAreaRef.current = 'canvas'
+          setFocusArea('canvas')
         }
         return
       }
 
       if (e.key === '<') {
         e.preventDefault()
-        setPanelHidden(false)  // a closed panel opens onto the explanation
+        setIsSidebarOpen(true)  // a closed panel opens onto the explanation
         const currentTab = uiStateRef.current.tab
         const currentMode = uiStateRef.current.explainMode
 
@@ -617,13 +679,13 @@ export default function Reader() {
       }
 
       if (e.key === '-') {
-        setPanelHidden(false)  // a closed panel opens onto the global map
+        setIsSidebarOpen(true)  // a closed panel opens onto the global map
         setTab('global')
         uiStateRef.current = { ...uiStateRef.current, tab: 'global' }
         return
       }
       if (e.key === ',') {
-        setPanelHidden(false)
+        setIsSidebarOpen(true)
         setTab('explain')
         setExplainMode('contexto')
         uiStateRef.current = { tab: 'explain', explainMode: 'contexto' }
@@ -631,10 +693,10 @@ export default function Reader() {
       }
       if (e.key === '.') {
         e.preventDefault()
-        setPanelHidden(h => !h)  // toggle the right panel
+        setIsSidebarOpen(o => !o)  // toggle the right panel
         return
       }
-      if (e.key === 'ArrowRight') {
+      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
         if (!activeParagraph) {
           if (paragraphList[0]) {
             e.preventDefault()
@@ -654,7 +716,7 @@ export default function Reader() {
         }
       }
 
-      if (e.key === 'ArrowLeft') {
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
         if (!activeParagraph) {
           if (paragraphList[0]) {
             e.preventDefault()
@@ -680,6 +742,80 @@ export default function Reader() {
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
   }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads])
+
+  // ── Continuous scroll (W / S) ────────────────────────────────────────────
+  // Behaviour depends on focusArea (read through a ref so this binds ONCE and
+  // the rAF loop is never torn down by re-renders):
+  //   • sidebar → native vertical scrollBy inside the panel.
+  //   • canvas  → hold-to-scroll loop at a constant speed. A quick
+  //     release+repress of the same key (<300ms) locks 2× speed until keyup.
+  // The rAF is cancelled on keyup and on unmount.
+  useEffect(() => {
+    const NORMAL = 9              // px/frame (~540px/s @60fps)
+    const FAST   = NORMAL * 2     // exactly double on double-tap-and-hold
+    const DOUBLE_TAP_MS = 300
+    const SIDEBAR_STEP  = 64
+
+    let rafId = null
+    let dir = 0                   // -1 up | +1 down | 0 idle
+    let speed = NORMAL
+    let activeKey = null          // 'w' | 's' currently driving the loop
+    const lastUp = { w: 0, s: 0 } // last keyup time per key → double-tap window
+
+    const loop = () => {
+      const el = viewerRef.current?.getScrollContainer?.()
+      if (el && dir !== 0) el.scrollTop += dir * speed
+      rafId = requestAnimationFrame(loop)
+    }
+    const start = () => { if (rafId == null) rafId = requestAnimationFrame(loop) }
+    const stop  = () => { if (rafId != null) { cancelAnimationFrame(rafId); rafId = null } }
+
+    const norm = (e) => {
+      const k = e.key?.toLowerCase()
+      return k === 'w' || k === 's' ? k : null
+    }
+
+    const onKeyDown = (e) => {
+      const tag = (e.target?.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      const k = norm(e)
+      if (!k) return
+      e.preventDefault()
+
+      if (focusAreaRef.current === 'sidebar') {
+        const el = sidebarScrollRef.current
+        if (el) el.scrollBy({ top: k === 's' ? SIDEBAR_STEP : -SIDEBAR_STEP, behavior: 'smooth' })
+        return
+      }
+
+      // Canvas: ignore OS auto-repeat (the rAF loop drives the hold).
+      if (e.repeat) return
+      const fast = performance.now() - lastUp[k] < DOUBLE_TAP_MS
+      dir = k === 's' ? 1 : -1
+      speed = fast ? FAST : NORMAL
+      activeKey = k
+      start()
+    }
+
+    const onKeyUp = (e) => {
+      const k = norm(e)
+      if (!k) return
+      lastUp[k] = performance.now()   // arm the double-tap window
+      if (k === activeKey) {
+        dir = 0
+        activeKey = null
+        stop()                        // clean up the rAF on release
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      stop()
+    }
+  }, [])
 
   const currentExplanation = explanation?.sentence_explanations?.[currentIndex] ?? null
 
@@ -712,7 +848,11 @@ export default function Reader() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white">
-      <div className="relative min-w-0 overflow-hidden" style={{ flex: 7 }}>
+      <div
+        className={`relative min-w-0 flex-1 overflow-hidden transition-shadow duration-200 ${
+          focusArea === 'canvas' ? 'ring-2 ring-inset ring-indigo-400/60' : ''
+        }`}
+      >
         <PdfViewer
           ref={viewerRef}
           file={pdfUrl}
@@ -729,24 +869,33 @@ export default function Reader() {
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
         <button
-          onClick={() => setPanelHidden(h => !h)}
-          title={panelHidden ? t('viewer.showPanel') : t('viewer.hidePanel')}
-          aria-label={panelHidden ? t('viewer.showPanel') : t('viewer.hidePanel')}
+          onClick={() => setIsSidebarOpen(o => !o)}
+          title={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
+          aria-label={isSidebarOpen ? t('viewer.hidePanel') : t('viewer.showPanel')}
           className="absolute bottom-4 right-4 z-30 w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <line x1="15" y1="3" x2="15" y2="21" />
-            {panelHidden
-              ? <polyline points="10 9 7 12 10 15" />
-              : <polyline points="7 9 10 12 7 15" />}
+            {isSidebarOpen
+              ? <polyline points="7 9 10 12 7 15" />
+              : <polyline points="10 9 7 12 10 15" />}
           </svg>
         </button>
       </div>
 
-      {!panelHidden && (
-        <div className="border-l border-slate-200 overflow-hidden min-w-0" style={{ flex: 3 }}>
+      {/* Sidebar wrapper animates its width to 0 (100% to the canvas) when
+          closed. The inner panel keeps a fixed width so it slides under the
+          clip rather than reflowing. Ring marks it as the active focus area. */}
+      <div
+        className={`relative shrink-0 overflow-hidden transition-[width] duration-300 ease-in-out ${
+          isSidebarOpen ? 'border-l border-slate-200' : ''
+        } ${focusArea === 'sidebar' ? 'ring-2 ring-inset ring-indigo-400/60' : ''}`}
+        style={{ width: isSidebarOpen ? SIDEBAR_WIDTH : 0 }}
+      >
+        <div className="h-full min-w-0" style={{ width: SIDEBAR_WIDTH }}>
           <Sidebar
+            ref={sidebarScrollRef}
             globalMap={analysis?.global_map}
             explanation={explanation}
             loadingGlobal={false}
@@ -762,7 +911,7 @@ export default function Reader() {
             onExplainModeChange={setExplainMode}
           />
         </div>
-      )}
+      </div>
     </div>
   )
 }

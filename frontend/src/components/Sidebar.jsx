@@ -1,3 +1,4 @@
+import { forwardRef } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
 
 function SkeletonGlobal() {
@@ -309,7 +310,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
   )
 }
 
-export default function Sidebar({
+const Sidebar = forwardRef(function Sidebar({
   globalMap, explanation,
   loadingGlobal, loadingExplain,
   errorGlobal, errorExplain,
@@ -317,7 +318,7 @@ export default function Sidebar({
   retryInfo,
   tab, onTabChange,
   explainMode, onExplainModeChange
-}) {
+}, ref) {
   const { t } = useUiLang()
 
   return (
@@ -348,7 +349,7 @@ export default function Sidebar({
         ))}
       </div>
 
-      <div className="p-5 overflow-y-auto flex-1">
+      <div ref={ref} className="p-5 overflow-y-auto flex-1">
         {tab === 'global' && (
           loadingGlobal ? <SkeletonGlobal /> :
           errorGlobal
@@ -372,4 +373,6 @@ export default function Sidebar({
       </div>
     </div>
   )
-}
+})
+
+export default Sidebar
