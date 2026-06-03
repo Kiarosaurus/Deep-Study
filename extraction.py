@@ -862,6 +862,25 @@ def _is_source_attribution(b) -> bool:
     )
 
 
+# Figure sub-panel label that Marker splits off as its own block — the "(a)",
+# "a)", "(b)", "b.", "(i)", "ii)" markers that sit between a multi-panel image
+# and its "Figure N: …" caption. A single letter or short Roman numeral,
+# optionally parenthesised, followed by ")" / "." — the WHOLE block is just that
+# marker plus at most a few words (some papers write "(a) Top view"). Absorbed
+# into the image so it never surfaces as a standalone paragraph.
+_PANEL_LABEL_RE = re.compile(
+    r"^\(?\s*(?:[a-z]|[ivxlcdm]{1,4})\s*[).．。）]",
+    re.IGNORECASE,
+)
+
+
+def _is_panel_label(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return len(t.split()) <= 5 and bool(_PANEL_LABEL_RE.match(t))
+
+
 def _is_caption_block_pages(b: ParagraphBlock) -> bool:
     if b.role == "caption":
         return True
@@ -911,19 +930,36 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
             pieces: list[ParagraphBlock] = []
             have_caption = False
             have_source = False
-            for delta in (1, -1, 2, -2):
-                neighbor = block_by_ri.get(ri + delta)
+            # FORWARD: sub-panel labels ("(a)", "b)", …) sitting between the
+            # image and its caption, then the caption ("Figure N: …") and a
+            # "Source: …" line. Walk forward and absorb each; stop at the first
+            # non-absorbable block.
+            d = 1
+            while True:
+                neighbor = block_by_ri.get(ri + d)
                 if neighbor is None or id(neighbor) in consumed_ids:
-                    continue
+                    break
                 if not have_caption and _is_caption_block_pages(neighbor):
                     pieces.append(neighbor)
                     have_caption = True
-                elif not have_source and delta > 0 and _is_source_attribution(neighbor):
-                    # Source attribution only attaches directly below the image.
+                elif not have_source and _is_source_attribution(neighbor):
                     pieces.append(neighbor)
                     have_source = True
-                if have_caption and have_source:
+                elif _is_panel_label(neighbor.text):
+                    pieces.append(neighbor)
+                else:
                     break
+                d += 1
+            # ABOVE: a caption sitting over the visual (tables put it there).
+            if not have_caption:
+                for d in (-1, -2):
+                    neighbor = block_by_ri.get(ri + d)
+                    if neighbor is None or id(neighbor) in consumed_ids:
+                        continue
+                    if _is_caption_block_pages(neighbor):
+                        pieces.append(neighbor)
+                        have_caption = True
+                        break
             if not pieces:
                 _cont_log(f"    image ri={ri} role={img.role}: no caption found")
                 continue
@@ -1057,11 +1093,12 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             if i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
                 piece_idxs.append(i - 1)
                 have_caption = True
-            # BELOW: contiguous caption and/or source (e.g. "Figure N: …" then
-            # "Source: …"). Stop at the first block that is neither.
-            for j in (i + 1, i + 2):
-                if j >= len(blocks) or j in consumed:
-                    break
+            # BELOW: contiguous figure pieces — sub-panel labels ("(a)", "b)",
+            # …) that sit between the image and its caption, plus the caption
+            # ("Figure N: …") and a "Source: …" line. Walk forward, absorbing
+            # each; stop at the first block that is none of these.
+            j = i + 1
+            while j < len(blocks) and j not in consumed:
                 nb = blocks[j]
                 if not have_caption and _is_caption_block_linear(nb):
                     piece_idxs.append(j)
@@ -1069,8 +1106,11 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                 elif not have_source and _is_source_attribution(nb):
                     piece_idxs.append(j)
                     have_source = True
+                elif _is_panel_label(nb.text):
+                    piece_idxs.append(j)
                 else:
                     break
+                j += 1
             if piece_idxs:
                 # The above-caption was already appended to `merged` on its own
                 # iteration — drop it so it isn't emitted as a standalone block.
