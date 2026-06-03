@@ -170,6 +170,20 @@ _SKIP_SECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same skip sections, but glued to their term list on one line. Marker often
+# emits "Keywords: deep learning, GPUs, …" or "Index Terms—…" as a single Text
+# block (not a SectionHeader), so the end-anchored regex above misses it and the
+# list leaks as a body paragraph. Require the skip word at the very start
+# followed by a separator (colon / period / dash) + content, so a body sentence
+# like "Keywords are central to retrieval…" never trips it.
+_SKIP_SECTION_INLINE_RE = re.compile(
+    r"^(?:ccs\s+concepts?|keywords?|key\s+words?|index\s+terms?|"
+    r"categories\s+and\s+subject\s+descriptors|"
+    r"acm\s+reference\s+format|general\s+terms?)"
+    r"\s*[:.–—]\s*\S",
+    re.IGNORECASE,
+)
+
 # Canonical body-section names. If a SectionHeader matches, it's a real
 # section — not the document title, not a skip section.
 _BODY_SECTION_RE = re.compile(
@@ -195,6 +209,12 @@ def _is_stop_header(text: str) -> bool:
 
 def _is_skip_section(text: str) -> bool:
     return bool(_SKIP_SECTION_RE.match(text.strip()))
+
+
+def _is_skip_section_inline(text: str) -> bool:
+    """True for a skip-section name glued to its body on one line ("Keywords:
+    …", "Index Terms—…") that Marker emitted as Text instead of a header."""
+    return bool(_SKIP_SECTION_INLINE_RE.match(text.strip()))
 
 
 def _is_body_section_name(text: str) -> bool:
@@ -1752,6 +1772,15 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
 
             inner_lines = _collect_lines(block, document, line_cache)
             text = " ".join(l.text for l in inner_lines).strip()
+            # Keywords / CCS / Index-Terms boilerplate Marker emitted as Text
+            # rather than a SectionHeader — standalone ("Keywords") or glued
+            # ("Keywords: a, b, c"). Open body-skip so the term list that
+            # follows is dropped too, then skip this block.
+            if bt in _BODY_TEXT_TYPES and (
+                _is_skip_section(text) or _is_skip_section_inline(text)
+            ):
+                skip_section = True
+                continue
             if bt == "Equation":
                 eq_latex = _latex_from_equation_block(block)
                 if eq_latex:
@@ -1792,7 +1821,9 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
                 if _is_hard_noise(text):
                     continue
                 if pre_abstract and (
-                    _is_soft_noise(text) or _looks_like_author_line(text)
+                    _is_soft_noise(text)
+                    or _looks_like_author_line(text)
+                    or _is_dense_name_list(text)
                 ):
                     continue
 
@@ -2068,6 +2099,15 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
             # its render crop / highlight doesn't overlap the next paragraph.
             if was_rescued and inner_lines:
                 bbox = _union_bbox([l.bbox for l in inner_lines])
+            # Keywords / CCS / Index-Terms boilerplate Marker emitted as Text
+            # rather than a SectionHeader — standalone or glued to its term
+            # list. Open body-skip so the list that follows is dropped too.
+            if bt in _BODY_TEXT_TYPES and (
+                _is_skip_section(text) or _is_skip_section_inline(text)
+            ):
+                _extract_log(f"    → SKIP skip_section inline {_snip(text)!r}")
+                skip_section = True
+                continue
             if bt == "Equation":
                 eq_latex = _latex_from_equation_block(block)
                 if eq_latex:
@@ -2126,7 +2166,9 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                     _extract_log(f"    → SKIP hard_noise {_snip(text)!r}")
                     continue
                 if pre_abstract and (
-                    _is_soft_noise(text) or _looks_like_author_line(text)
+                    _is_soft_noise(text)
+                    or _looks_like_author_line(text)
+                    or _is_dense_name_list(text)
                 ):
                     role = "author"
 
