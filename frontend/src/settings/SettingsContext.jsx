@@ -18,33 +18,48 @@ export const ACTIONS = [
   'explainTab',
   'globalTab',
   'toggleSidebar',
+  'trackingToggle',
+  'home',
+  'settings',
 ]
+
+// Actions whose on-screen button can be hidden (see VISIBILITY_ITEMS), so the
+// keyboard shortcut is the only remaining way to reach them — it may never be
+// left empty. The Shortcuts editor hard-blocks Confirm if any of these is unset.
+export const REQUIRED_ACTIONS = ['trackingToggle', 'home', 'settings']
 
 // Two presets. 'right' = right-handed: left hand drives the Q/W/A/S/D cluster
 // while the right hand holds the mouse. 'left' = mirrored onto the I/J/K/L
 // cluster on the right side of the keyboard for a left-hand mouse grip. Space
 // (center highlight) is shared by both.
+// trackingToggle mirrors the home-row cluster: right a-s-d-f ↔ left j-k-l-;, so
+// 'f' / ';' sit one key past conceptNext (d / l) and leave it untouched. home /
+// settings share 1 / 2 on both hands (digits are hand-agnostic).
 export const DEFAULT_SHORTCUTS = {
   right: {
     focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
     conceptPrev: 'a', conceptNext: 'd', centerHighlight: ' ',
     explainTab: 'e', globalTab: 'r', toggleSidebar: 'z',
+    trackingToggle: 'f', home: '1', settings: '2',
   },
   left: {
     focusToggle: 'o', scrollUp: 'i', scrollDown: 'k',
     conceptPrev: 'j', conceptNext: 'l', centerHighlight: ' ',
     explainTab: 'u', globalTab: 'p', toggleSidebar: 'm',
+    trackingToggle: ';', home: '1', settings: '2',
   },
 }
 
-// On-screen elements that can be individually shown/hidden.
-export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'hidePanel', 'zoom', 'conceptScroll']
+// On-screen elements that can be individually shown/hidden. Hiding 'home' or
+// 'settings' leaves their keyboard shortcut as the only entry point, so the
+// SettingsModal surfaces those bindings in an info popup when toggled off.
+export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'hidePanel', 'zoom', 'conceptScroll', 'home', 'settings']
 
 export const DEFAULT_SETTINGS = {
   shortcuts: DEFAULT_SHORTCUTS,
   handMode: 'right',          // 'right' | 'left'
   panelSide: 'right',         // sidebar on the 'right' | 'left'
-  visibility: { tracking: true, viewType: true, hidePanel: true, zoom: true, conceptScroll: true },
+  visibility: { tracking: true, viewType: true, hidePanel: true, zoom: true, conceptScroll: true, home: true, settings: true },
 }
 
 const SettingsCtx = createContext(null)

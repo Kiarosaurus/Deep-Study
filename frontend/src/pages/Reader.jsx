@@ -120,7 +120,7 @@ function buildExplainError(err, t) {
 
 export default function Reader() {
   const { t } = useUiLang()
-  const { settings, isOpen: settingsOpen } = useSettings()
+  const { settings, isOpen: settingsOpen, openSettings } = useSettings()
   const { visibility, panelSide } = settings
   const { filename } = useParams()
   const navigate = useNavigate()
@@ -698,6 +698,10 @@ export default function Reader() {
       }
       if (action === 'conceptNext') { e.preventDefault(); navConcept(1); return }
       if (action === 'conceptPrev') { e.preventDefault(); navConcept(-1); return }
+      // Tracking toggle lives in PdfViewer (local state); reach it imperatively.
+      if (action === 'trackingToggle') { e.preventDefault(); viewerRef.current?.toggleTracking?.(); return }
+      if (action === 'home') { e.preventDefault(); navigate('/'); return }
+      if (action === 'settings') { e.preventDefault(); openSettings(); return }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -753,7 +757,7 @@ export default function Reader() {
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and

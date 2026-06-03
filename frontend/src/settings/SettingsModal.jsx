@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
-import { ACTIONS, DEFAULT_SHORTCUTS, VISIBILITY_ITEMS, useSettings } from './SettingsContext'
+import { ACTIONS, DEFAULT_SHORTCUTS, REQUIRED_ACTIONS, VISIBILITY_ITEMS, useSettings } from './SettingsContext'
 
 // ── Localized labels ─────────────────────────────────────────────────────────
 // Self-contained so the feature ships without touching the global translations
@@ -13,16 +13,21 @@ const L = {
     reset: 'Restablecer por defecto', confirm: 'Confirmar cambios',
     emptyTitle: 'Campos vacíos', back: 'Regresar a editar', confirmAnyway: 'Confirmar de todos modos',
     emptyBody: 'Hay atajos sin asignar. Esas acciones se quedarán sin tecla. ¿Confirmar de todos modos?',
+    requiredTitle: 'Campos obligatorios', ok: 'Entendido',
+    requiredBody: 'No es posible dejar estos campos vacíos:',
+    hiddenTitle: 'Botón oculto', hiddenBody: 'Aún puedes usar estas acciones con el teclado:',
     visibility: 'Visibilidad de la interfaz', layout: 'Posición de los paneles',
     panelRight: 'Derecha', panelLeft: 'Izquierda', close: 'Cerrar', space: 'Espacio', unset: 'Vacío',
     actions: {
       focusToggle: 'Cambiar foco (Canvas/Panel)', scrollUp: 'Scroll arriba', scrollDown: 'Scroll abajo',
       conceptPrev: 'Concepto anterior', conceptNext: 'Concepto siguiente', centerHighlight: 'Centrar resaltado',
       explainTab: 'Explicación', globalTab: 'Mapa Global', toggleSidebar: 'Ocultar/mostrar panel',
+      trackingToggle: 'Activar/salir seguimiento', home: 'Ir a inicio', settings: 'Abrir configuración',
     },
     vis: {
       tracking: 'Botón de tracking', viewType: 'Navegación de vista (parada / contador)',
       hidePanel: 'Botón ocultar panel', zoom: 'Botones de zoom', conceptScroll: 'Botones de scroll entre conceptos',
+      home: 'Botón de inicio', settings: 'Botón de configuración',
     },
   },
   en: {
@@ -32,16 +37,21 @@ const L = {
     reset: 'Reset to defaults', confirm: 'Confirm changes',
     emptyTitle: 'Empty fields', back: 'Back to editing', confirmAnyway: 'Confirm anyway',
     emptyBody: 'Some shortcuts are unassigned. Those actions will have no key. Confirm anyway?',
+    requiredTitle: 'Required fields', ok: 'Got it',
+    requiredBody: 'These fields cannot be left empty:',
+    hiddenTitle: 'Button hidden', hiddenBody: 'You can still use these actions from the keyboard:',
     visibility: 'Interface visibility', layout: 'Panel position',
     panelRight: 'Right', panelLeft: 'Left', close: 'Close', space: 'Space', unset: 'Unset',
     actions: {
       focusToggle: 'Toggle focus (Canvas/Panel)', scrollUp: 'Scroll up', scrollDown: 'Scroll down',
       conceptPrev: 'Previous concept', conceptNext: 'Next concept', centerHighlight: 'Center highlight',
       explainTab: 'Explanation', globalTab: 'Global Map', toggleSidebar: 'Toggle panel',
+      trackingToggle: 'Toggle tracking', home: 'Go to home', settings: 'Open settings',
     },
     vis: {
       tracking: 'Tracking button', viewType: 'View navigation (stop / counter)',
       hidePanel: 'Hide-panel button', zoom: 'Zoom buttons', conceptScroll: 'Concept scroll buttons',
+      home: 'Home button', settings: 'Settings button',
     },
   },
 }
@@ -161,6 +171,10 @@ function SettingsPanel() {
   // bindings live in context — the draft is local until Confirm.
   const [draft, setDraft] = useState(() => clone(settings.shortcuts))
   const [showEmptyWarn, setShowEmptyWarn] = useState(false)
+  // Hard-block popup for unset REQUIRED actions, and the info popup shown when a
+  // Home/Settings button is hidden (surfaces its keyboard fallback).
+  const [showRequiredWarn, setShowRequiredWarn] = useState(false)
+  const [hiddenInfo, setHiddenInfo] = useState(null)   // null | 'home' | 'settings'
 
   // Esc closes the modal (capture + stopPropagation so it doesn't reach the
   // reader's global shortcut handlers).
@@ -172,7 +186,9 @@ function SettingsPanel() {
 
   const activeMap = draft[hand]
   const dirty = JSON.stringify(activeMap) !== JSON.stringify(settings.shortcuts[hand])
-  const emptyCount = ACTIONS.filter(a => !activeMap[a]).length
+  // Required actions block Confirm outright; other empties only warn.
+  const missingRequired = REQUIRED_ACTIONS.filter(a => !activeMap[a])
+  const emptyOptional = ACTIONS.filter(a => !REQUIRED_ACTIONS.includes(a) && !activeMap[a])
 
   // Assign a key to an action. Collision rule: if the key is already used by
   // another action in the same hand, the previous owner is cleared.
@@ -186,10 +202,18 @@ function SettingsPanel() {
   }
   const resetActive = () => setDraft(prev => ({ ...prev, [hand]: { ...DEFAULT_SHORTCUTS[hand] } }))
   const doConfirm = () => {
-    if (emptyCount > 0) { setShowEmptyWarn(true); return }
+    if (missingRequired.length > 0) { setShowRequiredWarn(true); return }
+    if (emptyOptional.length > 0) { setShowEmptyWarn(true); return }
     commitShortcuts(hand, activeMap)
   }
   const confirmAnyway = () => { commitShortcuts(hand, activeMap); setShowEmptyWarn(false) }
+
+  // Hiding the Home / Settings button leaves its shortcut as the only entry
+  // point — surface the active hand's bindings so the user isn't stranded.
+  const onVisibilityChange = (item, value) => {
+    setVisibility(item, value)
+    if (!value && (item === 'home' || item === 'settings')) setHiddenInfo(item)
+  }
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -247,7 +271,7 @@ function SettingsPanel() {
               <p className="text-[12px] font-semibold text-slate-500 mb-1">{labels.visibility}</p>
               <div className="rounded-xl border border-slate-200 px-4 divide-y divide-slate-100">
                 {VISIBILITY_ITEMS.map(item => (
-                  <Toggle key={item} label={labels.vis[item]} checked={settings.visibility[item]} onChange={(v) => setVisibility(item, v)} />
+                  <Toggle key={item} label={labels.vis[item]} checked={settings.visibility[item]} onChange={(v) => onVisibilityChange(item, v)} />
                 ))}
               </div>
             </div>
@@ -279,6 +303,61 @@ function SettingsPanel() {
               </button>
               <button onClick={confirmAnyway} className="text-xs font-semibold px-4 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition-colors">
                 {labels.confirmAnyway}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Required-fields hard block — these actions have a hideable button, so
+          their shortcut may never be empty. No "confirm anyway" here. */}
+      {showRequiredWarn && (
+        <div className="absolute inset-0 z-[110] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setShowRequiredWarn(false)} />
+          <div className="relative w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-red-600">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <h4 className="text-sm font-bold text-slate-800">{labels.requiredTitle}</h4>
+            </div>
+            <p className="text-[13px] text-slate-600 leading-relaxed">
+              {labels.requiredBody}{' '}
+              <span className="font-semibold text-slate-800">{missingRequired.map(a => labels.actions[a]).join(', ')}</span>
+            </p>
+            <div className="flex items-center justify-end">
+              <button onClick={() => setShowRequiredWarn(false)} className="text-xs font-semibold px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
+                {labels.back}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hidden Home/Settings button — surface its keyboard fallback so the user
+          isn't stranded without an on-screen entry point. */}
+      {hiddenInfo && (
+        <div className="absolute inset-0 z-[110] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setHiddenInfo(null)} />
+          <div className="relative w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-6 flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-indigo-600">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+              </svg>
+              <h4 className="text-sm font-bold text-slate-800">{labels.hiddenTitle}</h4>
+            </div>
+            <p className="text-[13px] text-slate-600 leading-relaxed">{labels.hiddenBody}</p>
+            <div className="rounded-xl border border-slate-200 divide-y divide-slate-100">
+              {['home', 'settings'].map(a => (
+                <div key={a} className="flex items-center justify-between px-4 py-2.5">
+                  <span className="text-[13px] text-slate-600">{labels.actions[a]}</span>
+                  <kbd className="text-xs font-mono font-bold rounded-md border border-slate-300 bg-slate-50 text-slate-700 px-2 py-1 min-w-[2rem] text-center">{keyLabel(settings.shortcuts[hand][a], labels) || labels.unset}</kbd>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-end">
+              <button onClick={() => setHiddenInfo(null)} className="text-xs font-semibold px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors">
+                {labels.ok}
               </button>
             </div>
           </div>

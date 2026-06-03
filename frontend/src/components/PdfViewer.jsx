@@ -768,6 +768,12 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
     getScrollContainer() {
       return containerRef.current
     },
+
+    // Enter/exit tracking from Reader's keymap (the trackingToggle shortcut).
+    // tracking is in deps so this closes over a fresh handleToggleTracking.
+    toggleTracking() {
+      handleToggleTracking()
+    },
   }), [tracking, linearBlocks, pageDims])
 
   function scrollToStop(stop) {
@@ -1157,6 +1163,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
 
   const currentStopData = tracking ? readingSequence[currentStop] : null
 
+  // Hide the nav pill entirely when every control inside it is hidden, so a
+  // bare floating chrome bar never shows. Settings sits below it, gated alone.
+  const showNavRow = (onHome && visibility.home) || visibility.tracking || (tracking && visibility.viewType)
+
   return (
     <div className="relative h-full bg-gray-100">
       {visibility.zoom && (tracking ? (
@@ -1182,8 +1192,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       {/* Top-left navigation: the tracking toolbar row, with the Settings
           button stacked directly beneath the Home button. */}
       <div className="absolute top-4 left-4 z-30 flex flex-col items-start gap-2">
+        {showNavRow && (
         <div ref={trackingToolbarRef} className="flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none">
-          {onHome && (
+          {onHome && visibility.home && (
             <button
               onClick={onHome}
               className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
@@ -1238,8 +1249,12 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
             </>
           )}
         </div>
-        {/* Configuración — directly below the Home button. */}
-        <SettingsButton className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors" />
+        )}
+        {/* Configuración — directly below the Home button. Hideable; reachable
+            via its keyboard shortcut once hidden. */}
+        {visibility.settings && (
+          <SettingsButton className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors" />
+        )}
       </div>
 
       <div
