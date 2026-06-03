@@ -347,6 +347,30 @@ def _is_continuation(prev_text: str, new_text: str) -> bool:
     return first.isalpha() and first.islower()
 
 
+# Bullet / list-item opener. Marker emits each item of a bulleted or enumerated
+# list as its own `ListItem` paragraph, split off from the lead-in sentence that
+# introduces the list. Such an item is a continuation of the paragraph above it,
+# so it merges upward regardless of how it starts — unlike `_is_continuation`,
+# whose lowercase-first rule never fires on a "• …" / "1. …" / "(a) …" opener.
+# Require a marker followed by whitespace + content so a lone dash, a decimal
+# number, or "i.e." mid-sentence is not mistaken for a list marker.
+_BULLET_RE = re.compile(
+    r"^\s*(?:"
+    r"[-*–—•◦‣·∙▪▫]|"        # glyph bullets
+    r"\(?[a-z]\)|"            # a)  (a)
+    r"\(?\d{1,3}[.)]|"        # 1.  1)  (1)
+    r"[ivxlcdm]{1,4}[.)]"     # roman i.  ii)
+    r")\s+\S",
+    re.IGNORECASE,
+)
+
+
+def _is_bullet(text: str) -> bool:
+    """True when `text` opens with a list-item marker (glyph bullet, lettered,
+    numbered, or Roman). Such a block merges with the paragraph above it."""
+    return bool(_BULLET_RE.match(text or ""))
+
+
 # Absorbs bbox rounding / antialias noise when comparing block edges (PDF points).
 _GEOM_TOL = 2.0
 # Max vertical gap (in line heights) between a paragraph's bottom and its
@@ -925,7 +949,10 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
             if b.role != "paragraph":
                 _cont_log(f"    [{i}] skip role={b.role} text={_snip(b.text)!r}")
                 continue
-            lexical = bool(prev_text and _is_continuation(prev_text, b.text))
+            lexical = bool(
+                prev_text
+                and (_is_continuation(prev_text, b.text) or _is_bullet(b.text))
+            )
             next_bbox = _union_bbox(b.boxes) if b.boxes else None
             next_lh = _estimate_line_height(b.boxes or [])
             # Floats between prev and this paragraph on the same page (non-
@@ -1336,7 +1363,10 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
         if b.role != "paragraph":
             _cont_log(f"  [{i}] skip role={b.role} text={_snip(b.text)!r}")
             continue
-        lexical = bool(prev_para and _is_continuation(prev_para.text, b.text))
+        lexical = bool(
+            prev_para
+            and (_is_continuation(prev_para.text, b.text) or _is_bullet(b.text))
+        )
         line_h = max(
             _estimate_line_height([bx for s in prev_para.sentences for bx in s.boxes]) if prev_para else 0.0,
             _estimate_line_height([bx for s in b.sentences for bx in s.boxes]),
