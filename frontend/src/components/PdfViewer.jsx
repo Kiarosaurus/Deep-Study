@@ -1033,7 +1033,11 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       const d = dist(e.touches[0], e.touches[1])
       if (pinchStartDist > 0) {
         const ratio = d / pinchStartDist
-        const next  = pinchStartZoom * ratio
+        // Tracking renders the column at 1/userZoom, so spreading fingers must
+        // LOWER userZoom to grow it — same inversion onWheel applies via `sign`.
+        // Without this, pinch-to-zoom is reversed only while tracking is on.
+        const factor = trackingRef.current ? 1 / ratio : ratio
+        const next   = pinchStartZoom * factor
         setUserZoom(Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next)))
       }
     }
@@ -1237,7 +1241,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
       <div
         ref={containerRef}
         className="h-full overflow-auto"
-        style={{ touchAction: tracking ? 'none' : 'pan-x pan-y' }}
+        // Always allow native one-finger pan (both modes). Custom pinch-zoom
+        // still works: the 2-finger touchmove handler preventDefaults itself.
+        // 'none' here was what froze touch panning while tracking was on.
+        style={{ touchAction: 'pan-x pan-y' }}
       >
         {tracking ? (
           <div className="py-8 min-h-full" style={{ minWidth: 'fit-content' }}>
