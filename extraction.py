@@ -1043,12 +1043,13 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
             saw_label = False                   # a panel label seen since the last image
             run_union = BBox(**img.bbox.model_dump())  # image + stitched panels so far
             # FORWARD: sub-panel labels ("(a)", "b)", …) sitting between the
-            # image and its caption, the sub-panel IMAGES those labels tag (a
-            # multi-panel figure stacks several images under one shared caption),
-            # then the caption ("Figure N: …") and a "Source: …" line. Walk
-            # forward and absorb each; stop at the first non-absorbable block. A
-            # following image is stitched in ONLY when a panel label sat between
-            # it and the running figure AND it is geometrically a stacked panel.
+            # image and its caption, the sub-panel IMAGES of a multi-panel figure
+            # (stacked under one shared caption), then the caption ("Figure N: …")
+            # and a "Source: …" line. Walk forward and absorb each; stop at the
+            # first non-absorbable block. A following image is stitched in when it
+            # is a contiguous stacked panel AND the running figure has no caption
+            # of its own yet (or a panel label sat between them) — a forward
+            # caption/source closes the run, so two captioned figures never glue.
             d = 1
             while True:
                 neighbor = block_by_ri.get(ri + d)
@@ -1070,7 +1071,7 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                     and neighbor_img is not img
                     and id(neighbor_img) not in consumed_img_ids
                     and not (have_caption or have_source)
-                    and saw_label
+                    and (saw_label or not have_caption)
                     and _panels_contiguous(run_union, neighbor_img.bbox)
                 ):
                     panel_imgs.append(neighbor_img)
@@ -1257,11 +1258,16 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                     have_source = True
                 elif (
                     not (have_fwd_caption or have_source)
-                    and saw_label
+                    and (saw_label or not have_caption)
                     and nb.role in ("figure", "table")
                     and nb.page == b.page
                     and _panels_contiguous(run_union, nb.bbox)
                 ):
+                    # Stitch the next stacked image when EITHER a panel label sat
+                    # between them, OR the running figure has no caption of its
+                    # own yet ("the image immediately above carries no Figure
+                    # caption"). A caption (above or forward) closes the run, so
+                    # two independently-captioned figures are never glued.
                     panel_idxs.append(j)
                     run_union = _union_bbox([run_union, nb.bbox])
                     saw_label = False
