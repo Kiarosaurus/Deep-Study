@@ -7,6 +7,7 @@ import { usePageCache } from './use-page-cache'
 import { useUiLang } from '../i18n/LanguageContext'
 import { useSettings } from '../settings/SettingsContext'
 import { SettingsButton } from '../settings/SettingsModal'
+import { ThemeButton } from '../theme/ThemeToggle'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 4.0   // paginated zoom-in ceiling (400%)
@@ -1344,6 +1345,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
         {visibility.settings && (
           <SettingsButton className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/95 backdrop-blur shadow-md border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors" />
         )}
+        {/* Theme cycle (normal → sepia → soft-dark) stacked beneath Settings.
+            Hideable; the themeToggle shortcut still cycles when hidden. */}
+        {visibility.theme && <ThemeButton />}
       </div>
 
       <div

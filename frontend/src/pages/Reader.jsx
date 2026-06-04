@@ -5,7 +5,6 @@ import PdfViewer from '../components/PdfViewer'
 import Sidebar from '../components/Sidebar'
 import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '../components/highlight-utils'
 import { useUiLang } from '../i18n/LanguageContext'
-import { ThemeButton } from '../theme/ThemeToggle'
 import { useTheme } from '../theme/ThemeContext'
 import { ACTIONS, useSettings } from '../settings/SettingsContext'
 
@@ -903,9 +902,6 @@ export default function Reader() {
           explanation={explanation}
           onHome={handleHome}
         />
-        {/* Theme cycle: normal → sepia → soft-dark (bottom-left). Hideable via
-            settings; the themeToggle shortcut ("5") still cycles when hidden. */}
-        {visibility.theme && <ThemeButton className="absolute bottom-4 left-4 z-30" />}
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
         {visibility.hidePanel && (
