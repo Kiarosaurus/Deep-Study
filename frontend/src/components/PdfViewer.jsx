@@ -378,7 +378,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
-                onClick={() => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, text: payload.text })}
+                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, text: payload.text }, { x: e.clientX, y: e.clientY })}
               />
             )}
 
@@ -464,7 +464,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
-                onClick={() => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' })}
+                onClick={e => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' }, { x: e.clientX, y: e.clientY })}
               />
             )}
             {!armedTool && (

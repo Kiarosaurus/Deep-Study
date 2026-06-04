@@ -15,6 +15,39 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 // role override (e.g. { role: 'ignored' } for a mazo-demoted paragraph).
 const DEFAULT_EDITS = { pageOverrides: {} }
 
+// Block types offered by the pincel (promote) picker, in display order.
+const PROMOTE_TYPES = ['paragraph', 'figure', 'table', 'footnote', 'equation', 'code', 'caption']
+
+// Floating block-type picker for the pincel tool. Anchored at the click point,
+// clamped to the viewport. Backdrop closes it without choosing.
+function TypePicker({ x, y, onPick, onClose, t }) {
+  const left = Math.max(8, Math.min(x, window.innerWidth - 220))
+  const top  = Math.max(8, Math.min(y, window.innerHeight - 320))
+  return (
+    <>
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div
+        className="fixed z-50 w-52 bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 py-1.5 select-none"
+        style={{ left, top }}
+      >
+        <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+          {t('viewer.typePickerTitle')}
+        </div>
+        {PROMOTE_TYPES.map(role => (
+          <button
+            key={role}
+            type="button"
+            onClick={() => onPick(role)}
+            className="block w-full text-left px-3 py-1.5 text-[13px] text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+          >
+            {t(`viewer.type${role.charAt(0).toUpperCase()}${role.slice(1)}`)}
+          </button>
+        ))}
+      </div>
+    </>
+  )
+}
+
 async function postExplainWithRetry(payload, onRetry, maxAttempts = 3) {
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -215,6 +248,8 @@ export default function Reader() {
   // analysis and persisted to the backend so they survive reload. Declared
   // before the analysis-load effect, which hydrates them from disk.
   const [edits, setEdits] = useState(DEFAULT_EDITS)
+  // Pincel type picker: { target, x, y } anchored at the click, or null.
+  const [promotePicker, setPromotePicker] = useState(null)
   // JSON of the value last known in sync with the backend — lets the persist
   // effect skip the change triggered by hydration.
   const lastPersisted = useRef(null)
@@ -231,6 +266,7 @@ export default function Reader() {
         lastPersisted.current = JSON.stringify(ed)
         setEdits(ed)
         disarm()  // never carry an armed tool across documents
+        setPromotePicker(null)
       })
       .catch(() => setErrorAnalysis(true))
       .finally(() => setLoadingAnalysis(false))
@@ -270,27 +306,40 @@ export default function Reader() {
     })
   }, [analysis, edits])
 
+  // Commit a role override on one block, recorded for undo/redo.
+  const applyRoleOverride = useCallback((target, role) => {
+    const key = `${target.page}:${target.reading_index}`
+    const prev = edits.pageOverrides[key]
+    commitEdit({
+      apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: { role } } })),
+      revert: () => setEdits(e => {
+        const po = { ...e.pageOverrides }
+        if (prev) po[key] = prev; else delete po[key]
+        return { ...e, pageOverrides: po }
+      }),
+    })
+  }, [edits, commitEdit])
+
   // Dispatch a click from an armed edit tool onto a target block/image. Each
   // completed operation is pushed through commitEdit so undo/redo can replay it.
-  const onBlockEdit = useCallback((target) => {
+  const onBlockEdit = useCallback((target, pos) => {
     if (!target) return
     if (armedTool === 'demote') {
       // Mazo: paragraph → non-paragraph. Only an explainable paragraph block is
       // a valid target; images and already-demoted blocks are ignored.
       if (target.kind !== 'block' || target.role !== 'paragraph') return
-      const key = `${target.page}:${target.reading_index}`
-      const prev = edits.pageOverrides[key]
-      commitEdit({
-        apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: { role: 'ignored' } } })),
-        revert: () => setEdits(e => {
-          const po = { ...e.pageOverrides }
-          if (prev) po[key] = prev; else delete po[key]
-          return { ...e, pageOverrides: po }
-        }),
-      })
+      applyRoleOverride(target, 'ignored')
+      return
     }
-    // 'promote' (pincel) and 'merge' (lazo) land in Phase 2b/2c.
-  }, [armedTool, edits, commitEdit])
+    if (armedTool === 'promote') {
+      // Pincel: open the block-type picker at the click; the chosen type becomes
+      // the block's role. Text blocks only (images are already figure/table).
+      if (target.kind !== 'block') return
+      setPromotePicker({ target, x: pos?.x ?? 0, y: pos?.y ?? 0 })
+      return
+    }
+    // 'merge' (lazo) lands in Phase 2c.
+  }, [armedTool, applyRoleOverride])
 
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
@@ -1040,6 +1089,17 @@ export default function Reader() {
           />
         </div>
       </div>
+
+      {/* Pincel block-type picker — floats at the click point. */}
+      {promotePicker && (
+        <TypePicker
+          x={promotePicker.x}
+          y={promotePicker.y}
+          t={t}
+          onClose={() => setPromotePicker(null)}
+          onPick={(role) => { applyRoleOverride(promotePicker.target, role); setPromotePicker(null) }}
+        />
+      )}
     </div>
   )
 }
