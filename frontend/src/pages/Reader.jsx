@@ -436,6 +436,38 @@ export default function Reader() {
     clearMergeBuffer()
   }, [mergeBuffer, commitEdit, clearMergeBuffer])
 
+  // Reverse bridge for tracking-mode editing: per linear block, the page-
+  // projection identity it maps to (by bbox overlap) plus its lazo state.
+  // Lets BlockCrop route tool clicks (onBlockEdit), tint selected/merged
+  // blocks, and explain a merge group from its representative — the same
+  // operations the paginated overlay supports. Indexed by linear block index.
+  const linearEditInfo = useMemo(() => {
+    if (!linearBlocks.length) return []
+    const pageIdx = {}
+    for (const p of (editedPages || [])) {
+      pageIdx[p.page] = {
+        blocks: (p.blocks || []).filter(b => b.boxes?.length)
+          .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role })),
+        images: (p.images || []).filter(im => im.bbox)
+          .map(im => ({ bbox: im.bbox, reading_index: im.reading_index, role: im.role || 'figure' })),
+      }
+    }
+    return linearBlocks.map(L => {
+      const p = pageIdx[L.page]
+      if (!p || !L.bbox) return null
+      let target = null
+      const b = p.blocks.find(x => bboxOverlapHigh(x.bbox, L.bbox))
+      if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role }
+      else {
+        const im = p.images.find(x => bboxOverlapHigh(x.bbox, L.bbox))
+        if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role }
+      }
+      if (!target) return null
+      const key = `${target.kind}:${target.page}:${target.reading_index}`
+      return { target, membership: mergeMembership[key], selected: selectedKeys.has(key) }
+    })
+  }, [linearBlocks, editedPages, mergeMembership, selectedKeys])
+
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
     () => buildContinuationPayloads(linearBlocks),
@@ -1179,6 +1211,7 @@ export default function Reader() {
           mergeSelectedKeys={selectedKeys}
           mergeMembership={mergeMembership}
           onExplainGroup={explainGroup}
+          linearEditInfo={linearEditInfo}
         />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}

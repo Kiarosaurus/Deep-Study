@@ -52,6 +52,10 @@ export default function LinearReader({
   activeParagraph,
   currentExplanation,
   explanation,
+  armedTool = null,
+  onBlockEdit,
+  onExplainGroup,
+  editInfo,
 }) {
   // If the parent already owns a doc, use it. Otherwise fall back to loading
   // from pdfFile ourselves (LinearReaderTest standalone case).
@@ -261,6 +265,10 @@ export default function LinearReader({
               activeParagraph={activeParagraph}
               currentExplanation={currentExplanation}
               explanation={explanation}
+              armedTool={armedTool}
+              onBlockEdit={onBlockEdit}
+              onExplainGroup={onExplainGroup}
+              editInfo={editInfo?.[origIdx] ?? null}
             />
           )
         })}
@@ -369,10 +377,18 @@ const BlockCrop = memo(function BlockCrop({
   activeParagraph,
   currentExplanation,
   explanation,
+  armedTool = null,
+  onBlockEdit,
+  onExplainGroup,
+  editInfo,
 }) {
   const { t } = useUiLang()
   const wrapperRef = useRef(null)
   const canvasRef  = useRef(null)
+  // Edit-mode bridge: page-projection identity + lazo state for this block.
+  const editTarget = editInfo?.target ?? null
+  const membership = editInfo?.membership
+  const selected   = !!editInfo?.selected
 
   const bbox = block.bbox
   // Equations: Marker sometimes emits a tight y-bbox that clips ascenders /
@@ -700,7 +716,7 @@ const BlockCrop = memo(function BlockCrop({
             />
           )}
 
-          {anchor && (
+          {anchor && !armedTool && (!membership || membership.isRep) && (
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
@@ -717,7 +733,9 @@ const BlockCrop = memo(function BlockCrop({
                   : 'translate(-100%, -100%)',
               }}
               onClick={() => {
-                if (isFigure) {
+                if (membership) {
+                  onExplainGroup?.(membership.groupId)
+                } else if (isFigure) {
                   onExplain?.(
                     block.caption_text || '',
                     [],
@@ -742,6 +760,35 @@ const BlockCrop = memo(function BlockCrop({
             >
               ✦
             </button>
+          )}
+        </div>
+      )}
+
+      {/* Edit-mode overlay: lazo selection (indigo) / committed group (emerald)
+          wash, plus a click-catcher that routes clicks to the edit handler while
+          a tool is armed. Rendered independently of isInteractive so demoted /
+          caption / equation blocks are still targetable by the tools. */}
+      {isRendered && (selected || membership || (armedTool && editTarget)) && (
+        <div className="absolute" style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight }}>
+          {(selected || membership) && (
+            <div
+              className="absolute pointer-events-none rounded-sm"
+              style={{
+                left: 0, top: 0, width: canvasWidth, height: displayHeight,
+                background: selected ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
+                border: selected ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+              }}
+            />
+          )}
+          {armedTool && editTarget && (
+            <button
+              type="button"
+              className="absolute rounded-sm transition-colors"
+              style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight, cursor: 'crosshair', background: 'transparent', border: '1px solid transparent' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
+              onClick={e => onBlockEdit?.(editTarget, { x: e.clientX, y: e.clientY })}
+            />
           )}
         </div>
       )}

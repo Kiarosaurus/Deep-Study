@@ -696,7 +696,7 @@ function EditToolbar() {
   )
 }
 
-const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }, ref) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, linearEditInfo }, ref) {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen } = useSettings()
   const visibility = settings.visibility
@@ -1549,6 +1549,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 activeParagraph={activeParagraph}
                 currentExplanation={currentExplanation}
                 explanation={explanation}
+                armedTool={armedTool}
+                onBlockEdit={onBlockEdit}
+                onExplainGroup={onExplainGroup}
+                editInfo={linearEditInfo}
               />
             )}
           </div>
