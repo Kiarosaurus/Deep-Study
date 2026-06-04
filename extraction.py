@@ -1609,8 +1609,17 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
 # an optional TITLE line, the Table block itself, and a trailing "Note." line.
 # This pass re-stitches that run into one role='table' block.
 _TABLE_LABEL_RE = re.compile(r"^\s*(?:table|tabla)\b", re.IGNORECASE)
-_TABLE_NOTE_RE = re.compile(r"^\s*(?:note|nota)\b\s*[.:]", re.IGNORECASE)
+# Table footnote opener. Widened beyond "Note."/"Nota.": also "Notes."/"Notas.",
+# a trailing colon, and a leading "*" (asterisk note common in APA tables).
+_TABLE_NOTE_RE = re.compile(r"^\s*(?:(?:notes?|notas?)\s*[.:]|\*)", re.IGNORECASE)
 _TABLE_LABEL_ROLES = frozenset({"paragraph", "caption", "section_header"})
+# How aggressively the label looks DOWN for its table: scan up to this many
+# blocks past the label (title lines may sit between), accepting a generous
+# vertical gap typical of APA whitespace. Intervening blocks must be short,
+# text-ish title lines — a long body paragraph stops the scan.
+_TABLE_LOOKAHEAD_MAX = 4
+_TABLE_TITLE_MAX_WORDS = 30
+_TABLE_LOOKAHEAD_HOVERLAP = 0.15  # table must share a column with the label
 
 
 def _is_table_label(b: FullBlock) -> bool:
@@ -1645,24 +1654,40 @@ def _merge_tables_linear(linear: list[FullBlock]) -> list[FullBlock]:
         if i in consumed:
             continue
         if _is_table_label(b):
-            # Look ahead ≤2 for the Table block (same page). A block sitting
-            # between the label and the table counts as the title only if it is
-            # itself a text-ish block (never another visual).
+            # Aggressively scan DOWN for the table block: skip over short
+            # title lines, tolerate the whitespace gap of APA layouts. Stop at a
+            # long body paragraph or any non-text block. The table must sit below
+            # the label and share its column (h-overlap), same page.
             table_idx = None
-            for j in (i + 1, i + 2):
-                if j >= n or j in consumed:
+            title_idxs = []
+            for j in range(i + 1, min(n, i + 1 + _TABLE_LOOKAHEAD_MAX)):
+                if j in consumed:
                     break
                 nb = linear[j]
-                if nb.role == "table" and nb.page == b.page:
+                if (
+                    nb.role == "table"
+                    and nb.page == b.page
+                    and nb.bbox.y1 >= b.bbox.y0
+                    and _hoverlap(b.bbox, nb.bbox) >= _TABLE_LOOKAHEAD_HOVERLAP
+                ):
                     table_idx = j
                     break
-                if nb.role not in _TABLE_LABEL_ROLES:
-                    break  # an unexpected block (figure, equation…) — not a title
+                # otherwise it can only be a short title line; a long paragraph
+                # or a non-text block is not part of the table.
+                if nb.role not in _TABLE_LABEL_ROLES or len((nb.text or "").split()) > _TABLE_TITLE_MAX_WORDS:
+                    break
+                title_idxs.append(j)
             if table_idx is not None:
-                members = list(range(i, table_idx + 1))  # label, [title], table
-                k = table_idx + 1
-                if k < n and k not in consumed and _is_table_note(linear[k]):
-                    members.append(k)
+                members = [i] + title_idxs + [table_idx]  # label, [titles], table
+                # Note may sit immediately after the table or one block down.
+                for k in range(table_idx + 1, min(n, table_idx + 3)):
+                    if k in consumed:
+                        continue
+                    if _is_table_note(linear[k]):
+                        members.append(k)
+                        break
+                    if linear[k].role not in ("paragraph", "caption"):
+                        break
 
                 table = linear[table_idx]
                 parts = [linear[m] for m in members]
@@ -1909,6 +1934,13 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
             )
         )
         fires = lexical and geom
+        # Table-note shield: a "Note."/"Notes."/"*" table footnote is standalone —
+        # never a continuation in EITHER direction. Stops the paragraph merger
+        # from hijacking a table's Note into the body text below it (or onto a
+        # preceding paragraph) when the table-stitch pass didn't already absorb
+        # it. Hard guard regardless of geometry.
+        if _is_table_note(b) or (prev_para is not None and _is_table_note(prev_para)):
+            fires = False
         _cont_log(
             f"  [{i}] check paragraph fires={fires} lexical={lexical} geom={geom} "
             f"prev_end={_snip(prev_para.text[-80:] if prev_para else '')!r} "
