@@ -2264,13 +2264,18 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
                 if _is_stop_header(header_text):
                     stop_content = True
                     break
-                if _is_skip_section(header_text):
+                if has_abstract and _is_skip_section(header_text):
                     skip_section = True
-                elif _is_body_section_name(header_text):
+                else:
+                    # Any other header ENDS a skip region (anti-stick), and when
+                    # the doc has no Abstract the skip never engages at all
+                    # (fallback) — so the discard flag can't get pinned True and
+                    # swallow the whole first page until a later header/figure.
                     skip_section = False
-                    pre_abstract = False
-                    if abstract_top is None and _is_abstract_header(header_text):
-                        abstract_top = bbox.y0
+                    if _is_body_section_name(header_text):
+                        pre_abstract = False
+                        if abstract_top is None and _is_abstract_header(header_text):
+                            abstract_top = bbox.y0
                 continue
 
             if bt not in _TEXT_TYPES:
@@ -2284,7 +2289,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
             # rather than a SectionHeader — standalone ("Keywords") or glued
             # ("Keywords: a, b, c"). Open body-skip so the term list that
             # follows is dropped too, then skip this block.
-            if bt in _BODY_TEXT_TYPES and (
+            if has_abstract and bt in _BODY_TEXT_TYPES and (
                 _is_skip_section(text) or _is_skip_section_inline(text)
             ):
                 skip_section = True
@@ -2559,10 +2564,14 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                     _extract_log(f"    → STOP stop_header {_snip(header_text)!r}")
                     stop_content = True
                     break
-                if _is_skip_section(header_text):
+                if has_abstract and _is_skip_section(header_text):
                     _extract_log(f"    → SKIP skip_section {_snip(header_text)!r}")
                     skip_section = True
                     continue
+                # Any other (non-skip) header ends a skip region; when the doc
+                # has no Abstract the skip never engaged in the first place. Keeps
+                # the discard flag from sticking True across the page.
+                skip_section = False
                 # First SectionHeader on page 1 is the paper title — even when
                 # its text happens to match a body-section regex (rare but
                 # possible, e.g. preprints whose first labeled block is the
@@ -2629,7 +2638,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
             # Keywords / CCS / Index-Terms boilerplate Marker emitted as Text
             # rather than a SectionHeader — standalone or glued to its term
             # list. Open body-skip so the list that follows is dropped too.
-            if bt in _BODY_TEXT_TYPES and (
+            if has_abstract and bt in _BODY_TEXT_TYPES and (
                 _is_skip_section(text) or _is_skip_section_inline(text)
             ):
                 _extract_log(f"    → SKIP skip_section inline {_snip(text)!r}")
