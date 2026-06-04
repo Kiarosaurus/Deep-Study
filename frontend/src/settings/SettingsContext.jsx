@@ -33,6 +33,7 @@ export const ACTIONS = [
   'promoteBlock',
   'mergeBlocks',
   'splitMerge',
+  'searchConcept',
 ]
 
 // Actions whose on-screen button can be hidden (see VISIBILITY_ITEMS), so the
@@ -40,7 +41,7 @@ export const ACTIONS = [
 // left empty. The Shortcuts editor hard-blocks Confirm if any of these is unset.
 export const REQUIRED_ACTIONS = [
   'trackingToggle', 'themeToggle', 'index', 'home', 'settings',
-  'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge',
+  'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge', 'searchConcept',
 ]
 
 // Two presets. 'right' drives the I/J/K/L cluster on the right side of the
@@ -55,7 +56,7 @@ export const DEFAULT_SHORTCUTS = {
     explainTab: 'u', globalTab: 'p', toggleSidebar: '4',
     trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
     // Edit toolbar — right-hand cluster keys.
-    undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';', splitMerge: 'b',
+    undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';', splitMerge: 'b', searchConcept: 'g',
   },
   left: {
     focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
@@ -63,14 +64,14 @@ export const DEFAULT_SHORTCUTS = {
     explainTab: 'e', globalTab: 'r', toggleSidebar: '4',
     trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
     // Edit toolbar — left-hand cluster keys (F/G/Z/X/C/V).
-    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v',
+    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v', searchConcept: 'b',
   },
 }
 
 // On-screen elements that can be individually shown/hidden. Hiding 'home' or
 // 'settings' leaves their keyboard shortcut as the only entry point, so the
 // SettingsModal surfaces those bindings in an info popup when toggled off.
-export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'theme', 'hidePanel', 'zoom', 'conceptScroll', 'index', 'home', 'settings', 'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge']
+export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'theme', 'hidePanel', 'zoom', 'conceptScroll', 'index', 'home', 'settings', 'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge', 'searchConcept']
 
 // Panel (global map + explanation) width as a percentage of the viewport.
 // Slider-controlled in settings; clamped so the panel stays usable without
@@ -84,7 +85,7 @@ export const DEFAULT_SETTINGS = {
   handMode: 'left',           // 'right' | 'left' — left hand is the default
   panelSide: 'right',         // sidebar on the 'right' | 'left'
   panelWidthPct: PANEL_WIDTH_DEFAULT,   // panel width as % of viewport width
-  visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, index: true, home: true, settings: true, undo: true, redo: true, demoteBlock: true, promoteBlock: true, mergeBlocks: true, splitMerge: true },
+  visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, index: true, home: true, settings: true, undo: true, redo: true, demoteBlock: true, promoteBlock: true, mergeBlocks: true, splitMerge: true, searchConcept: true },
 }
 
 const SettingsCtx = createContext(null)

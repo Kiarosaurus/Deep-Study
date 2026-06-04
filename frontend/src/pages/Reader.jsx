@@ -1084,6 +1084,15 @@ export default function Reader() {
       if (action === 'promoteBlock') { e.preventDefault(); armTool('promote'); return }
       if (action === 'mergeBlocks')  { e.preventDefault(); armTool('merge');   return }
       if (action === 'splitMerge')   { e.preventDefault(); armTool('split');   return }
+      if (action === 'searchConcept'){ e.preventDefault(); armTool('search');  return }
+
+      // Shared Accept (Enter) / Cancel (Delete) for interactive selection tools.
+      // Lazo: Enter commits the buffered merge, Delete clears the selection.
+      // (The search/lupa selection wires its own confirm/cancel here too.)
+      if (armedTool === 'merge') {
+        if (e.key === 'Enter') { e.preventDefault(); confirmMerge(); return }
+        if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearMergeBuffer(); return }
+      }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -1139,7 +1148,7 @@ export default function Reader() {
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme, armTool, undo, redo])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme, armTool, undo, redo, armedTool, confirmMerge, clearMergeBuffer])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and

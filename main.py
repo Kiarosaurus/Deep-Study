@@ -19,6 +19,8 @@ from models import (
     DocumentInfo,
     ExplainRequest,
     ExplainResponse,
+    ExtractConceptRequest,
+    ExtractedConcepts,
     FullBlock,
     GlobalMapping,
     PageBlocks,
@@ -668,6 +670,57 @@ async def explain_paragraph(req: ExplainRequest):
         return _generate_json(
             _EXPLAIN_MODEL, prompt, _build_explain_config(EXPLAIN_PROMPT, req.language)
         )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
+
+
+EXTRACT_CONCEPT_PROMPT = """Actúa como un experto analizador de texto académico.
+
+El usuario ha RESALTADO MANUALMENTE un fragmento exacto dentro de un párrafo de \
+un paper científico (te llega marcado como "Fragmento EXACTO resaltado por el \
+usuario"). El párrafo padre completo se incluye solo como contexto.
+
+Tu tarea es OBLIGATORIA: extrae AL MENOS UNO (uno o más) conceptos importantes \
+presentes en ese fragmento resaltado. IGNORA por completo si esos conceptos ya \
+fueron extraídos antes — el usuario quiere forzar su extracción ahora. NO \
+respondas que no hay conceptos: si el fragmento es corto, extrae igualmente el \
+término más relevante que contenga.
+
+Para cada concepto entrega:
+- "term": el término o concepto exacto (preferentemente tal como aparece en el \
+  fragmento).
+- "explanation": una explicación clara y autocontenida del concepto, apoyada en \
+  el contexto del párrafo y el Mapa Global del paper.
+
+Devuelve EXCLUSIVAMENTE el JSON con la forma { "concepts": [ { "term", \
+"explanation" } ] }. No agregues texto fuera del JSON."""
+
+
+def _build_extract_config(language: str) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=EXTRACT_CONCEPT_PROMPT + _explain_lang_rule(language),
+        response_mime_type="application/json",
+        response_schema=ExtractedConcepts,
+        max_output_tokens=4096,
+    )
+
+
+@app.post("/extract-concept/")
+async def extract_concept(req: ExtractConceptRequest):
+    """Force-extract at least one concept from a user-highlighted fragment
+    (lupa tool). Returns { concepts: [{term, explanation}] }; the frontend
+    injects these into the active paragraph's explanation."""
+    sel = (req.selected_text or "").strip()
+    if not sel:
+        raise HTTPException(status_code=400, detail="selected_text is empty")
+    context = "\n".join(req.paragraph_sentences) if req.paragraph_sentences else "(sin contexto)"
+    prompt = (
+        f"Mapa Global del paper:\n{json.dumps(req.global_map, ensure_ascii=False)}"
+        f"\n\nPárrafo padre (solo contexto):\n{context}"
+        f"\n\nFragmento EXACTO resaltado por el usuario:\n{sel}"
+    )
+    try:
+        return _generate_json(_EXPLAIN_MODEL, prompt, _build_extract_config(req.language))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini API error: {str(e)}")
 

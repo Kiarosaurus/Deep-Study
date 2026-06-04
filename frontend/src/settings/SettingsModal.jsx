@@ -28,6 +28,7 @@ const L = {
       undo: 'Deshacer último cambio', redo: 'Rehacer último cambio',
       demoteBlock: 'Mazo: párrafo → no-párrafo', promoteBlock: 'Pincel: no-párrafo → párrafo',
       mergeBlocks: 'Lazo: fusión manual', splitMerge: 'Tijeras: cortar fusión',
+      searchConcept: 'Lupa: extraer concepto de selección',
     },
     vis: {
       tracking: 'Botón de tracking', viewType: 'Navegación de vista (parada / contador)',
@@ -37,6 +38,7 @@ const L = {
       undo: 'Botón deshacer', redo: 'Botón rehacer',
       demoteBlock: 'Botón mazo (párrafo → no-párrafo)', promoteBlock: 'Botón pincel (no-párrafo → párrafo)',
       mergeBlocks: 'Botón lazo (fusión manual)', splitMerge: 'Botón tijeras (cortar fusión)',
+      searchConcept: 'Botón lupa (extraer concepto)',
     },
   },
   en: {
@@ -61,6 +63,7 @@ const L = {
       undo: 'Undo last change', redo: 'Redo last change',
       demoteBlock: 'Mallet: paragraph → non-paragraph', promoteBlock: 'Brush: non-paragraph → paragraph',
       mergeBlocks: 'Lasso: manual merge', splitMerge: 'Scissors: cut merge',
+      searchConcept: 'Magnifier: extract concept from selection',
     },
     vis: {
       tracking: 'Tracking button', viewType: 'View navigation (stop / counter)',
@@ -70,6 +73,7 @@ const L = {
       undo: 'Undo button', redo: 'Redo button',
       demoteBlock: 'Mallet button (paragraph → non-paragraph)', promoteBlock: 'Brush button (non-paragraph → paragraph)',
       mergeBlocks: 'Lasso button (manual merge)', splitMerge: 'Scissors button (cut merge)',
+      searchConcept: 'Magnifier button (extract concept)',
     },
   },
 }

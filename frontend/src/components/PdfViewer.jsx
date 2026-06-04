@@ -657,7 +657,7 @@ function EditToolbar() {
   const activeBtn = 'bg-indigo-600 text-white hover:bg-indigo-700'
 
   const showHistory = v.undo || v.redo
-  const showTools = v.demoteBlock || v.promoteBlock || v.mergeBlocks || v.splitMerge
+  const showTools = v.demoteBlock || v.promoteBlock || v.mergeBlocks || v.splitMerge || v.searchConcept
   if (!showHistory && !showTools) return null
 
   const svg = (children) => (
@@ -706,6 +706,12 @@ function EditToolbar() {
             <button type="button" onClick={() => armTool('split')} title={t('viewer.toolSplit')} aria-label={t('viewer.toolSplit')}
               className={`${baseBtn} ${armedTool === 'split' ? activeBtn : idleBtn}`}>
               {svg(<><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></>)}
+            </button>
+          )}
+          {v.searchConcept && (
+            <button type="button" onClick={() => armTool('search')} title={t('viewer.toolSearch')} aria-label={t('viewer.toolSearch')}
+              className={`${baseBtn} ${armedTool === 'search' ? activeBtn : idleBtn}`}>
+              {svg(<><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>)}
             </button>
           )}
         </div>

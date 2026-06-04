@@ -12,9 +12,9 @@ import { createContext, useCallback, useContext, useMemo, useState } from 'react
 const EditCtx = createContext(null)
 
 // The click-mode tools. `null` = no tool armed (normal explain clicks).
-// 'split' (scissors) cuts a merge: removes a manual lazo group, or blocks a
-// natural continuation join.
-export const TOOLS = ['demote', 'promote', 'merge', 'split']
+// 'split' (scissors) cuts a merge. 'search' (lupa) is a 2-click in-paragraph
+// text selection that force-extracts a concept from the highlighted fragment.
+export const TOOLS = ['demote', 'promote', 'merge', 'split', 'search']
 
 export function EditProvider({ children }) {
   const [armedTool, setArmedTool] = useState(null)

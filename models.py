@@ -189,3 +189,18 @@ class ParagraphContext(BaseModel):
 class ExplainResponse(BaseModel):
     sentence_explanations: list[SentenceExplanation]
     paragraph_context: ParagraphContext
+
+
+class ExtractConceptRequest(BaseModel):
+    """Forced concept extraction from a user-highlighted fragment (lupa tool).
+    `selected_text` is the exact fragment; `paragraph_sentences` is the parent
+    paragraph for context (so the model reads the fragment in situ)."""
+    selected_text: str
+    paragraph_sentences: list[str] = []
+    global_map: dict
+    language: str = "es"
+
+
+class ExtractedConcepts(BaseModel):
+    """At least one concept the model was forced to pull from the selection."""
+    concepts: list[ConceptExplanation]
