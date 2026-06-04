@@ -1097,7 +1097,18 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
             have_caption = False
             have_source = False
             saw_label = False                   # a panel label seen since the last image
+            fwd_cap = None                      # forward main caption block, if any
             run_union = BBox(**img.bbox.model_dump())  # image + stitched panels so far
+            # Nearest caption candidate sitting ABOVE the image (tables put it
+            # there). Recorded up front so the panel gate knows the figure is not
+            # captionless; the 1:1 lock picks the nearest of above/below later.
+            above_cap = None
+            for dd in (-1, -2):
+                nb_above = block_by_ri.get(ri + dd)
+                if nb_above is not None and id(nb_above) not in consumed_ids and _is_caption_block_pages(nb_above):
+                    above_cap = nb_above
+                    break
+            have_above = above_cap is not None
             # FORWARD: sub-panel labels ("(a)", "b)", …) sitting between the
             # image and its caption, the sub-panel IMAGES of a multi-panel figure
             # (stacked under one shared caption), then the caption ("Figure N: …")
@@ -1123,6 +1134,7 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                         saw_label = True
                     elif not have_caption and _is_caption_block_pages(neighbor):
                         pieces.append(neighbor)
+                        fwd_cap = neighbor
                         have_caption = True
                     elif not have_source and _is_source_attribution(neighbor):
                         pieces.append(neighbor)
@@ -1134,7 +1146,7 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                     and neighbor_img is not img
                     and id(neighbor_img) not in consumed_img_ids
                     and not (have_caption or have_source)
-                    and (saw_label or not have_caption)
+                    and (saw_label or not (have_caption or have_above))
                     and (
                         _panels_contiguous(run_union, neighbor_img.bbox)       # vertical stack
                         or _panels_side_by_side(run_union, neighbor_img.bbox)  # horizontal row
@@ -1146,16 +1158,18 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                 else:
                     break
                 d += 1
-            # ABOVE: a caption sitting over the visual (tables put it there).
-            if not have_caption:
-                for d in (-1, -2):
-                    neighbor = block_by_ri.get(ri + d)
-                    if neighbor is None or id(neighbor) in consumed_ids:
-                        continue
-                    if _is_caption_block_pages(neighbor):
-                        pieces.append(neighbor)
-                        have_caption = True
-                        break
+            # ── 1:1 main-caption lock ──────────────────────────────────────────
+            # Pick the spatially NEAREST main caption between the above candidate
+            # and the forward one; consume only it. The loser stays an
+            # independent text block. Sub-captions / source / panels stay merged.
+            if have_above:
+                above_gap = (img.bbox.y0 - _union_bbox(above_cap.boxes).y1) if above_cap.boxes else float("inf")
+                fwd_gap = (_union_bbox(fwd_cap.boxes).y0 - img.bbox.y1) if (fwd_cap is not None and fwd_cap.boxes) else float("inf")
+                if above_gap <= fwd_gap:
+                    if fwd_cap is not None:
+                        pieces = [pp for pp in pieces if pp is not fwd_cap]   # release below caption
+                    pieces.append(above_cap)
+                # else: below wins → leave the above caption independent
             if not pieces and not panel_imgs:
                 _cont_log(f"    image ri={ri} role={img.role}: no caption found")
                 continue
@@ -1289,16 +1303,22 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             # BOTH. A Source line never belongs above the image.
             piece_idxs: list[int] = []   # text pieces (labels / caption / source)
             panel_idxs: list[int] = []   # extra figure/table panels stitched into this one
-            have_caption = False
+            have_caption = False         # a MAIN caption found FORWARD (below)
             have_fwd_caption = False     # caption found BELOW (forward) — terminates the panel run
             have_source = False
             saw_label = False            # a panel label was seen since the last image
+            fwd_cap_idx = None           # index of the forward main caption, if any
             run_union = BBox(**b.bbox.model_dump())  # figure + stitched panels so far
-            # ABOVE: caption only. Sets have_caption but NOT have_fwd_caption, so
-            # a caption above the figure does not block stitching panels below it.
-            if i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
-                piece_idxs.append(i - 1)
-                have_caption = True
+            # ABOVE: only RECORD the nearest caption candidate directly above — do
+            # not attach it yet. The 1:1 main-caption lock (after the walk) keeps
+            # exactly one caption: the spatially nearest of the above/below
+            # candidates; the loser is left as an independent text block.
+            above_idx = (
+                i - 1 if (i - 1 >= 0 and i - 1 not in consumed
+                          and _is_caption_block_linear(blocks[i - 1]))
+                else None
+            )
+            have_above = above_idx is not None
             # BELOW: contiguous figure pieces — sub-panel labels ("(a)", "b)",
             # …), the sub-panel IMAGES they label (a multi-panel figure stacks
             # several images, each tagged "(a)/(b)/…", under one shared caption),
@@ -1324,6 +1344,7 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                     saw_label = True
                 elif not have_caption and _is_caption_block_linear(nb):
                     piece_idxs.append(j)
+                    fwd_cap_idx = j
                     have_caption = True
                     have_fwd_caption = True
                 elif not have_source and _is_source_attribution(nb):
@@ -1331,7 +1352,7 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                     have_source = True
                 elif (
                     not (have_fwd_caption or have_source)
-                    and (saw_label or not have_caption)
+                    and (saw_label or not (have_caption or have_above))
                     and nb.role in ("figure", "table")
                     and nb.page == b.page
                     and (
@@ -1351,10 +1372,26 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                 else:
                     break
                 j += 1
+            # ── 1:1 main-caption lock ──────────────────────────────────────────
+            # Choose the spatially NEAREST main caption between the above
+            # candidate and the forward one; consume only it. The other is left
+            # as an independent text block. Sub-captions / panels stay merged.
+            if have_above:
+                above_gap = b.bbox.y0 - blocks[above_idx].bbox.y1
+                fwd_gap = (
+                    blocks[fwd_cap_idx].bbox.y0 - b.bbox.y1
+                    if fwd_cap_idx is not None else float("inf")
+                )
+                if above_gap <= fwd_gap:
+                    piece_idxs.append(above_idx)           # above wins
+                    if fwd_cap_idx is not None:
+                        piece_idxs.remove(fwd_cap_idx)     # release the below caption
+                # else: below wins → leave the above caption independent
+
             if piece_idxs or panel_idxs:
                 # The above-caption was already appended to `merged` on its own
                 # iteration — drop it so it isn't emitted as a standalone block.
-                if (i - 1) in piece_idxs and merged and merged[-1] is blocks[i - 1]:
+                if above_idx is not None and above_idx in piece_idxs and merged and merged[-1] is blocks[i - 1]:
                     merged.pop()
                 caps = sorted((blocks[j] for j in piece_idxs), key=lambda c: c.bbox.y0)
                 _cont_log(
