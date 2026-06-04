@@ -313,6 +313,45 @@ def _is_dense_name_list(text: str) -> bool:
     return proper >= 0.6 * len(words)
 
 
+# An email address (domain must carry a dot + TLD). Spots masthead contact
+# blocks that slipped past the pre-abstract gate.
+_EMAIL_RE = re.compile(r"[^\s@,;()<>]+@[^\s@,;()<>]+\.[A-Za-z]{2,}")
+
+
+def _is_contact_block(text: str) -> bool:
+    """Author / affiliation / email masthead block that the pre-abstract gate
+    misses when Marker emits it AFTER the Abstract heading — common in two-column
+    layouts and bottom-of-page affiliation footnotes, where reading order places
+    the contact block past the point `pre_abstract` was cleared. Evaluated on
+    page 1 regardless of `pre_abstract`.
+
+    High precision so flowing body prose is never dropped: the block must carry
+    an email address, OR be an affiliation line (affiliation keyword + proper-
+    noun-heavy + no terminal sentence punctuation — real prose ends in . ? !)."""
+    t = text.strip()
+    if not t:
+        return False
+    n_emails = len(_EMAIL_RE.findall(t))
+    if n_emails >= 2:
+        return True  # an address list ("a@x.edu, b@y.edu") is unambiguous
+    words = t.split()
+    if not words:
+        return False
+    proper = sum(
+        1 for w in words
+        if (tok := w.strip(_NAME_STRIP_CHARS)) and _PROPER_NOUN_RE.match(tok)
+    )
+    proper_frac = proper / len(words)
+    # A single email counts only in a masthead context (affiliation keyword or a
+    # name-heavy fragment), never mid-prose.
+    if n_emails == 1 and (proper_frac >= 0.4 or _SOFT_NOISE_RE.search(t)):
+        return True
+    # Affiliation line with no email: keyword + name-heavy + not a sentence.
+    if _SOFT_NOISE_RE.search(t) and proper_frac >= 0.4 and t[-1] not in ".?!…":
+        return True
+    return False
+
+
 # ── Paragraph continuation detection ─────────────────────────────────────────
 
 # Debug toggle: set DEEPSTUDY_CONT_DEBUG=1 in the backend env to dump the
@@ -1971,7 +2010,10 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
 
             # Page-1 noise filters.
             if page_idx == 0:
-                if _is_hard_noise(text):
+                # Hard noise + masthead contact blocks drop regardless of the
+                # pre-abstract window: an email/affiliation block read after the
+                # Abstract heading would otherwise leak as a body paragraph.
+                if _is_hard_noise(text) or _is_contact_block(text):
                     continue
                 if pre_abstract and (
                     _is_soft_noise(text)
@@ -2318,11 +2360,15 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                 if _is_hard_noise(text):
                     _extract_log(f"    → SKIP hard_noise {_snip(text)!r}")
                     continue
-                if pre_abstract and (
+                # Masthead contact blocks (emails / affiliations) tag as 'author'
+                # regardless of the pre-abstract window — same reason as the
+                # per-page pipeline: Marker can emit them after the Abstract
+                # heading, past the point pre_abstract was cleared.
+                if _is_contact_block(text) or (pre_abstract and (
                     _is_soft_noise(text)
                     or _looks_like_author_line(text)
                     or _is_dense_name_list(text)
-                ):
+                )):
                     role = "author"
 
             sentences = (
