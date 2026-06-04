@@ -984,6 +984,17 @@ def _is_panel_label(text: str) -> bool:
     return len(t.split()) <= 5 and bool(_PANEL_LABEL_RE.match(t))
 
 
+def _is_subfigure_caption(text: str) -> bool:
+    """A paragraph that OPENS with a sub-figure marker — "(a)", "a)", "(b)",
+    "(ii)" — regardless of length. `_is_panel_label` only accepts the SHORT
+    standalone marker (≤5 words); a real sub-caption often carries a full
+    description ("(c) Modeling a Multi-GPU Platform with Page-Migration."), and
+    that longer form must NOT break the vertical merge walk (the bug this fixes).
+    Bare-number markers ("(1)") are excluded by `_PANEL_LABEL_RE` itself — those
+    are body enumerations, not sub-figures."""
+    return bool(_PANEL_LABEL_RE.match((text or "").strip()))
+
+
 # Geometry for stitching sub-panels of ONE multi-panel figure into a single
 # composite block. Two arrangements are recognised:
 #   • vertical stack  — panels share a column (high HORIZONTAL overlap), a thin
@@ -996,18 +1007,24 @@ _PANEL_RUN_HOVERLAP_MIN = 0.35   # min horizontal overlap for a vertical stack
 _PANEL_RUN_VOVERLAP_MIN = 0.40   # min vertical overlap for a side-by-side row
 _PANEL_RUN_GAP_FRAC = 0.75   # max inter-panel gap as a fraction of the shorter panel extent
 _PANEL_RUN_GAP_ABS = 48.0    # absolute floor (PDF pts) tolerating the label line + gutter
+_PANEL_RUN_OVERLAP_FRAC = 0.5  # max tolerated vertical OVERLAP (Marker bbox slop on stacked panels)
 
 
 def _panels_contiguous(union: BBox, nxt: BBox) -> bool:
     """True when `nxt` is the next vertically-stacked panel of the same figure:
-    same column (horizontal overlap with the running union) and a small downward
-    gap below it."""
+    same column (horizontal overlap) and sitting (mostly) below the running
+    union. Marker's bboxes for stacked panels frequently OVERLAP by a few points
+    (e.g. MGPUSim Figure 8: panel-a bottom y=180, panel-b top y=174), so a small
+    negative gap is tolerated — up to a fraction of the shorter panel's height.
+    `nxt` must still extend below the union so a contained/above box is rejected."""
     if _hoverlap(union, nxt) < _PANEL_RUN_HOVERLAP_MIN:
         return False
-    gap = nxt.y0 - union.y1
-    if gap < -_GEOM_TOL:
-        return False  # overlaps or sits above the union — not a clean downward stack
     h = min(union.y1 - union.y0, nxt.y1 - nxt.y0)
+    gap = nxt.y0 - union.y1
+    if gap < -_PANEL_RUN_OVERLAP_FRAC * h:
+        return False  # overlaps too much — not a clean downward stack
+    if nxt.y1 <= union.y1 + _GEOM_TOL:
+        return False  # nxt does not extend below the union (contained / above)
     return gap <= max(_PANEL_RUN_GAP_ABS, _PANEL_RUN_GAP_FRAC * h)
 
 
@@ -1094,7 +1111,14 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                 neighbor = block_by_ri.get(ri + d)
                 neighbor_img = img_by_ri.get(ri + d)
                 if neighbor is not None and id(neighbor) not in consumed_ids:
-                    if not (have_caption or have_source) and _is_panel_label(neighbor.text):
+                    if (
+                        not (have_caption or have_source)
+                        and _is_subfigure_caption(neighbor.text)
+                        and (not neighbor.boxes or _hoverlap(run_union, _union_bbox(neighbor.boxes)) >= _PANEL_RUN_HOVERLAP_MIN)
+                    ):
+                        # Sub-figure marker / sub-caption ("(a)", "(c) Modeling …")
+                        # of any length — does not break the walk; same-column
+                        # guard avoids pulling in an unrelated "(a)…" list.
                         pieces.append(neighbor)
                         saw_label = True
                     elif not have_caption and _is_caption_block_pages(neighbor):
@@ -1286,7 +1310,16 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             j = i + 1
             while j < len(blocks) and j not in consumed:
                 nb = blocks[j]
-                if not (have_fwd_caption or have_source) and _is_panel_label(nb.text):
+                # Sub-figure marker line ("(a)", "(b)", or a full sub-caption
+                # "(c) Modeling …"). Length is NOT capped here (unlike a bare
+                # panel label) so a descriptive sub-caption does not break the
+                # walk; require same-column overlap so an unrelated "(a)…" list
+                # elsewhere is not pulled in. Keeps the cascade going upward.
+                if (
+                    not (have_fwd_caption or have_source)
+                    and _is_subfigure_caption(nb.text)
+                    and (nb.bbox is None or _hoverlap(run_union, nb.bbox) >= _PANEL_RUN_HOVERLAP_MIN)
+                ):
                     piece_idxs.append(j)
                     saw_label = True
                 elif not have_caption and _is_caption_block_linear(nb):
