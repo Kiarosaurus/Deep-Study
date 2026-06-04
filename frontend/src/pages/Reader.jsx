@@ -13,7 +13,9 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
 // Empty manual-edit state. `pageOverrides` maps "<page>:<reading_index>" → a
 // role override (e.g. { role: 'ignored' } for a mazo-demoted paragraph).
-const DEFAULT_EDITS = { pageOverrides: {} }
+// `mergeGroups` are lazo-created units explained as one (figure if any image
+// member, else combined paragraph + footnote-type members).
+const DEFAULT_EDITS = { pageOverrides: {}, mergeGroups: [] }
 
 // Block types offered by the pincel (promote) picker, in display order.
 const PROMOTE_TYPES = ['paragraph', 'figure', 'table', 'footnote', 'equation', 'code', 'caption']
@@ -156,7 +158,7 @@ export default function Reader() {
   const { settings, isOpen: settingsOpen, openSettings } = useSettings()
   const { visibility, panelSide, panelWidthPct } = settings
   const { cycleTheme } = useTheme()
-  const { armTool, armedTool, disarm, commitEdit, undo, redo } = useEdit()
+  const { armTool, armedTool, disarm, commitEdit, undo, redo, mergeBuffer, addToMergeBuffer, clearMergeBuffer } = useEdit()
   const { filename } = useParams()
 
   // Panel occupies a user-configurable share of the viewport (settings slider),
@@ -261,7 +263,7 @@ export default function Reader() {
         // Hydrate manual edits from disk in the same callback (not a synchronous
         // effect body) so undo/redo start clean and the persist effect skips it.
         const ed = res.data?.edits && typeof res.data.edits === 'object'
-          ? { pageOverrides: res.data.edits.pageOverrides ?? {} }
+          ? { pageOverrides: res.data.edits.pageOverrides ?? {}, mergeGroups: res.data.edits.mergeGroups ?? [] }
           : DEFAULT_EDITS
         lastPersisted.current = JSON.stringify(ed)
         setEdits(ed)
@@ -338,8 +340,54 @@ export default function Reader() {
       setPromotePicker({ target, x: pos?.x ?? 0, y: pos?.y ?? 0 })
       return
     }
-    // 'merge' (lazo) lands in Phase 2c.
-  }, [armedTool, applyRoleOverride])
+    if (armedTool === 'merge') {
+      // Lazo: toggle the object in the selection buffer. Only explainables are
+      // selectable — an image, or a non-demoted block (demote a block first via
+      // pincel to make it explainable). The buffer is committed on confirm.
+      const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
+      if (!explainable) return
+      addToMergeBuffer({
+        key: `${target.kind}:${target.page}:${target.reading_index}`,
+        kind: target.kind,
+        page: target.page,
+        reading_index: target.reading_index,
+        role: target.role,
+      })
+      return
+    }
+  }, [armedTool, applyRoleOverride, addToMergeBuffer])
+
+  // Keys currently selected for an in-progress lazo merge (persistent tint).
+  const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
+
+  // Resolve committed merge groups to a per-object lookup: key → { groupId,
+  // isRep }. The representative (first member) carries the group's ✦ button.
+  const mergeMembership = useMemo(() => {
+    const map = {}
+    for (const g of (edits.mergeGroups || [])) {
+      g.members.forEach((m, i) => {
+        map[`${m.kind}:${m.page}:${m.reading_index}`] = { groupId: g.id, isRep: i === 0 }
+      })
+    }
+    return map
+  }, [edits])
+
+  // Commit the buffered selection as one merge group. Members must share a page
+  // (the per-page overlay renders the group's ✦ on one page). explainAs=figure
+  // when any member is an image, else paragraph.
+  const confirmMerge = useCallback(() => {
+    if (mergeBuffer.length < 2) return
+    const page = mergeBuffer[0].page
+    if (mergeBuffer.some(m => m.page !== page)) return
+    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index }))
+    const explainAs = members.some(m => m.kind === 'image') ? 'figure' : 'paragraph'
+    const id = `mg-${page}-${members.map(m => `${m.kind[0]}${m.reading_index}`).join('-')}`
+    commitEdit({
+      apply: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(g => g.id !== id), { id, members, explainAs }] })),
+      revert: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(g => g.id !== id) })),
+    })
+    clearMergeBuffer()
+  }, [mergeBuffer, commitEdit, clearMergeBuffer])
 
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
@@ -651,6 +699,53 @@ export default function Reader() {
   }, [analysis, decoded, t])
 
   const handleHome = useCallback(() => navigate('/'), [navigate])
+
+  // Explain a lazo merge group as ONE unit. Type-aware, reusing the existing
+  // explain flows (no change to their internals): a group with any image member
+  // explains as a figure (union bbox + combined captions); otherwise the
+  // paragraph members are concatenated and footnote-role members feed the
+  // footnotes channel — the same path a symbol footnote already takes.
+  const explainGroup = useCallback((groupId) => {
+    const g = (edits.mergeGroups || []).find(x => x.id === groupId)
+    if (!g || !editedPages) return
+    const resolved = g.members.map(m => {
+      const p = editedPages.find(pg => pg.page === m.page)
+      if (!p) return null
+      if (m.kind === 'image') {
+        const img = (p.images || []).find(im => im.reading_index === m.reading_index)
+        return img ? { kind: 'image', page: m.page, ...img } : null
+      }
+      const b = (p.blocks || []).find(bl => bl.reading_index === m.reading_index)
+      return b ? { kind: 'block', page: m.page, ...b } : null
+    }).filter(Boolean)
+    if (!resolved.length) return
+
+    if (g.explainAs === 'figure') {
+      const imgs = resolved.filter(r => r.kind === 'image')
+      if (!imgs.length) return
+      const base = imgs[0]
+      const bbox = imgs.reduce((acc, im) => ({
+        x0: Math.min(acc.x0, im.bbox.x0), y0: Math.min(acc.y0, im.bbox.y0),
+        x1: Math.max(acc.x1, im.bbox.x1), y1: Math.max(acc.y1, im.bbox.y1),
+      }), { ...base.bbox })
+      const caption_text = resolved
+        .map(r => r.kind === 'image' ? (r.caption_text || '') : (r.text || ''))
+        .filter(Boolean)
+        .join('\n')
+      handleExplain(caption_text, [], null, { role: base.role || 'figure', page: base.page, bbox, caption_text })
+      return
+    }
+
+    const footnoteTexts = []
+    const textParts = []
+    let sentences = []
+    for (const r of resolved) {
+      if (r.role === 'footnote') { if (r.text) footnoteTexts.push(r.text); continue }
+      if (r.text) textParts.push(r.text)
+      if (Array.isArray(r.sentences) && r.sentences.length) sentences = sentences.concat(r.sentences)
+    }
+    handleExplain(textParts.join('\n\n'), sentences, null, { footnotes: footnoteTexts })
+  }, [edits, editedPages, handleExplain])
 
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {
@@ -1034,6 +1129,9 @@ export default function Reader() {
           explanation={explanation}
           onHome={handleHome}
           onBlockEdit={onBlockEdit}
+          mergeSelectedKeys={selectedKeys}
+          mergeMembership={mergeMembership}
+          onExplainGroup={explainGroup}
         />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
@@ -1099,6 +1197,28 @@ export default function Reader() {
           onClose={() => setPromotePicker(null)}
           onPick={(role) => { applyRoleOverride(promotePicker.target, role); setPromotePicker(null) }}
         />
+      )}
+
+      {/* Lazo confirm/cancel bar — appears while selecting objects to merge. */}
+      {armedTool === 'merge' && mergeBuffer.length > 0 && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 px-4 py-2 select-none">
+          <span className="text-[13px] text-slate-600">{t('viewer.toolMergeHint')} · {mergeBuffer.length}</span>
+          <button
+            type="button"
+            onClick={confirmMerge}
+            disabled={mergeBuffer.length < 2}
+            className="px-3 h-8 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+          >
+            {t('viewer.toolConfirm')}
+          </button>
+          <button
+            type="button"
+            onClick={clearMergeBuffer}
+            className="px-3 h-8 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
+          >
+            {t('viewer.toolCancel')}
+          </button>
+        </div>
       )}
     </div>
   )

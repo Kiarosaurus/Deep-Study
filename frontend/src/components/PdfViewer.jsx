@@ -104,7 +104,7 @@ function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, 
   )
 }
 
-function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit }) {
+function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
@@ -171,6 +171,9 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
         if (paragraphBoxes.length === 0) return null
         const isLeader = groupLeader[i] === i
         const unionBox = groupUnion.get(groupLeader[i])
+        // Lazo identity for this block + its committed merge-group membership.
+        const blockKey = `block:${page}:${block.reading_index}`
+        const blockMembership = mergeMembership?.[blockKey]
 
         const ownFlatRef = flatBase + i
         // Chain payload (merged text + sentences across continuation chain).
@@ -361,6 +364,22 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             )}
 
+            {/* Lazo: indigo wash on objects selected for an in-progress merge,
+                emerald wash on objects already committed to a merge group. */}
+            {isLeader && unionBox && (mergeSelectedKeys?.has(blockKey) || blockMembership) && (
+              <div
+                className="absolute pointer-events-none rounded-sm"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  background: mergeSelectedKeys?.has(blockKey) ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
+                  border: mergeSelectedKeys?.has(blockKey) ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+                }}
+              />
+            )}
+
             {/* Edit click-catcher: while a tool is armed, the whole block region
                 routes clicks to the edit handler instead of the explain flow. */}
             {isLeader && armedTool && unionBox && (
@@ -383,8 +402,11 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
             )}
 
             {/* ✦ viñeta button — one per same-column group, on the leader. Hidden
-                while a tool is armed (clicks go to editing) and on demoted blocks. */}
-            {isLeader && !armedTool && block.role !== 'ignored' && (
+                while a tool is armed (clicks go to editing), on demoted blocks,
+                and on non-representative members of a merge group (the group's
+                ✦ lives on its representative). A representative explains the
+                whole merge group via onExplainGroup. */}
+            {isLeader && !armedTool && block.role !== 'ignored' && (!blockMembership || blockMembership.isRep) && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -400,7 +422,9 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                     ? 'translate(-100%, -100%) scale(1.15)'
                     : 'translate(-100%, -100%)',
                 }}
-                onClick={() => onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
+                onClick={() => blockMembership
+                  ? onExplainGroup?.(blockMembership.groupId)
+                  : onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
                 onMouseEnter={() => onHoveredChainChange?.(chainKey)}
                 onMouseLeave={() => onHoveredChainChange?.(null)}
                 title={t('viewer.explainParagraph')}
@@ -428,6 +452,8 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           && activeParagraph?.bbox?.x0 === b.x0
           && activeParagraph?.bbox?.y0 === b.y0
         const cap = isImgActive ? img.caption_bbox : null
+        const imgKey = `image:${page}:${img.reading_index}`
+        const imgMembership = mergeMembership?.[imgKey]
         return (
           <div key={`img-${i}`}>
             <div
@@ -442,6 +468,17 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   : (isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent'),
               }}
             />
+            {/* Lazo selection (indigo) / committed merge-group (emerald) wash. */}
+            {(mergeSelectedKeys?.has(imgKey) || imgMembership) && (
+              <div
+                className="absolute pointer-events-none rounded-sm"
+                style={{
+                  left, top, width, height,
+                  background: mergeSelectedKeys?.has(imgKey) ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
+                  border: mergeSelectedKeys?.has(imgKey) ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+                }}
+              />
+            )}
             {cap && (
               <div
                 className="absolute pointer-events-none rounded-sm pg-hl-current transition-all duration-300 ease-out"
@@ -467,7 +504,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 onClick={e => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' }, { x: e.clientX, y: e.clientY })}
               />
             )}
-            {!armedTool && (
+            {!armedTool && (!imgMembership || imgMembership.isRep) && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -483,17 +520,19 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                     ? 'translate(-100%, -100%) scale(1.15)'
                     : 'translate(-100%, -100%)',
                 }}
-                onClick={() => onExplain(
-                  img.caption_text || '',
-                  [],
-                  null,
-                  {
-                    role: img.role || 'figure',
-                    page,
-                    bbox: img.bbox,
-                    caption_text: img.caption_text || '',
-                  },
-                )}
+                onClick={() => imgMembership
+                  ? onExplainGroup?.(imgMembership.groupId)
+                  : onExplain(
+                      img.caption_text || '',
+                      [],
+                      null,
+                      {
+                        role: img.role || 'figure',
+                        page,
+                        bbox: img.bbox,
+                        caption_text: img.caption_text || '',
+                      },
+                    )}
                 onMouseEnter={() => setHoveredImgIdx(i)}
                 onMouseLeave={() => setHoveredImgIdx(null)}
                 title={t('viewer.explainBlock', { role: img.role })}
@@ -530,6 +569,9 @@ function PdfPage({
   onHoveredChainChange,
   armedTool = null,
   onBlockEdit,
+  mergeSelectedKeys,
+  mergeMembership,
+  onExplainGroup,
 }) {
   // scale = displayWidth / page-natural-width (PDF points). pageDim comes
   // from the backend analysis; if missing we fall back to a sentinel so
@@ -563,6 +605,9 @@ function PdfPage({
         onHoveredChainChange={onHoveredChainChange}
         armedTool={armedTool}
         onBlockEdit={onBlockEdit}
+        mergeSelectedKeys={mergeSelectedKeys}
+        mergeMembership={mergeMembership}
+        onExplainGroup={onExplainGroup}
       />
       {trackedBox && scale && (
         <div
@@ -651,7 +696,7 @@ function EditToolbar() {
   )
 }
 
-const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit }, ref) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }, ref) {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen } = useSettings()
   const visibility = settings.visibility
@@ -1540,6 +1585,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 onHoveredChainChange={setHoveredChain}
                 armedTool={armedTool}
                 onBlockEdit={onBlockEdit}
+                mergeSelectedKeys={mergeSelectedKeys}
+                mergeMembership={mergeMembership}
+                onExplainGroup={onExplainGroup}
               />
             ))}
         </div>
