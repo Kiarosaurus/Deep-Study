@@ -8,7 +8,7 @@ import { ACTIONS, DEFAULT_SHORTCUTS, PANEL_WIDTH_MAX, PANEL_WIDTH_MIN, REQUIRED_
 const L = {
   es: {
     title: 'Configuración', shortcuts: 'Atajos de teclado', display: 'Pantalla y Layout',
-    right: 'Mano izquierda', left: 'Mano derecha', action: 'Acción',
+    right: 'Mano derecha', left: 'Mano izquierda', action: 'Acción',
     onlyActive: 'Solo se edita la mano seleccionada; la contraria queda deshabilitada.',
     reset: 'Restablecer por defecto', confirm: 'Confirmar cambios',
     emptyTitle: 'Campos vacíos', back: 'Regresar a editar', confirmAnyway: 'Confirmar de todos modos',

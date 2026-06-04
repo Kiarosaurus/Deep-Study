@@ -43,31 +43,27 @@ export const REQUIRED_ACTIONS = [
   'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge',
 ]
 
-// Two presets. 'right' = right-handed: left hand drives the Q/W/A/S/D cluster
-// while the right hand holds the mouse. 'left' = mirrored onto the I/J/K/L
-// cluster on the right side of the keyboard for a left-hand mouse grip. Space
-// (center highlight) is shared by both.
+// Two presets. 'right' drives the I/J/K/L cluster on the right side of the
+// keyboard; 'left' the Q/W/A/S/D cluster on the left. Space (center highlight)
+// is shared by both.
 // The digit row is hand-agnostic and shared by both presets: home 1, settings 2,
 // trackingToggle 3, toggleSidebar 4, themeToggle 5, index 6.
 export const DEFAULT_SHORTCUTS = {
   right: {
-    focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
-    conceptPrev: 'a', conceptNext: 'd', centerHighlight: ' ',
-    explainTab: 'e', globalTab: 'r', toggleSidebar: '4',
-    trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
-    // Edit toolbar — left-hand keys (this 'right' preset is the one whose
-    // UI label is "Mano izquierda" after the label swap; F/G/Z/X/C all sit
-    // under the left hand).
-    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v',
-  },
-  left: {
     focusToggle: 'o', scrollUp: 'i', scrollDown: 'k',
     conceptPrev: 'j', conceptNext: 'l', centerHighlight: ' ',
     explainTab: 'u', globalTab: 'p', toggleSidebar: '4',
     trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
-    // Edit toolbar — mirrored onto the right-hand cluster. Provisional; rebind
-    // in settings if desired.
+    // Edit toolbar — right-hand cluster keys.
     undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';', splitMerge: 'b',
+  },
+  left: {
+    focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
+    conceptPrev: 'a', conceptNext: 'd', centerHighlight: ' ',
+    explainTab: 'e', globalTab: 'r', toggleSidebar: '4',
+    trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
+    // Edit toolbar — left-hand cluster keys (F/G/Z/X/C/V).
+    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v',
   },
 }
 
