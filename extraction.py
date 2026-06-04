@@ -968,7 +968,8 @@ def _is_caption_like(text: str) -> bool:
 # with the word "Source" (e.g. "Source code is available …") is not mistaken
 # for an attribution and swallowed into the image.
 _SOURCE_ATTRIBUTION_RE = re.compile(r"^(?:source|fuente)\s*:", re.IGNORECASE)
-
+_TABLE_LABEL_RE = re.compile(r"^\s*(?:table|tabla)\s+(?:[IVXLCDM]+|\d+)\b", re.IGNORECASE)
+_NOTE_LABEL_RE = re.compile(r"^\s*(?:note|nota)s?\b[\.:\s]", re.IGNORECASE)
 
 def _is_source_attribution(b) -> bool:
     """True for a plain paragraph opening with 'Source'/'Fuente'. Duck-typed so
@@ -1299,6 +1300,7 @@ def _is_caption_block_linear(b: FullBlock) -> bool:
     return False
 
 
+
 def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     """Merge each figure/table with its attached text in reading order. A single
     visual can carry BOTH a caption and a source line, and they're all absorbed:
@@ -1466,6 +1468,76 @@ def _voverlap(a: BBox, b: BBox) -> float:
     height = max(1e-6, min(a.y1 - a.y0, b.y1 - b.y0))
     return inter / height
 
+def _merge_tables_linear(blocks: list[FullBlock]) -> list[FullBlock]:
+    """Merge scattered APA-style table components (Label, Title, Table, Note) into one."""
+    _cont_log(f"=== linear table merge start: {len(blocks)} blocks ===")
+    consumed: set[int] = set()
+    merged: list[FullBlock] = []
+
+    for i, b in enumerate(blocks):
+        if i in consumed:
+            continue
+
+        text = (b.text or "").strip()
+        
+        # 1. Detectar si este bloque es un "Table Label" ("Table 1", "Tabla II")
+        if b.role in ("paragraph", "caption", "section_header") and _TABLE_LABEL_RE.match(text):
+            table_idx = -1
+            title_idx = -1
+            
+            # 2. Look-ahead de hasta 2 posiciones buscando el bloque "table"
+            for offset in (1, 2):
+                look_idx = i + offset
+                if look_idx < len(blocks):
+                    if blocks[look_idx].role == "table":
+                        table_idx = look_idx
+                        if offset == 2:
+                            title_idx = i + 1  # El bloque intermedio es el título
+                        break
+
+            if table_idx != -1:
+                # 3. Buscar inmediatamente después de la tabla por una "Note."
+                note_idx = -1
+                next_idx = table_idx + 1
+                if next_idx < len(blocks):
+                    next_text = (blocks[next_idx].text or "").strip()
+                    if blocks[next_idx].role in ("paragraph", "caption") and _NOTE_LABEL_RE.match(next_text):
+                        note_idx = next_idx
+
+                # 4. Agrupar las piezas encontradas
+                piece_idxs = [i]
+                if title_idx != -1:
+                    piece_idxs.append(title_idx)
+                piece_idxs.append(table_idx)
+                if note_idx != -1:
+                    piece_idxs.append(note_idx)
+
+                pieces = [blocks[idx] for idx in piece_idxs]
+                tb = blocks[table_idx]  # Bloque central (la tabla)
+
+                _cont_log(f"  [{i}] table merge: {len(pieces)} pieces from {piece_idxs}")
+
+                # 5. Fusionar todo en el bloque 'table'
+                tb.text = "\n".join(p.text for p in pieces if p.text)
+                tb.bbox = _union_bbox([p.bbox for p in pieces if p.bbox is not None])
+                
+                label_text = pieces[0].text or ""
+                title_text = pieces[1].text if title_idx != -1 else ""
+                tb.caption_text = f"{label_text}\n{title_text}".strip()
+
+                # Propagar oraciones si existieran
+                for p in pieces:
+                    if p.sentences and p is not tb:
+                        tb.sentences.extend(p.sentences)
+
+                consumed.update(piece_idxs)
+                merged.append(tb)
+                continue
+
+        merged.append(b)
+
+    _cont_log(f"=== linear table merge end: {len(merged)} blocks ===")
+    return merged
 
 def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     """Detect 'Algorithm N ...' regions and collapse them into a single
@@ -1529,6 +1601,84 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                 continue
         out.append(b)
         i += 1
+    return out
+
+
+# ── Scattered-table stitching (linear) ───────────────────────────────────────
+# Marker can emit a table as several adjacent blocks: a "Table N" LABEL/caption,
+# an optional TITLE line, the Table block itself, and a trailing "Note." line.
+# This pass re-stitches that run into one role='table' block.
+_TABLE_LABEL_RE = re.compile(r"^\s*(?:table|tabla)\b", re.IGNORECASE)
+_TABLE_NOTE_RE = re.compile(r"^\s*(?:note|nota)\b\s*[.:]", re.IGNORECASE)
+_TABLE_LABEL_ROLES = frozenset({"paragraph", "caption", "section_header"})
+
+
+def _is_table_label(b: FullBlock) -> bool:
+    """A "Table N …" LABEL block (not a body reference like "Table 1 shows…").
+    Reuses `_is_caption_like` so a lowercase prose continuation is rejected."""
+    return (
+        b.role in _TABLE_LABEL_ROLES
+        and bool(_TABLE_LABEL_RE.match((b.text or "").lstrip()))
+        and _is_caption_like(b.text or "")
+    )
+
+
+def _is_table_note(b: FullBlock) -> bool:
+    return b.role in ("paragraph", "caption") and bool(
+        _TABLE_NOTE_RE.match((b.text or "").lstrip())
+    )
+
+
+def _merge_tables_linear(linear: list[FullBlock]) -> list[FullBlock]:
+    """Fuse a scattered table — Label, [Title], Table, [Note] — into ONE
+    role='table' block. Anchored on the "Table N" label, look ahead at most two
+    positions for the actual `role='table'` block (an intervening text block is
+    the title); if the block right after the table starts with "Note."/"Nota.",
+    absorb it too. The members' `.text` are joined with newlines on the result;
+    the descriptive parts (label / title / note) also feed `caption_text` so the
+    table-explain flow uses them, and the bbox is recomputed as the union of all
+    members. Absorbed blocks are dropped so nothing is duplicated."""
+    consumed: set[int] = set()
+    out: list[FullBlock] = []
+    n = len(linear)
+    for i, b in enumerate(linear):
+        if i in consumed:
+            continue
+        if _is_table_label(b):
+            # Look ahead ≤2 for the Table block (same page). A block sitting
+            # between the label and the table counts as the title only if it is
+            # itself a text-ish block (never another visual).
+            table_idx = None
+            for j in (i + 1, i + 2):
+                if j >= n or j in consumed:
+                    break
+                nb = linear[j]
+                if nb.role == "table" and nb.page == b.page:
+                    table_idx = j
+                    break
+                if nb.role not in _TABLE_LABEL_ROLES:
+                    break  # an unexpected block (figure, equation…) — not a title
+            if table_idx is not None:
+                members = list(range(i, table_idx + 1))  # label, [title], table
+                k = table_idx + 1
+                if k < n and k not in consumed and _is_table_note(linear[k]):
+                    members.append(k)
+
+                table = linear[table_idx]
+                parts = [linear[m] for m in members]
+                table.text = "\n".join(p.text for p in parts if p.text)
+                table.bbox = _union_bbox([p.bbox for p in parts])
+                desc = [linear[m].text for m in members if m != table_idx and linear[m].text]
+                existing = [table.caption_text] if table.caption_text else []
+                table.caption_text = "\n".join(existing + desc)
+                table.reading_index = parts[0].reading_index
+                _cont_log(
+                    f"  [{i}] table stitch {members}: {[_snip(p.text) for p in parts]}"
+                )
+                consumed.update(members)
+                out.append(table)
+                continue
+        out.append(b)
     return out
 
 
@@ -2643,6 +2793,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     has_abstract = _document_has_abstract(document)
     blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract)
+    blocks = _merge_tables_linear(blocks)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
     blocks = _drop_decorative_icons_linear(blocks)
@@ -2673,8 +2824,10 @@ def extract_both(
     has_abstract = _document_has_abstract(document, line_cache)
     pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract)
     linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract)
+    linear = _merge_tables_linear(linear)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
+    linear = _merge_tables_linear(linear)
     linear = _drop_decorative_icons_linear(linear)
     _reorder_authors_after_title(linear)
     _merge_figure_captions_pages(pages)
