@@ -8,6 +8,7 @@ import { useUiLang } from '../i18n/LanguageContext'
 import { useSettings } from '../settings/SettingsContext'
 import { SettingsButton } from '../settings/SettingsModal'
 import { ThemeButton } from '../theme/ThemeToggle'
+import { useEdit } from '../edit/EditContext'
 
 const ZOOM_MIN  = 0.5
 const ZOOM_MAX  = 4.0   // paginated zoom-in ceiling (400%)
@@ -520,6 +521,76 @@ function PdfPage({
         />
       )}
     </PaginatedCanvas>
+  )
+}
+
+// ── Edit toolbar (bottom-left) ───────────────────────────────────────────────
+// Two stacked fused pills, matching the top-left clusters' visual language:
+//   [ undo | redo ]            history of edit operations
+//   [ mazo | pincel | lazo ]   armable click-mode tools
+// Each button is independently hideable from settings; a pill disappears when
+// all of its buttons are hidden. Tool buttons light up (indigo) while armed.
+function EditToolbar() {
+  const { t } = useUiLang()
+  const { settings } = useSettings()
+  const v = settings.visibility
+  const { armedTool, armTool, undo, redo, canUndo, canRedo } = useEdit()
+
+  const pillCls = 'flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none'
+  const baseBtn = 'w-8 h-8 flex items-center justify-center rounded-lg transition-colors'
+  const idleBtn = 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
+  const disBtn  = 'text-slate-300 pointer-events-none'
+  const activeBtn = 'bg-indigo-600 text-white hover:bg-indigo-700'
+
+  const showHistory = v.undo || v.redo
+  const showTools = v.demoteBlock || v.promoteBlock || v.mergeBlocks
+  if (!showHistory && !showTools) return null
+
+  const svg = (children) => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{children}</svg>
+  )
+
+  return (
+    <div className="absolute bottom-4 left-4 z-30 flex flex-col items-start gap-2">
+      {showHistory && (
+        <div className={pillCls}>
+          {v.undo && (
+            <button type="button" onClick={undo} disabled={!canUndo} title={t('viewer.undo')} aria-label={t('viewer.undo')}
+              className={`${baseBtn} ${canUndo ? idleBtn : disBtn}`}>
+              {svg(<><polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 0 0-4-4H4" /></>)}
+            </button>
+          )}
+          {v.redo && (
+            <button type="button" onClick={redo} disabled={!canRedo} title={t('viewer.redo')} aria-label={t('viewer.redo')}
+              className={`${baseBtn} ${canRedo ? idleBtn : disBtn}`}>
+              {svg(<><polyline points="15 14 20 9 15 4" /><path d="M4 20v-7a4 4 0 0 1 4-4h12" /></>)}
+            </button>
+          )}
+        </div>
+      )}
+      {showTools && (
+        <div className={pillCls}>
+          {v.demoteBlock && (
+            <button type="button" onClick={() => armTool('demote')} title={t('viewer.toolDemote')} aria-label={t('viewer.toolDemote')}
+              className={`${baseBtn} ${armedTool === 'demote' ? activeBtn : idleBtn}`}>
+              {svg(<><path d="M15 12l-8.5 8.5a2.12 2.12 0 1 1-3-3L12 9" /><path d="M17.64 15 22 10.64" /><path d="m20.91 11.7-1.25-1.25c-.6-.6-.94-1.4-.94-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h.86c.85 0 1.65.34 2.25.94l1.25 1.25" /></>)}
+            </button>
+          )}
+          {v.promoteBlock && (
+            <button type="button" onClick={() => armTool('promote')} title={t('viewer.toolPromote')} aria-label={t('viewer.toolPromote')}
+              className={`${baseBtn} ${armedTool === 'promote' ? activeBtn : idleBtn}`}>
+              {svg(<><path d="m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" /><path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z" /></>)}
+            </button>
+          )}
+          {v.mergeBlocks && (
+            <button type="button" onClick={() => armTool('merge')} title={t('viewer.toolMerge')} aria-label={t('viewer.toolMerge')}
+              className={`${baseBtn} ${armedTool === 'merge' ? activeBtn : idleBtn}`}>
+              {svg(<><path d="M7 22a5 5 0 0 1-2-4" /><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1" /><path d="M5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" /></>)}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1349,6 +1420,9 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
             Hideable; the themeToggle shortcut still cycles when hidden. */}
         {visibility.theme && <ThemeButton />}
       </div>
+
+      {/* Edit toolbar: undo/redo + mazo/pincel/lazo, bottom-left. */}
+      <EditToolbar />
 
       <div
         ref={containerRef}

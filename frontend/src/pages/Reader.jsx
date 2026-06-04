@@ -7,6 +7,7 @@ import { buildContinuationPayloads, resolveSentenceIndices, logSentence } from '
 import { useUiLang } from '../i18n/LanguageContext'
 import { useTheme } from '../theme/ThemeContext'
 import { ACTIONS, useSettings } from '../settings/SettingsContext'
+import { useEdit } from '../edit/EditContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
@@ -118,6 +119,7 @@ export default function Reader() {
   const { settings, isOpen: settingsOpen, openSettings } = useSettings()
   const { visibility, panelSide, panelWidthPct } = settings
   const { cycleTheme } = useTheme()
+  const { armTool, undo, redo } = useEdit()
   const { filename } = useParams()
 
   // Panel occupies a user-configurable share of the viewport (settings slider),
@@ -715,6 +717,13 @@ export default function Reader() {
       if (action === 'themeToggle') { e.preventDefault(); cycleTheme(); return }
       if (action === 'home') { e.preventDefault(); navigate('/'); return }
       if (action === 'settings') { e.preventDefault(); openSettings(); return }
+      // Edit toolbar shortcuts. undo/redo step the edit history; the three tools
+      // arm a click-mode (toggling off if already armed).
+      if (action === 'undo') { e.preventDefault(); undo(); return }
+      if (action === 'redo') { e.preventDefault(); redo(); return }
+      if (action === 'demoteBlock')  { e.preventDefault(); armTool('demote');  return }
+      if (action === 'promoteBlock') { e.preventDefault(); armTool('promote'); return }
+      if (action === 'mergeBlocks')  { e.preventDefault(); armTool('merge');   return }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -770,7 +779,7 @@ export default function Reader() {
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme, armTool, undo, redo])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and

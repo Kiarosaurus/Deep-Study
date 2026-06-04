@@ -5,6 +5,7 @@ import LinearReaderTest from './pages/LinearReaderTest'
 import { LanguageProvider } from './i18n/LanguageContext'
 import { ThemeProvider } from './theme/ThemeContext'
 import { SettingsProvider } from './settings/SettingsContext'
+import { EditProvider } from './edit/EditContext'
 import SettingsModal from './settings/SettingsModal'
 
 export default function App() {
@@ -12,15 +13,17 @@ export default function App() {
     <ThemeProvider>
       <LanguageProvider>
         <SettingsProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/read/:filename" element={<Reader />} />
-              <Route path="/linear/:filename" element={<LinearReaderTest />} />
-            </Routes>
-          </BrowserRouter>
-          {/* Single modal instance — openable from any SettingsButton. */}
-          <SettingsModal />
+          <EditProvider>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/read/:filename" element={<Reader />} />
+                <Route path="/linear/:filename" element={<LinearReaderTest />} />
+              </Routes>
+            </BrowserRouter>
+            {/* Single modal instance — openable from any SettingsButton. */}
+            <SettingsModal />
+          </EditProvider>
         </SettingsProvider>
       </LanguageProvider>
     </ThemeProvider>
