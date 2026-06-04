@@ -20,6 +20,28 @@ const DEFAULT_EDITS = { pageOverrides: {}, mergeGroups: [] }
 // Block types offered by the pincel (promote) picker, in display order.
 const PROMOTE_TYPES = ['paragraph', 'figure', 'table', 'footnote', 'equation', 'code', 'caption']
 
+// Bounding box of a list of per-line boxes.
+function unionOfBoxes(boxes) {
+  return boxes.reduce((a, b) => ({
+    x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0),
+    x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1),
+  }), { ...boxes[0] })
+}
+
+// True when two bboxes overlap heavily (≥60% of the smaller area). Used to
+// bridge the per-page and linear projections: both walk the SAME Marker blocks,
+// so a paragraph's bbox is near-identical across them, and overlap matching
+// survives the minor bbox tweaks each projection's post-passes apply.
+function bboxOverlapHigh(a, b) {
+  const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0))
+  const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0))
+  const inter = ix * iy
+  if (inter <= 0) return false
+  const areaA = (a.x1 - a.x0) * (a.y1 - a.y0)
+  const areaB = (b.x1 - b.x0) * (b.y1 - b.y0)
+  return inter / Math.max(1e-6, Math.min(areaA, areaB)) >= 0.6
+}
+
 // Floating block-type picker for the pincel tool. Anchored at the click point,
 // clamped to the viewport. Backdrop closes it without choosing.
 function TypePicker({ x, y, onPick, onClose, t }) {
@@ -274,10 +296,35 @@ export default function Reader() {
       .finally(() => setLoadingAnalysis(false))
   }, [decoded, disarm])
 
-  const linearBlocks = useMemo(
-    () => analysis?.linear_blocks ?? [],
-    [analysis],
-  )
+  // Linear projection with page-level role overrides bridged in, so tracking
+  // mode reflects edits made in paginated mode (mazo demote / pincel promote).
+  // Each override (keyed by page+per-page reading_index) is resolved to its
+  // page-block bbox, then matched to the linear block on the same page by bbox
+  // overlap. A demoted ('ignored') block drops out of the reading sequence and
+  // loses its ✦ automatically (role is no longer 'paragraph').
+  const linearBlocks = useMemo(() => {
+    const raw = analysis?.linear_blocks ?? []
+    const po = edits.pageOverrides
+    if (!raw.length || !po || Object.keys(po).length === 0) return raw
+    const overridesByPage = {}  // page -> [{ bbox, role }]
+    for (const [key, val] of Object.entries(po)) {
+      if (!val?.role) continue
+      const [pageStr, riStr] = key.split(':')
+      const pg = Number(pageStr)
+      const ri = Number(riStr)
+      const p = analysis?.pages?.find(x => x.page === pg)
+      const b = p?.blocks?.find(bl => bl.reading_index === ri)
+      if (!b?.boxes?.length) continue
+      ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role })
+    }
+    if (Object.keys(overridesByPage).length === 0) return raw
+    return raw.map(L => {
+      const cands = overridesByPage[L.page]
+      if (!cands || !L.bbox) return L
+      const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
+      return m && m.role !== L.role ? { ...L, role: m.role } : L
+    })
+  }, [analysis, edits])
 
   // Persist edits to the backend (debounced) whenever they change post-hydration.
   useEffect(() => {
