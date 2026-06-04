@@ -231,6 +231,29 @@ def _is_abstract_header(text: str) -> bool:
     return bool(_ABSTRACT_RE.match(text.strip()))
 
 
+def _document_has_abstract(document, line_cache=None) -> bool:
+    """Look-ahead: does an Abstract/Resumen heading exist in the first two pages?
+
+    Gates the masthead-drop rule. Many papers (e.g. theory papers in the
+    "Lee et al., 2018" mould) carry no explicit "Abstract" heading; for those
+    the pre-abstract masthead window must be DISABLED so the first page's body
+    is not silently discarded. Helper functions referenced here are defined
+    later in the module — resolved at call time. Biased toward detection: a
+    false positive merely keeps the (safe) original behaviour, a false negative
+    re-opens the bug, so the match is intentionally permissive."""
+    for page in list(getattr(document, "pages", []))[:2]:
+        for block in _iter_layout_blocks(page):
+            bt = _block_type_name(block)
+            if bt != "SectionHeader" and bt not in _TEXT_TYPES:
+                continue
+            text = " ".join(
+                l.text for l in _collect_lines(block, document, line_cache)
+            ).strip()
+            if text and _is_abstract_header(text):
+                return True
+    return False
+
+
 # ── Page-1 noise heuristics ──────────────────────────────────────────────────
 # Hard signals: copyright / ISBN / DOI / preprint / ACM-IEEE boilerplate.
 # Drops anywhere on page 1, regardless of length.
@@ -2016,7 +2039,7 @@ def _run_marker(pdf_bytes: bytes, *, disable_ocr: bool = False):
             pass
 
 
-def _extract_pages_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None) -> list[PageBlocks]:
+def _extract_pages_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True) -> list[PageBlocks]:
     output: list[PageBlocks] = []
     stop_content = False
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
@@ -2158,7 +2181,11 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
                 # Abstract heading would otherwise leak as a body paragraph.
                 if _is_hard_noise(text) or _is_contact_block(text):
                     continue
-                if pre_abstract and (
+                # The pre-abstract masthead window only fires when the document
+                # actually HAS an Abstract heading. Without one, dropping by these
+                # looser heuristics would silently swallow first-page body text;
+                # emails/affiliations stay filtered by _is_contact_block above.
+                if has_abstract and pre_abstract and (
                     _is_soft_noise(text)
                     or _looks_like_author_line(text)
                     or _is_dense_name_list(text)
@@ -2229,7 +2256,8 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
 def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
-    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes))
+    has_abstract = _document_has_abstract(document)
+    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract)
     _merge_figure_captions_pages(pages)
     _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
@@ -2295,7 +2323,7 @@ def _drop_decorative_icons_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     ]
 
 
-def _extract_linear_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None) -> list[FullBlock]:
+def _extract_linear_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True) -> list[FullBlock]:
     """Walk the whole Marker document in global reading order.
 
     Emits a FullBlock for every layout block (title, authors, headers, paragraphs,
@@ -2400,7 +2428,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                     skip_section = False
                     pre_abstract = False
                     role = "section_header"
-                elif page_idx == 0 and pre_abstract and (
+                elif page_idx == 0 and has_abstract and pre_abstract and (
                     _is_soft_noise(header_text)
                     or _looks_like_author_line(header_text)
                 ):
@@ -2518,7 +2546,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                 # regardless of the pre-abstract window — same reason as the
                 # per-page pipeline: Marker can emit them after the Abstract
                 # heading, past the point pre_abstract was cleared.
-                if _is_contact_block(text) or (pre_abstract and (
+                if _is_contact_block(text) or (has_abstract and pre_abstract and (
                     _is_soft_noise(text)
                     or _looks_like_author_line(text)
                     or _is_dense_name_list(text)
@@ -2613,7 +2641,8 @@ def _clip_vertical_overlaps_linear(blocks: list[FullBlock]) -> None:
 def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
-    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes))
+    has_abstract = _document_has_abstract(document)
+    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
     blocks = _drop_decorative_icons_linear(blocks)
@@ -2641,8 +2670,9 @@ def extract_both(
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     line_cache: dict[int, list[LineBlock]] = {}
     callout_regions = _detect_callout_regions(pdf_bytes)
-    pages  = _extract_pages_from_document(document, line_cache, callout_regions)
-    linear = _extract_linear_from_document(document, line_cache, callout_regions)
+    has_abstract = _document_has_abstract(document, line_cache)
+    pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract)
+    linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
     linear = _drop_decorative_icons_linear(linear)
