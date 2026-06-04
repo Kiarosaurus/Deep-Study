@@ -221,6 +221,31 @@ def _is_body_section_name(text: str) -> bool:
     return bool(_BODY_SECTION_RE.match(text.strip()))
 
 
+# Metadata blocks to drop wherever they appear (independent of the abstract
+# look-ahead / skip-section window): a block that OPENS with "Keywords" /
+# "Supplemental materials". Anchored at the start; the colon is NOT consumed
+# here so `_is_metadata_block` can require an end-or-separator after the phrase
+# and thereby reject a real sentence that merely starts with the word
+# ("Keyword extraction is a task we study…").
+_METADATA_RE = re.compile(
+    r"^\s*(?:keywords?|key\s*words?|supplement(?:al|ary)\s+materials?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_metadata_block(text: str) -> bool:
+    """True for a "Keywords[:] …" / "Supplemental materials[:] …" metadata block.
+    Matches only when the phrase is followed by NOTHING (a bare label) or a
+    separator (":", dash) — a lowercase prose continuation means it's a genuine
+    sentence ("Keyword extraction is …") and is left intact."""
+    t = (text or "").lstrip()
+    m = _METADATA_RE.match(t)
+    if not m:
+        return False
+    rest = t[m.end():].lstrip()
+    return rest == "" or rest[0] in ":：.-–—"
+
+
 # The Abstract / Resumen heading specifically. When present, everything sitting
 # ABOVE it on the title page is masthead (title, authors, affiliations, emails)
 # and must never surface as a body paragraph.
@@ -2433,6 +2458,10 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
             ):
                 skip_section = True
                 continue
+            # Metadata blocks ("Keywords: …", "Supplemental materials: …") are
+            # dropped wherever they appear, regardless of the abstract window.
+            if bt in _BODY_TEXT_TYPES and _is_metadata_block(text):
+                continue
             if bt == "Equation":
                 eq_latex = _latex_from_equation_block(block)
                 if eq_latex:
@@ -2796,6 +2825,11 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
             ):
                 _extract_log(f"    → SKIP skip_section inline {_snip(text)!r}")
                 skip_section = True
+                continue
+            # Metadata ("Keywords: …", "Supplemental materials: …") dropped
+            # wherever it appears, regardless of the abstract window.
+            if bt in _BODY_TEXT_TYPES and _is_metadata_block(text):
+                _extract_log(f"    → SKIP metadata {_snip(text)!r}")
                 continue
             if bt == "Equation":
                 eq_latex = _latex_from_equation_block(block)
