@@ -11,6 +11,10 @@ import { useEdit } from '../edit/EditContext'
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 
+// Empty manual-edit state. `pageOverrides` maps "<page>:<reading_index>" → a
+// role override (e.g. { role: 'ignored' } for a mazo-demoted paragraph).
+const DEFAULT_EDITS = { pageOverrides: {} }
+
 async function postExplainWithRetry(payload, onRetry, maxAttempts = 3) {
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -119,7 +123,7 @@ export default function Reader() {
   const { settings, isOpen: settingsOpen, openSettings } = useSettings()
   const { visibility, panelSide, panelWidthPct } = settings
   const { cycleTheme } = useTheme()
-  const { armTool, undo, redo } = useEdit()
+  const { armTool, armedTool, disarm, commitEdit, undo, redo } = useEdit()
   const { filename } = useParams()
 
   // Panel occupies a user-configurable share of the viewport (settings slider),
@@ -206,17 +210,87 @@ export default function Reader() {
 
   const pdfUrl = `/api/documents/${encodeURIComponent(decoded)}`
 
+  // ── Manual edits (mazo / pincel / lazo) ─────────────────────────────────────
+  // Block role overrides (and, later, merge groups) layered over the extracted
+  // analysis and persisted to the backend so they survive reload. Declared
+  // before the analysis-load effect, which hydrates them from disk.
+  const [edits, setEdits] = useState(DEFAULT_EDITS)
+  // JSON of the value last known in sync with the backend — lets the persist
+  // effect skip the change triggered by hydration.
+  const lastPersisted = useRef(null)
+
   useEffect(() => {
     axios.get(`/api/documents/${encodeURIComponent(decoded)}/analysis`)
-      .then(res => setAnalysis(res.data))
+      .then(res => {
+        setAnalysis(res.data)
+        // Hydrate manual edits from disk in the same callback (not a synchronous
+        // effect body) so undo/redo start clean and the persist effect skips it.
+        const ed = res.data?.edits && typeof res.data.edits === 'object'
+          ? { pageOverrides: res.data.edits.pageOverrides ?? {} }
+          : DEFAULT_EDITS
+        lastPersisted.current = JSON.stringify(ed)
+        setEdits(ed)
+        disarm()  // never carry an armed tool across documents
+      })
       .catch(() => setErrorAnalysis(true))
       .finally(() => setLoadingAnalysis(false))
-  }, [decoded])
+  }, [decoded, disarm])
 
   const linearBlocks = useMemo(
     () => analysis?.linear_blocks ?? [],
     [analysis],
   )
+
+  // Persist edits to the backend (debounced) whenever they change post-hydration.
+  useEffect(() => {
+    if (lastPersisted.current === null) return  // not hydrated yet
+    const s = JSON.stringify(edits)
+    if (s === lastPersisted.current) return     // hydration or no-op change
+    lastPersisted.current = s
+    const id = setTimeout(() => {
+      axios.patch(`/api/documents/${encodeURIComponent(decoded)}/analysis/edits`, edits).catch(() => {})
+    }, 400)
+    return () => clearTimeout(id)
+  }, [edits, decoded])
+
+  // Apply page-level role overrides onto the extracted pages projection.
+  const editedPages = useMemo(() => {
+    const pages = analysis?.pages
+    if (!pages) return pages
+    const po = edits.pageOverrides
+    if (!po || Object.keys(po).length === 0) return pages
+    return pages.map(p => {
+      let changed = false
+      const blocks = p.blocks.map(b => {
+        const o = po[`${p.page}:${b.reading_index}`]
+        if (o?.role && o.role !== b.role) { changed = true; return { ...b, role: o.role } }
+        return b
+      })
+      return changed ? { ...p, blocks } : p
+    })
+  }, [analysis, edits])
+
+  // Dispatch a click from an armed edit tool onto a target block/image. Each
+  // completed operation is pushed through commitEdit so undo/redo can replay it.
+  const onBlockEdit = useCallback((target) => {
+    if (!target) return
+    if (armedTool === 'demote') {
+      // Mazo: paragraph → non-paragraph. Only an explainable paragraph block is
+      // a valid target; images and already-demoted blocks are ignored.
+      if (target.kind !== 'block' || target.role !== 'paragraph') return
+      const key = `${target.page}:${target.reading_index}`
+      const prev = edits.pageOverrides[key]
+      commitEdit({
+        apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: { role: 'ignored' } } })),
+        revert: () => setEdits(e => {
+          const po = { ...e.pageOverrides }
+          if (prev) po[key] = prev; else delete po[key]
+          return { ...e, pageOverrides: po }
+        }),
+      })
+    }
+    // 'promote' (pincel) and 'merge' (lazo) land in Phase 2b/2c.
+  }, [armedTool, edits, commitEdit])
 
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
@@ -904,12 +978,13 @@ export default function Reader() {
           ref={viewerRef}
           file={pdfUrl}
           onExplain={handleExplain}
-          pages={analysis?.pages}
+          pages={editedPages}
           linearBlocks={linearBlocks}
           activeParagraph={activeParagraph}
           currentExplanation={currentExplanation}
           explanation={explanation}
           onHome={handleHome}
+          onBlockEdit={onBlockEdit}
         />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}

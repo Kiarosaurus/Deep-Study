@@ -10,7 +10,7 @@ import pypdfium2 as pdfium
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from extraction_runner import ExtractionFailed, extract_resilient
@@ -390,6 +390,23 @@ def get_analysis(filename: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Analysis not found.")
     return JSONResponse(content=json.loads(path.read_text(encoding="utf-8")))
+
+
+@app.patch("/documents/{filename}/analysis/edits")
+def patch_analysis_edits(filename: str, edits: dict = Body(...)):
+    """Persist the reader's manual edits (block role overrides + merge groups)
+    into the analysis JSON under an `edits` key. The payload shape is owned by
+    the frontend (EditContext) and stored verbatim — the backend only round-
+    trips it so edits survive reload. Written atomically via a temp file."""
+    path = UPLOADS_DIR / f"{filename}.analysis.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["edits"] = edits
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return {"ok": True}
 
 
 @app.delete("/documents/{filename}")

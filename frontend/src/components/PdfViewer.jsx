@@ -104,7 +104,7 @@ function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, 
   )
 }
 
-function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange }) {
+function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
@@ -345,8 +345,46 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               )
             })}
 
-            {/* ✦ viñeta button — one per same-column group, on the leader. */}
-            {isLeader && (
+            {/* Demoted (mazo) blocks: faint gray wash so the user sees they are
+                no longer explainable paragraphs. */}
+            {isLeader && unionBox && block.role === 'ignored' && (
+              <div
+                className="absolute pointer-events-none rounded-sm"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  background: 'rgba(100,116,139,0.14)',
+                  border: '1px dashed rgba(100,116,139,0.4)',
+                }}
+              />
+            )}
+
+            {/* Edit click-catcher: while a tool is armed, the whole block region
+                routes clicks to the edit handler instead of the explain flow. */}
+            {isLeader && armedTool && unionBox && (
+              <button
+                type="button"
+                className="absolute pointer-events-auto rounded-sm transition-colors"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  cursor: 'crosshair',
+                  background: 'transparent',
+                  border: '1px solid transparent',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
+                onClick={() => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, text: payload.text })}
+              />
+            )}
+
+            {/* ✦ viñeta button — one per same-column group, on the leader. Hidden
+                while a tool is armed (clicks go to editing) and on demoted blocks. */}
+            {isLeader && !armedTool && block.role !== 'ignored' && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -416,38 +454,53 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
               />
             )}
-            <button
-              className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
-              style={{
-                left: anchorLeft,
-                top:  anchorTop,
-                background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
-                border: '1.5px solid rgba(99,102,241,0.6)',
-                color: isHovered ? 'white' : 'rgb(79,70,229)',
-                fontSize: '8px',
-                fontWeight: 700,
-                boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
-                transform: isHovered
-                  ? 'translate(-100%, -100%) scale(1.15)'
-                  : 'translate(-100%, -100%)',
-              }}
-              onClick={() => onExplain(
-                img.caption_text || '',
-                [],
-                null,
-                {
-                  role: img.role || 'figure',
-                  page,
-                  bbox: img.bbox,
-                  caption_text: img.caption_text || '',
-                },
-              )}
-              onMouseEnter={() => setHoveredImgIdx(i)}
-              onMouseLeave={() => setHoveredImgIdx(null)}
-              title={t('viewer.explainBlock', { role: img.role })}
-            >
-              ✦
-            </button>
+            {armedTool && (
+              <button
+                type="button"
+                className="absolute pointer-events-auto rounded-sm transition-colors"
+                style={{
+                  left, top, width, height,
+                  cursor: 'crosshair', background: 'transparent', border: '1px solid transparent',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
+                onClick={() => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' })}
+              />
+            )}
+            {!armedTool && (
+              <button
+                className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
+                style={{
+                  left: anchorLeft,
+                  top:  anchorTop,
+                  background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
+                  border: '1.5px solid rgba(99,102,241,0.6)',
+                  color: isHovered ? 'white' : 'rgb(79,70,229)',
+                  fontSize: '8px',
+                  fontWeight: 700,
+                  boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                  transform: isHovered
+                    ? 'translate(-100%, -100%) scale(1.15)'
+                    : 'translate(-100%, -100%)',
+                }}
+                onClick={() => onExplain(
+                  img.caption_text || '',
+                  [],
+                  null,
+                  {
+                    role: img.role || 'figure',
+                    page,
+                    bbox: img.bbox,
+                    caption_text: img.caption_text || '',
+                  },
+                )}
+                onMouseEnter={() => setHoveredImgIdx(i)}
+                onMouseLeave={() => setHoveredImgIdx(null)}
+                title={t('viewer.explainBlock', { role: img.role })}
+              >
+                ✦
+              </button>
+            )}
           </div>
         )
       })}
@@ -475,6 +528,8 @@ function PdfPage({
   trackedBox,
   hoveredChain,
   onHoveredChainChange,
+  armedTool = null,
+  onBlockEdit,
 }) {
   // scale = displayWidth / page-natural-width (PDF points). pageDim comes
   // from the backend analysis; if missing we fall back to a sentinel so
@@ -506,6 +561,8 @@ function PdfPage({
         explanation={explanation}
         hoveredChain={hoveredChain}
         onHoveredChainChange={onHoveredChainChange}
+        armedTool={armedTool}
+        onBlockEdit={onBlockEdit}
       />
       {trackedBox && scale && (
         <div
@@ -594,10 +651,11 @@ function EditToolbar() {
   )
 }
 
-const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome }, ref) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit }, ref) {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen } = useSettings()
   const visibility = settings.visibility
+  const { armedTool } = useEdit()
   // Global shortcut handlers (incl. tracking) must go quiet while the settings
   // modal is open so capturing a key in a field never fires a reader action.
   const settingsOpenRef = useRef(false)
@@ -1480,6 +1538,8 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 trackedBox={currentStopData?.page === i + 1 ? currentStopData.bbox : null}
                 hoveredChain={hoveredChain}
                 onHoveredChainChange={setHoveredChain}
+                armedTool={armedTool}
+                onBlockEdit={onBlockEdit}
               />
             ))}
         </div>
