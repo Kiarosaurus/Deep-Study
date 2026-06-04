@@ -112,7 +112,7 @@ body { background-color: var(--bg); color: var(--text); }
 /* Paginated (tracking-off) highlight overlays. Base opacities match tracking
    mode (yellow-300/40 current sentence, slate-400/30 carousel siblings). Under
    the dark theme the multiply blend over the inverted-canvas filter reads
-   heavier than tracking mode, so drop them to 88% transparent (0.12 alpha). */
+   heavier than tracking mode, so drop them to 88  % transparent (0.12 alpha). */
 .pg-hl-current { background-color: rgb(253 224 71 / 0.40); }
 .pg-hl-other   { background-color: rgb(148 163 184 / 0.30); }
 .theme-dark .pg-hl-current { background-color: rgb(253 224 71 / 0.12); }

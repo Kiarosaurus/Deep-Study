@@ -367,6 +367,26 @@ def _is_continuation(prev_text: str, new_text: str) -> bool:
     return first.isalpha() and first.islower()
 
 
+# Trailing characters stripped before the terminal-punctuation test: closing
+# quotes/brackets and citation markers that legitimately follow the final period
+# (e.g. "… end of sentence.[12]" or "… (see §3)."). Without stripping these the
+# block would look unterminated when it actually ends a sentence.
+_PARA_END_TRIM = ' \t\n\r"\'”’»)]}'
+
+
+def _ends_unterminated(prev_text: str) -> bool:
+    """True when `prev_text` does NOT end in sentence-final punctuation.
+
+    A body paragraph normally closes with a period (or ! ? …). One that does
+    not is almost always a layout-split mid-sentence, so the block below it is a
+    continuation regardless of how that block starts. Trailing quotes, brackets,
+    and citation markers are trimmed first so they don't mask the real terminator."""
+    t = (prev_text or "").rstrip(_PARA_END_TRIM)
+    if not t:
+        return False
+    return t[-1] not in ".!?…"
+
+
 # Bullet / list-item opener. Marker emits each item of a bulleted or enumerated
 # list as its own `ListItem` paragraph, split off from the lead-in sentence that
 # introduces the list. Such an item is a continuation of the paragraph above it,
@@ -1007,7 +1027,11 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
                 continue
             lexical = bool(
                 prev_text
-                and (_is_continuation(prev_text, b.text) or _is_bullet(b.text))
+                and (
+                    _is_continuation(prev_text, b.text)
+                    or _is_bullet(b.text)
+                    or _ends_unterminated(prev_text)
+                )
             )
             next_bbox = _union_bbox(b.boxes) if b.boxes else None
             next_lh = _estimate_line_height(b.boxes or [])
@@ -1425,7 +1449,11 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
             continue
         lexical = bool(
             prev_para
-            and (_is_continuation(prev_para.text, b.text) or _is_bullet(b.text))
+            and (
+                _is_continuation(prev_para.text, b.text)
+                or _is_bullet(b.text)
+                or _ends_unterminated(prev_para.text)
+            )
         )
         line_h = max(
             _estimate_line_height([bx for s in prev_para.sentences for bx in s.boxes]) if prev_para else 0.0,
