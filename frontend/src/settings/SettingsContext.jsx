@@ -81,7 +81,7 @@ export const PANEL_WIDTH_DEFAULT = 30
 
 export const DEFAULT_SETTINGS = {
   shortcuts: DEFAULT_SHORTCUTS,
-  handMode: 'right',          // 'right' | 'left'
+  handMode: 'left',           // 'right' | 'left' — left hand is the default
   panelSide: 'right',         // sidebar on the 'right' | 'left'
   panelWidthPct: PANEL_WIDTH_DEFAULT,   // panel width as % of viewport width
   visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, index: true, home: true, settings: true, undo: true, redo: true, demoteBlock: true, promoteBlock: true, mergeBlocks: true, splitMerge: true },
@@ -102,7 +102,7 @@ const clampPanelWidth = (v) => {
 function mergeWithDefaults(saved) {
   if (!saved || typeof saved !== 'object') return clone(DEFAULT_SETTINGS)
   return {
-    handMode:  saved.handMode  === 'left' ? 'left' : 'right',
+    handMode:  saved.handMode  === 'right' ? 'right' : 'left',
     panelSide: saved.panelSide === 'left' ? 'left' : 'right',
     panelWidthPct: clampPanelWidth(saved.panelWidthPct),
     visibility: { ...DEFAULT_SETTINGS.visibility, ...(saved.visibility || {}) },

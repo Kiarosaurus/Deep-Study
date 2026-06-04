@@ -265,24 +265,24 @@ function SettingsPanel() {
           <section className="flex flex-col gap-3">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">{labels.shortcuts}</h3>
-              <Segmented value={hand} onChange={setHandMode} options={[{ value: 'right', label: labels.right }, { value: 'left', label: labels.left }]} />
+              <Segmented value={hand} onChange={setHandMode} options={[{ value: 'left', label: labels.left }, { value: 'right', label: labels.right }]} />
             </div>
             <p className="text-[11px] text-slate-400">{labels.onlyActive}</p>
 
             <div className="rounded-xl border border-slate-200 overflow-hidden">
               <div className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2 px-4 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
                 <span>{labels.action}</span>
-                <span className={`text-center transition-colors ${hand === 'right' ? 'text-indigo-600' : ''}`}>{labels.right}</span>
                 <span className={`text-center transition-colors ${hand === 'left' ? 'text-indigo-600' : ''}`}>{labels.left}</span>
+                <span className={`text-center transition-colors ${hand === 'right' ? 'text-indigo-600' : ''}`}>{labels.right}</span>
               </div>
               {ACTIONS.map(a => (
                 <div key={a} className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2 px-4 py-2 border-b border-slate-100 last:border-0">
                   <span className="text-[13px] text-slate-600">{labels.actions[a]}</span>
                   <div className="flex justify-center">
-                    <ShortcutInput value={draft.right[a]} disabled={hand !== 'right'} invalid={hand === 'right' && !draft.right[a]} labels={labels} onCapture={(k) => capture(a, k)} />
+                    <ShortcutInput value={draft.left[a]} disabled={hand !== 'left'} invalid={hand === 'left' && !draft.left[a]} labels={labels} onCapture={(k) => capture(a, k)} />
                   </div>
                   <div className="flex justify-center">
-                    <ShortcutInput value={draft.left[a]} disabled={hand !== 'left'} invalid={hand === 'left' && !draft.left[a]} labels={labels} onCapture={(k) => capture(a, k)} />
+                    <ShortcutInput value={draft.right[a]} disabled={hand !== 'right'} invalid={hand === 'right' && !draft.right[a]} labels={labels} onCapture={(k) => capture(a, k)} />
                   </div>
                 </div>
               ))}
