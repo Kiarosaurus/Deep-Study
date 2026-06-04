@@ -885,6 +885,17 @@ def _continuation_geometry_ok(
             prev_bbox, prev_bounds, next_bbox, next_bounds
         )
 
+    # Strict column-awareness (same page): a LEFT-column block never continues
+    # into a RIGHT-column block (or vice versa). At the single→double column
+    # transition (full-width abstract → two columns) the old left→right wrap was
+    # producing cross-column mis-merges. Column kind comes from the page's
+    # content bounds; a full-width block (abstract / title) is 'full' and is not
+    # blocked here, so it still flows into the first body paragraph.
+    if prev_bounds is not None:
+        bounds = next_bounds if next_bounds is not None else prev_bounds
+        if {_column_kind(prev_bbox, prev_bounds), _column_kind(next_bbox, bounds)} == {"left", "right"}:
+            return False
+
     overlap = min(prev_bbox.x1, next_bbox.x1) - max(prev_bbox.x0, next_bbox.x0)
     narrower = min(prev_bbox.x1 - prev_bbox.x0, next_bbox.x1 - next_bbox.x0)
     same_column = narrower > 0 and overlap / narrower >= 0.5
@@ -910,11 +921,11 @@ def _continuation_geometry_ok(
                 gap -= hi - lo
         return gap <= _MAX_CONT_GAP_LINES * line_h
 
-    # Different column on the same page: only the bottom→top, left→right wrap.
-    return (
-        next_bbox.x0 > prev_bbox.x1 - _GEOM_TOL
-        and next_bbox.y0 < prev_bbox.y0 - _GEOM_TOL
-    )
+    # Different column on the same page: strict column-awareness forbids the
+    # merge. The only legitimate cross-column flow is the cross-PAGE wrap handled
+    # above; a same-page left→right "wrap" was the source of the mixed-column
+    # mis-merges at the single→double column transition.
+    return False
 
 
 # Caption-like opener heuristic: catches paragraphs Marker missed tagging as
