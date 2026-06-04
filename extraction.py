@@ -960,21 +960,24 @@ def _is_panel_label(text: str) -> bool:
     return len(t.split()) <= 5 and bool(_PANEL_LABEL_RE.match(t))
 
 
-# Geometry for stitching stacked sub-panels of ONE multi-panel figure into a
-# single figure block. Vertically stacked panels share the same column (high
-# horizontal overlap) with only their "(a)/(b)" label and a thin gutter between
-# them. The label between panels is what authorises the stitch (see the merge
-# passes) — geometry alone never merges two captionless figures.
-_PANEL_RUN_HOVERLAP_MIN = 0.35
-_PANEL_RUN_GAP_FRAC = 0.75   # max inter-panel gap as a fraction of the shorter panel height
+# Geometry for stitching sub-panels of ONE multi-panel figure into a single
+# composite block. Two arrangements are recognised:
+#   • vertical stack  — panels share a column (high HORIZONTAL overlap), a thin
+#     vertical gutter between them (`_panels_contiguous`);
+#   • horizontal row  — panels share a row (high VERTICAL overlap), a thin
+#     horizontal gutter between them (`_panels_side_by_side`).
+# `_hoverlap`/`_voverlap` are defined later in the module — resolved at call
+# time, so the forward references below are fine.
+_PANEL_RUN_HOVERLAP_MIN = 0.35   # min horizontal overlap for a vertical stack
+_PANEL_RUN_VOVERLAP_MIN = 0.40   # min vertical overlap for a side-by-side row
+_PANEL_RUN_GAP_FRAC = 0.75   # max inter-panel gap as a fraction of the shorter panel extent
 _PANEL_RUN_GAP_ABS = 48.0    # absolute floor (PDF pts) tolerating the label line + gutter
 
 
 def _panels_contiguous(union: BBox, nxt: BBox) -> bool:
     """True when `nxt` is the next vertically-stacked panel of the same figure:
     same column (horizontal overlap with the running union) and a small downward
-    gap below it. `_hoverlap` is defined later in the module — resolved at call
-    time, so the forward reference is fine."""
+    gap below it."""
     if _hoverlap(union, nxt) < _PANEL_RUN_HOVERLAP_MIN:
         return False
     gap = nxt.y0 - union.y1
@@ -982,6 +985,20 @@ def _panels_contiguous(union: BBox, nxt: BBox) -> bool:
         return False  # overlaps or sits above the union — not a clean downward stack
     h = min(union.y1 - union.y0, nxt.y1 - nxt.y0)
     return gap <= max(_PANEL_RUN_GAP_ABS, _PANEL_RUN_GAP_FRAC * h)
+
+
+def _panels_side_by_side(union: BBox, nxt: BBox) -> bool:
+    """True when `nxt` sits beside the running union on the same row — Rule 1's
+    horizontal merge: significant vertical (Y) overlap and a small horizontal gap
+    to the right. No sub-figure label is required; a single caption below the row
+    is enough to bind them (the caller's `not have_caption` gate enforces that)."""
+    if _voverlap(union, nxt) < _PANEL_RUN_VOVERLAP_MIN:
+        return False
+    gap = nxt.x0 - union.x1  # nxt must be to the RIGHT of the running union
+    if gap < -_GEOM_TOL:
+        return False  # overlaps or sits left of the union — not a clean rightward row
+    w = min(union.x1 - union.x0, nxt.x1 - nxt.x0)
+    return gap <= max(_PANEL_RUN_GAP_ABS, _PANEL_RUN_GAP_FRAC * w)
 
 
 def _is_caption_block_pages(b: ParagraphBlock) -> bool:
@@ -1072,7 +1089,10 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                     and id(neighbor_img) not in consumed_img_ids
                     and not (have_caption or have_source)
                     and (saw_label or not have_caption)
-                    and _panels_contiguous(run_union, neighbor_img.bbox)
+                    and (
+                        _panels_contiguous(run_union, neighbor_img.bbox)       # vertical stack
+                        or _panels_side_by_side(run_union, neighbor_img.bbox)  # horizontal row
+                    )
                 ):
                     panel_imgs.append(neighbor_img)
                     run_union = _union_bbox([run_union, neighbor_img.bbox])
@@ -1261,13 +1281,17 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                     and (saw_label or not have_caption)
                     and nb.role in ("figure", "table")
                     and nb.page == b.page
-                    and _panels_contiguous(run_union, nb.bbox)
+                    and (
+                        _panels_contiguous(run_union, nb.bbox)       # vertical stack
+                        or _panels_side_by_side(run_union, nb.bbox)  # horizontal row
+                    )
                 ):
-                    # Stitch the next stacked image when EITHER a panel label sat
-                    # between them, OR the running figure has no caption of its
-                    # own yet ("the image immediately above carries no Figure
-                    # caption"). A caption (above or forward) closes the run, so
-                    # two independently-captioned figures are never glued.
+                    # Stitch the next panel image when it is geometrically part of
+                    # the same composite — stacked below (Rule 2) OR beside on the
+                    # same row (Rule 1) — AND either a panel label sat between them
+                    # OR the running figure has no caption of its own yet. A
+                    # caption (above or forward) closes the run, so two
+                    # independently-captioned figures are never glued.
                     panel_idxs.append(j)
                     run_union = _union_bbox([run_union, nb.bbox])
                     saw_label = False
@@ -1320,6 +1344,14 @@ def _hoverlap(a: BBox, b: BBox) -> float:
     inter = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
     width = max(1e-6, min(a.x1 - a.x0, b.x1 - b.x0))
     return inter / width
+
+
+def _voverlap(a: BBox, b: BBox) -> float:
+    """Vertical-overlap fraction over the shorter height — the Y-axis mirror of
+    `_hoverlap`. Used to decide whether two images share a row (side by side)."""
+    inter = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
+    height = max(1e-6, min(a.y1 - a.y0, b.y1 - b.y0))
+    return inter / height
 
 
 def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
