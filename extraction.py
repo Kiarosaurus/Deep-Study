@@ -1589,77 +1589,6 @@ def _voverlap(a: BBox, b: BBox) -> float:
     height = max(1e-6, min(a.y1 - a.y0, b.y1 - b.y0))
     return inter / height
 
-def _merge_tables_linear(blocks: list[FullBlock]) -> list[FullBlock]:
-    """Merge scattered APA-style table components (Label, Title, Table, Note) into one."""
-    _cont_log(f"=== linear table merge start: {len(blocks)} blocks ===")
-    consumed: set[int] = set()
-    merged: list[FullBlock] = []
-
-    for i, b in enumerate(blocks):
-        if i in consumed:
-            continue
-
-        text = (b.text or "").strip()
-        
-        # 1. Detectar si este bloque es un "Table Label" ("Table 1", "Tabla II")
-        if b.role in ("paragraph", "caption", "section_header") and _TABLE_LABEL_RE.match(text):
-            table_idx = -1
-            title_idx = -1
-            
-            # 2. Look-ahead de hasta 2 posiciones buscando el bloque "table"
-            for offset in (1, 2):
-                look_idx = i + offset
-                if look_idx < len(blocks):
-                    if blocks[look_idx].role == "table":
-                        table_idx = look_idx
-                        if offset == 2:
-                            title_idx = i + 1  # El bloque intermedio es el título
-                        break
-
-            if table_idx != -1:
-                # 3. Buscar inmediatamente después de la tabla por una "Note."
-                note_idx = -1
-                next_idx = table_idx + 1
-                if next_idx < len(blocks):
-                    next_text = (blocks[next_idx].text or "").strip()
-                    if blocks[next_idx].role in ("paragraph", "caption") and _NOTE_LABEL_RE.match(next_text):
-                        note_idx = next_idx
-
-                # 4. Agrupar las piezas encontradas
-                piece_idxs = [i]
-                if title_idx != -1:
-                    piece_idxs.append(title_idx)
-                piece_idxs.append(table_idx)
-                if note_idx != -1:
-                    piece_idxs.append(note_idx)
-
-                pieces = [blocks[idx] for idx in piece_idxs]
-                tb = blocks[table_idx]  # Bloque central (la tabla)
-
-                _cont_log(f"  [{i}] table merge: {len(pieces)} pieces from {piece_idxs}")
-
-                # 5. Fusionar todo en el bloque 'table'
-                tb.text = "\n".join(p.text for p in pieces if p.text)
-                tb.bbox = _union_bbox([p.bbox for p in pieces if p.bbox is not None])
-                
-                label_text = pieces[0].text or ""
-                title_text = pieces[1].text if title_idx != -1 else ""
-                tb.caption_text = f"{label_text}\n{title_text}".strip()
-
-                # Propagar oraciones si existieran
-                for p in pieces:
-                    if p.sentences and p is not tb:
-                        tb.sentences.extend(p.sentences)
-
-                consumed.update(piece_idxs)
-                merged.append(tb)
-                continue
-
-        merged.append(b)
-
-    _cont_log(f"=== linear table merge end: {len(merged)} blocks ===")
-    return merged
-
 def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     """Detect 'Algorithm N ...' regions and collapse them into a single
     role='algorithm' FullBlock. Greedy absorption from the header forward:
@@ -1732,7 +1661,17 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
 _TABLE_LABEL_RE = re.compile(r"^\s*(?:table|tabla)\b", re.IGNORECASE)
 # Table footnote opener. Widened beyond "Note."/"Nota.": also "Notes."/"Notas.",
 # a trailing colon, and a leading "*" (asterisk note common in APA tables).
-_TABLE_NOTE_RE = re.compile(r"^\s*(?:(?:notes?|notas?)\s*[.:]|\*)", re.IGNORECASE)
+# Table-note opener, anchored at the start. Covers "Note." / "Notes." /
+# "Note:" / "Notes:" / "Nota[s][.:]", a leading "*", and a single-letter
+# superscript marker followed by a separator ("a.", "a)") — but not "e.g." (no
+# space after) nor a sentence merely starting with "Note the …" (no separator).
+_TABLE_NOTE_RE = re.compile(
+    r"^\s*(?:(?:notes?|notas?)\s*[.:]|\*|[a-z][.)](?=\s))",
+    re.IGNORECASE,
+)
+# Generous vertical gap (PDF pts) tolerated between the table's bottom edge and
+# its "Note." block — APA tables leave a lot of whitespace before the note.
+_TABLE_NOTE_MAX_GAP = 140.0
 _TABLE_LABEL_ROLES = frozenset({"paragraph", "caption", "section_header"})
 # How aggressively the label looks DOWN for its table: scan up to this many
 # blocks past the label (title lines may sit between), accepting a generous
@@ -1799,18 +1738,32 @@ def _merge_tables_linear(linear: list[FullBlock]) -> list[FullBlock]:
                     break
                 title_idxs.append(j)
             if table_idx is not None:
-                members = [i] + title_idxs + [table_idx]  # label, [titles], table
-                # Note may sit immediately after the table or one block down.
-                for k in range(table_idx + 1, min(n, table_idx + 3)):
-                    if k in consumed:
-                        continue
-                    if _is_table_note(linear[k]):
-                        members.append(k)
-                        break
-                    if linear[k].role not in ("paragraph", "caption"):
-                        break
-
                 table = linear[table_idx]
+                members = [i] + title_idxs + [table_idx]  # label, [titles], table
+                # SPATIAL note capture (bypasses reading-order adjacency): a
+                # wide table is a column-zone barrier, so its narrow Note gets
+                # bucketed elsewhere in the array. Find the CLOSEST note-like
+                # block sitting just below the table's bottom edge, sharing its
+                # column (h-overlap), within a generous Y-gap — wherever it
+                # landed in the list.
+                note_idx, best_gap = None, None
+                for k, nb in enumerate(linear):
+                    if k in consumed or k in members or not nb.bbox:
+                        continue
+                    if nb.page != table.page:
+                        continue
+                    gap = nb.bbox.y0 - table.bbox.y1
+                    if gap < -_GEOM_TOL or gap > _TABLE_NOTE_MAX_GAP:
+                        continue
+                    if _hoverlap(table.bbox, nb.bbox) < _TABLE_LOOKAHEAD_HOVERLAP:
+                        continue
+                    if not _is_table_note(nb):
+                        continue
+                    if best_gap is None or gap < best_gap:
+                        best_gap, note_idx = gap, k
+                if note_idx is not None:
+                    members.append(note_idx)
+
                 parts = [linear[m] for m in members]
                 table.text = "\n".join(p.text for p in parts if p.text)
                 table.bbox = _union_bbox([p.bbox for p in parts])
