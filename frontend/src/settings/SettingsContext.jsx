@@ -17,12 +17,12 @@ export const ACTIONS = [
   'centerHighlight',
   'explainTab',
   'globalTab',
-  'toggleSidebar',
-  'trackingToggle',
-  'themeToggle',
-  'index',
   'home',
   'settings',
+  'trackingToggle',
+  'toggleSidebar',
+  'themeToggle',
+  'index',
 ]
 
 // Actions whose on-screen button can be hidden (see VISIBILITY_ITEMS), so the
