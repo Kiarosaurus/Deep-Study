@@ -912,6 +912,30 @@ _CAPTION_LIKE_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _is_caption_like(text: str) -> bool:
+    """True for a real caption opener ("Figure 4. …", "TABLE 2. APPLICATION …",
+    "Figura 1 — …"), False for a BODY SENTENCE that merely starts with a figure/
+    table reference ("Fig. 5 (top chart) shows the speedup…", "Table 4 compares
+    key features…", "Tabla 2 muestra…").
+
+    Discriminator (from real layouts): after the "Figure/Table N" opener a real
+    caption is followed by a separator (. : — –) OR an uppercase/digit label OR
+    nothing; a prose reference continues with a lowercase word or a parenthetical
+    and no caption separator. Without this, the loose prefix match steals the
+    caption slot from the genuine label (e.g. a body "Fig. 5 shows…" was being
+    merged into a table instead of its real "TABLE 2 …" caption)."""
+    t = (text or "").lstrip()
+    m = _CAPTION_LIKE_RE.match(t)
+    if not m:
+        return False
+    s = t[m.end():].lstrip()
+    if s == "":
+        return True                          # bare "Figure 4"
+    if s[0] in ".:—–":
+        return True                          # "Figure 4. …" / "Figure 3: …"
+    return s[0].isupper() or s[0].isdigit()  # Title/CAPS/number label vs lowercase prose
+
 # "Source: ..." / "Fuente: ..." data-attribution line that sits directly under a
 # figure/table. Unlike `_CAPTION_LIKE_RE` it carries no figure number, and
 # "source" is a common body word — so it only counts as part of the image when
@@ -1004,9 +1028,7 @@ def _panels_side_by_side(union: BBox, nxt: BBox) -> bool:
 def _is_caption_block_pages(b: ParagraphBlock) -> bool:
     if b.role == "caption":
         return True
-    if b.role == "paragraph" and bool(
-        _CAPTION_LIKE_RE.match((b.text or "").lstrip())
-    ):
+    if b.role == "paragraph" and _is_caption_like(b.text or ""):
         return True
     return False
 
@@ -1211,9 +1233,7 @@ def _is_caption_block_linear(b: FullBlock) -> bool:
     like marker (Figure/Figura/Tabla/Imagen/Esquema/Diagrama/...)."""
     if b.role == "caption":
         return True
-    if b.role == "paragraph" and bool(
-        _CAPTION_LIKE_RE.match((b.text or "").lstrip())
-    ):
+    if b.role == "paragraph" and _is_caption_like(b.text or ""):
         return True
     return False
 
@@ -2036,7 +2056,7 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
             if (
                 bt in _BODY_TEXT_TYPES
                 and id(block) not in rescued_footnotes
-                and not _CAPTION_LIKE_RE.match(text)
+                and not _is_caption_like(text)
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
@@ -2378,7 +2398,7 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
             if (
                 bt in _BODY_TEXT_TYPES
                 and not was_rescued
-                and not _CAPTION_LIKE_RE.match(text)
+                and not _is_caption_like(text)
                 and not _SOURCE_ATTRIBUTION_RE.match(text)
                 and _is_footnote_by_font(inner_lines, bbox, body_lh, body_bboxes)
             ):
