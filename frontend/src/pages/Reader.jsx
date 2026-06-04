@@ -897,10 +897,18 @@ export default function Reader() {
   // ── Lupa: forced concept extraction from the selected fragment ──────────────
   const onSearchSelect = useCallback((sel) => setSearchSel(sel), [])
 
-  const cancelSearch = useCallback(() => {
+  // Clear just the in-progress selection (overlay resets via the bumped key);
+  // the tool stays armed so the user can select again.
+  const clearSearchSelection = useCallback(() => {
     setSearchSel(null)
-    setSearchResetKey(k => k + 1)  // tell the overlay to clear its carets
+    setSearchResetKey(k => k + 1)
   }, [])
+
+  // Cancel = unconditional full reset: drop the selection AND exit the tool.
+  const cancelSearch = useCallback(() => {
+    clearSearchSelection()
+    disarm()
+  }, [clearSearchSelection, disarm])
 
   // Send the highlighted fragment to /extract-concept and inject the returned
   // concept(s) into the active paragraph's explanation immutably (appended as a
@@ -931,9 +939,9 @@ export default function Reader() {
     } catch { /* surfaced as no-op; the selection is cleared regardless */ }
     finally {
       setSearchBusy(false)
-      cancelSearch()
+      clearSearchSelection()  // keep the tool armed for further extractions
     }
-  }, [searchSel, analysis, searchBusy, cancelSearch])
+  }, [searchSel, analysis, searchBusy, clearSearchSelection])
 
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {

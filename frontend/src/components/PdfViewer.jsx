@@ -392,9 +392,11 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             )}
 
-            {/* Edit click-catcher: while a tool is armed, the whole block region
-                routes clicks to the edit handler instead of the explain flow. */}
-            {isLeader && armedTool && unionBox && (
+            {/* Edit click-catcher: while a CLICK tool is armed, the whole block
+                region routes clicks to the edit handler instead of the explain
+                flow. Excluded for 'search' — that tool has its own text-selection
+                layer and the catcher must not block the caret hit-test. */}
+            {isLeader && armedTool && armedTool !== 'search' && unionBox && (
               <button
                 type="button"
                 className="absolute pointer-events-auto rounded-sm transition-colors"
@@ -503,7 +505,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
               />
             )}
-            {armedTool && (
+            {armedTool && armedTool !== 'search' && (
               <button
                 type="button"
                 className="absolute pointer-events-auto rounded-sm transition-colors"
@@ -576,16 +578,35 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
   // in an effect (post-render) so we never read the ref during render.
   const [view, setView] = useState({ rects: [] })
 
+  // Resolve the text caret under a client point. The drawing overlay sits ABOVE
+  // the pdfjs text layer, so we momentarily disable its pointer-events while
+  // hit-testing — otherwise caretRangeFromPoint returns this empty overlay div
+  // instead of the glyph spans beneath. Only a real text node counts; on miss
+  // we warn and return null without touching React state (safety fallback).
   const caretAt = (cx, cy) => {
-    if (document.caretRangeFromPoint) {
-      const r = document.caretRangeFromPoint(cx, cy)
-      return r ? { node: r.startContainer, offset: r.startOffset } : null
+    const el = ref.current
+    const prevPE = el ? el.style.pointerEvents : ''
+    if (el) el.style.pointerEvents = 'none'
+    let res = null
+    try {
+      if (document.caretRangeFromPoint) {
+        const r = document.caretRangeFromPoint(cx, cy)
+        if (r && r.startContainer && r.startContainer.nodeType === Node.TEXT_NODE) {
+          res = { node: r.startContainer, offset: r.startOffset }
+        }
+      } else if (document.caretPositionFromPoint) {
+        const p = document.caretPositionFromPoint(cx, cy)
+        if (p && p.offsetNode && p.offsetNode.nodeType === Node.TEXT_NODE) {
+          res = { node: p.offsetNode, offset: p.offset }
+        }
+      }
+    } catch (err) {
+      console.warn('SearchSelectionLayer: caret hit-test failed', err)
+    } finally {
+      if (el) el.style.pointerEvents = prevPE
     }
-    if (document.caretPositionFromPoint) {
-      const p = document.caretPositionFromPoint(cx, cy)
-      return p ? { node: p.offsetNode, offset: p.offset } : null
-    }
-    return null
+    if (!res) console.warn('SearchSelectionLayer: no text node under point', cx, cy)
+    return res
   }
 
   const paragraphAt = (px, py) => {
