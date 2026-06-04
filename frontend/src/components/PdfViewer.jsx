@@ -559,6 +559,164 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
   )
 }
 
+// ── Search/lupa selection layer ──────────────────────────────────────────────
+// Char-level text selection over the pdfjs text layer, constrained to ONE
+// paragraph. Two clicks set the start/end carets (resolved via the native
+// caret-from-point API over the transparent glyph spans); endpoint knobs drag
+// to adjust. The second click and every drag are clamped to the bbox of the
+// paragraph locked on the first click, so a selection can never cross blocks.
+// Reports { text, paragraphSentences } upward; the parent owns Accept/Cancel.
+function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
+  const ref = useRef(null)
+  const paraRef = useRef(null)                 // { box, sentences } locked on click 1
+  const [startC, setStartC] = useState(null)   // { node, offset }
+  const [endC, setEndC] = useState(null)
+  const [dragging, setDragging] = useState(null)  // 'start' | 'end' | null
+  // Selection rendered from DOM measurement (rects + handle positions). Computed
+  // in an effect (post-render) so we never read the ref during render.
+  const [view, setView] = useState({ rects: [] })
+
+  const caretAt = (cx, cy) => {
+    if (document.caretRangeFromPoint) {
+      const r = document.caretRangeFromPoint(cx, cy)
+      return r ? { node: r.startContainer, offset: r.startOffset } : null
+    }
+    if (document.caretPositionFromPoint) {
+      const p = document.caretPositionFromPoint(cx, cy)
+      return p ? { node: p.offsetNode, offset: p.offset } : null
+    }
+    return null
+  }
+
+  const paragraphAt = (px, py) => {
+    for (const b of (blocks || [])) {
+      const bs = b.boxes || []
+      if (!bs.length || b.role === 'ignored') continue
+      const x0 = Math.min(...bs.map(x => x.x0)) * scale
+      const y0 = Math.min(...bs.map(x => x.y0)) * scale
+      const x1 = Math.max(...bs.map(x => x.x1)) * scale
+      const y1 = Math.max(...bs.map(x => x.y1)) * scale
+      if (px >= x0 - 4 && px <= x1 + 4 && py >= y0 - 4 && py <= y1 + 4) {
+        return { box: { x0, y0, x1, y1 }, sentences: (b.sentences || []).map(s => s.text) }
+      }
+    }
+    return null
+  }
+
+  // Clamp a client point into the locked paragraph's box (keeps carets inside).
+  const clampClient = (cx, cy) => {
+    const lr = ref.current?.getBoundingClientRect()
+    const p = paraRef.current
+    if (!lr || !p) return { cx, cy }
+    return {
+      cx: Math.min(Math.max(cx, lr.left + p.box.x0 + 1), lr.left + p.box.x1 - 1),
+      cy: Math.min(Math.max(cy, lr.top + p.box.y0 + 1), lr.top + p.box.y1 - 1),
+    }
+  }
+
+  const onClick = (e) => {
+    const lr = ref.current?.getBoundingClientRect(); if (!lr) return
+    if (!startC) {
+      const para = paragraphAt(e.clientX - lr.left, e.clientY - lr.top)
+      if (!para) return
+      paraRef.current = para
+      const c = caretAt(e.clientX, e.clientY)
+      if (c) setStartC(c)
+    } else if (!endC) {
+      const { cx, cy } = clampClient(e.clientX, e.clientY)
+      const c = caretAt(cx, cy)
+      if (c) setEndC(c)
+    } else {
+      const para = paragraphAt(e.clientX - lr.left, e.clientY - lr.top)
+      setEndC(null)
+      paraRef.current = para
+      setStartC(para ? caretAt(e.clientX, e.clientY) : null)
+    }
+  }
+
+  // Build the ordered DOM range from the two carets (null if incomplete/invalid).
+  const orderedRange = () => {
+    if (!startC || !endC) return null
+    try {
+      const cmp = startC.node.compareDocumentPosition(endC.node)
+      const startFirst = (cmp & Node.DOCUMENT_POSITION_FOLLOWING)
+        || (startC.node === endC.node && startC.offset <= endC.offset)
+      const a = startFirst ? startC : endC
+      const b = startFirst ? endC : startC
+      const r = document.createRange()
+      r.setStart(a.node, a.offset)
+      r.setEnd(b.node, b.offset)
+      return r
+    } catch { return null }
+  }
+
+  // Measure the selection after carets change and report it up. DOM reads
+  // (getClientRects) belong here, post-render — never during render.
+  useEffect(() => {
+    const el = ref.current
+    const range = orderedRange()
+    if (!el || !range) {
+      setView({ rects: [] })
+      onSearchSelect?.(null)
+      return
+    }
+    const lr = el.getBoundingClientRect()
+    const rects = Array.from(range.getClientRects()).map(rc => ({
+      left: rc.left - lr.left, top: rc.top - lr.top, width: rc.width, height: rc.height,
+    }))
+    setView({ rects })
+    const text = range.toString().replace(/\s+/g, ' ').trim()
+    onSearchSelect?.(text ? { text, paragraphSentences: paraRef.current?.sentences || [] } : null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startC, endC])
+
+  // Drag a knob: move the corresponding caret, clamped to the paragraph.
+  useEffect(() => {
+    if (!dragging) return
+    const onMove = (ev) => {
+      const { cx, cy } = clampClient(ev.clientX, ev.clientY)
+      const c = caretAt(cx, cy)
+      if (!c) return
+      if (dragging === 'start') setStartC(c); else setEndC(c)
+    }
+    const onUp = () => setDragging(null)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp, { once: true })
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [dragging])
+
+  const rects = view.rects
+  const firstRect = rects[0]
+  const lastRect = rects[rects.length - 1]
+  const knob = (rect, side) => rect && (
+    <div
+      onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(side) }}
+      className="absolute z-30 rounded-full"
+      style={{
+        left: (side === 'start' ? rect.left : rect.left + rect.width) - 6,
+        top: rect.top - 6,
+        width: 12, height: 12,
+        background: 'rgb(79,70,229)', border: '2px solid white',
+        boxShadow: '0 1px 4px rgba(0,0,0,0.3)', cursor: 'ew-resize', pointerEvents: 'auto',
+      }}
+    />
+  )
+
+  return (
+    <div ref={ref} className="absolute inset-0 z-20" style={{ cursor: 'text' }} onClick={onClick}>
+      {rects.map((r, i) => (
+        <div key={i} className="absolute pointer-events-none rounded-sm"
+          style={{ left: r.left, top: r.top, width: r.width, height: r.height, background: 'rgba(99,102,241,0.30)' }} />
+      ))}
+      {knob(firstRect, 'start')}
+      {knob(lastRect, 'end')}
+    </div>
+  )
+}
+
 function PdfPage({
   pdfDoc,
   pageNumber,
@@ -584,6 +742,8 @@ function PdfPage({
   mergeSelectedKeys,
   mergeMembership,
   onExplainGroup,
+  onSearchSelect,
+  searchResetKey,
 }) {
   // scale = displayWidth / page-natural-width (PDF points). pageDim comes
   // from the backend analysis; if missing we fall back to a sentinel so
@@ -621,6 +781,14 @@ function PdfPage({
         mergeMembership={mergeMembership}
         onExplainGroup={onExplainGroup}
       />
+      {armedTool === 'search' && scale && (
+        <SearchSelectionLayer
+          key={searchResetKey}
+          blocks={blocks}
+          scale={scale}
+          onSearchSelect={onSearchSelect}
+        />
+      )}
       {trackedBox && scale && (
         <div
           className="absolute pointer-events-none rounded-md transition-all duration-500 ease-out z-20"
@@ -720,7 +888,7 @@ function EditToolbar() {
   )
 }
 
-const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, linearEditInfo }, ref) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, linearEditInfo, onSearchSelect, searchResetKey }, ref) {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen } = useSettings()
   const visibility = settings.visibility
@@ -1616,6 +1784,8 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 mergeSelectedKeys={mergeSelectedKeys}
                 mergeMembership={mergeMembership}
                 onExplainGroup={onExplainGroup}
+                onSearchSelect={onSearchSelect}
+                searchResetKey={searchResetKey}
               />
             ))}
         </div>

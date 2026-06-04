@@ -288,6 +288,11 @@ export default function Reader() {
   const [edits, setEdits] = useState(DEFAULT_EDITS)
   // Pincel type picker: { target, x, y } anchored at the click, or null.
   const [promotePicker, setPromotePicker] = useState(null)
+  // Lupa (search) selection: { text, paragraphSentences } | null, a reset
+  // counter that tells the selection overlay to clear, and a busy flag.
+  const [searchSel, setSearchSel] = useState(null)
+  const [searchResetKey, setSearchResetKey] = useState(0)
+  const [searchBusy, setSearchBusy] = useState(false)
   // JSON of the value last known in sync with the backend — lets the persist
   // effect skip the change triggered by hydration.
   const lastPersisted = useRef(null)
@@ -305,6 +310,7 @@ export default function Reader() {
         setEdits(ed)
         disarm()  // never carry an armed tool across documents
         setPromotePicker(null)
+        setSearchSel(null)
       })
       .catch(() => setErrorAnalysis(true))
       .finally(() => setLoadingAnalysis(false))
@@ -888,6 +894,47 @@ export default function Reader() {
     handleExplain(textParts.join('\n\n'), sentences, null, { footnotes: footnoteTexts })
   }, [edits, editedPages, handleExplain])
 
+  // ── Lupa: forced concept extraction from the selected fragment ──────────────
+  const onSearchSelect = useCallback((sel) => setSearchSel(sel), [])
+
+  const cancelSearch = useCallback(() => {
+    setSearchSel(null)
+    setSearchResetKey(k => k + 1)  // tell the overlay to clear its carets
+  }, [])
+
+  // Send the highlighted fragment to /extract-concept and inject the returned
+  // concept(s) into the active paragraph's explanation immutably (appended as a
+  // new item so previous concepts are preserved).
+  const confirmSearch = useCallback(async () => {
+    const sel = searchSel
+    if (!sel?.text || !analysis || searchBusy) return
+    setSearchBusy(true)
+    try {
+      const { data } = await axios.post('/api/extract-concept/', {
+        selected_text: sel.text,
+        paragraph_sentences: sel.paragraphSentences || [],
+        global_map: analysis.global_map,
+        language: analysis.language || 'es',
+      })
+      const concepts = Array.isArray(data?.concepts) ? data.concepts : []
+      if (concepts.length) {
+        setIsSidebarOpen(true)
+        setTab('explain')
+        const item = { sentence_indices: [], quote: sel.text, concepts, forced: true }
+        setExplanation(prev => {
+          const base = (prev && Array.isArray(prev.sentence_explanations))
+            ? prev
+            : { sentence_explanations: [], paragraph_context: { section_role: '', narrative: '' } }
+          return { ...base, sentence_explanations: [...base.sentence_explanations, item] }
+        })
+      }
+    } catch { /* surfaced as no-op; the selection is cleared regardless */ }
+    finally {
+      setSearchBusy(false)
+      cancelSearch()
+    }
+  }, [searchSel, analysis, searchBusy, cancelSearch])
+
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {
     function onKey(e) {
@@ -1093,6 +1140,10 @@ export default function Reader() {
         if (e.key === 'Enter') { e.preventDefault(); confirmMerge(); return }
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearMergeBuffer(); return }
       }
+      if (armedTool === 'search') {
+        if (e.key === 'Enter') { e.preventDefault(); confirmSearch(); return }
+        if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); cancelSearch(); return }
+      }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -1148,7 +1199,7 @@ export default function Reader() {
     // bubble-phase activation runs after our handler in capture).
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme, armTool, undo, redo, armedTool, confirmMerge, clearMergeBuffer])
+  }, [explanation, currentIndex, activeParagraph, paragraphList, handleExplain, linearBlocks, chainPayloads, keyToAction, navigate, openSettings, cycleTheme, armTool, undo, redo, armedTool, confirmMerge, clearMergeBuffer, confirmSearch, cancelSearch])
 
   // ── Continuous scroll (W / S) ────────────────────────────────────────────
   // Behaviour depends on focusArea (read through a ref so this binds ONCE and
@@ -1284,6 +1335,8 @@ export default function Reader() {
           mergeMembership={mergeMembership}
           onExplainGroup={explainGroup}
           linearEditInfo={linearEditInfo}
+          onSearchSelect={onSearchSelect}
+          searchResetKey={searchResetKey}
         />
         {/* Toggle the right panel (global map / explanation). Icon flips to the
             opposite chevron when the panel is hidden. Also bound to "." */}
@@ -1366,6 +1419,30 @@ export default function Reader() {
           <button
             type="button"
             onClick={clearMergeBuffer}
+            className="px-3 h-8 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
+          >
+            {t('viewer.toolCancel')}
+          </button>
+        </div>
+      )}
+
+      {/* Lupa accept/cancel bar — same layout as the lazo bar. */}
+      {armedTool === 'search' && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 px-4 py-2 select-none">
+          <span className="text-[13px] text-slate-600">
+            {searchBusy ? t('viewer.searchExtracting') : t('viewer.searchHint')}
+          </span>
+          <button
+            type="button"
+            onClick={confirmSearch}
+            disabled={!searchSel?.text || searchBusy}
+            className="px-3 h-8 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+          >
+            {t('viewer.toolConfirm')}
+          </button>
+          <button
+            type="button"
+            onClick={cancelSearch}
             className="px-3 h-8 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
           >
             {t('viewer.toolCancel')}
