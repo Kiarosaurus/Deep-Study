@@ -776,6 +776,57 @@ def _in_callout_region(bbox: BBox, regions: list[BBox] | None) -> bool:
     return False
 
 
+# ── Footnote separator rule (vector line above page-bottom footnotes) ─────────
+# A thin, wide, near-horizontal line drawn LOW on the page is the rule that
+# separates body text from author/funding footnotes. Text at/below it is the
+# footnote zone — a strict wall the paragraph merger must not cross.
+_FOOTNOTE_SEP_MIN_WIDTH_FRAC = 0.30   # line must span ≥30% of the page width
+_FOOTNOTE_SEP_MAX_HEIGHT = 3.0        # near-zero height → a rule, not a box
+_FOOTNOTE_SEP_BOTTOM_FRAC = 0.72      # only rules in the bottom ~28% qualify
+
+
+def _detect_footnote_separators(pdf_bytes: bytes) -> dict[int, float]:
+    """Per-page top-Y of the topmost horizontal separator rule in the page's
+    bottom region (text at/below it is a footnote). Best-effort; {} if PyMuPDF
+    is unavailable. The bottom-only + width gate keeps table/figure rules from
+    being mistaken for a footnote separator."""
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return {}
+    seps: dict[int, float] = {}
+    try:
+        for pno, page in enumerate(doc, start=1):
+            H = max(1.0, page.rect.height)
+            W = max(1.0, page.rect.width)
+            ys: list[float] = []
+            try:
+                drawings = page.get_drawings()
+            except Exception:
+                drawings = []
+            for d in drawings:
+                r = d.get("rect")
+                if r is None:
+                    continue
+                if (
+                    (r.x1 - r.x0) >= _FOOTNOTE_SEP_MIN_WIDTH_FRAC * W
+                    and (r.y1 - r.y0) <= _FOOTNOTE_SEP_MAX_HEIGHT
+                    and r.y0 >= _FOOTNOTE_SEP_BOTTOM_FRAC * H
+                ):
+                    ys.append(round(r.y0, 2))
+            if ys:
+                seps[pno] = min(ys)  # topmost bottom-rule → everything below is footnote
+    finally:
+        doc.close()
+    return seps
+
+
+def _below_footnote_sep(bbox: BBox, sep_y: float | None) -> bool:
+    """True when a block sits at/below the page's footnote separator rule."""
+    return sep_y is not None and bbox.y0 >= sep_y - _GEOM_TOL
+
+
 def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
     """Classify a block's horizontal placement on its page: 'full' (spans the
     content width — single-column / full-width), 'left' (left column), 'right'
@@ -2232,7 +2283,7 @@ def _run_marker(pdf_bytes: bytes, *, disable_ocr: bool = False):
             pass
 
 
-def _extract_pages_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True) -> list[PageBlocks]:
+def _extract_pages_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True, footnote_seps: dict | None = None) -> list[PageBlocks]:
     output: list[PageBlocks] = []
     stop_content = False
     pre_abstract = True  # page-1 masthead window (authors/affiliations live here)
@@ -2354,6 +2405,20 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
                 _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache)
                 continue
 
+            # Footnote-separator firewall: a block sitting at/below the page's
+            # bottom separator rule is author/funding footnote text — never a body
+            # paragraph, regardless of its font. Attach if it cites a symbol,
+            # otherwise drop. Captions/sources are exempt (handled elsewhere).
+            if (
+                bt in _BODY_TEXT_TYPES
+                and id(block) not in rescued_footnotes
+                and not _is_caption_like(text)
+                and not _SOURCE_ATTRIBUTION_RE.match(text)
+                and _below_footnote_sep(bbox, (footnote_seps or {}).get(page_idx + 1))
+            ):
+                _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache)
+                continue
+
             # Body-size footnote opening with an unambiguous symbol marker
             # (**, ††, †, ‡ …) — attach or drop, never leak as a paragraph.
             if (
@@ -2455,7 +2520,7 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
     has_abstract = _document_has_abstract(document)
-    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract)
+    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
     _merge_figure_captions_pages(pages)
     _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
@@ -2521,7 +2586,7 @@ def _drop_decorative_icons_linear(blocks: list[FullBlock]) -> list[FullBlock]:
     ]
 
 
-def _extract_linear_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True) -> list[FullBlock]:
+def _extract_linear_from_document(document, line_cache: dict | None = None, callout_regions: dict | None = None, has_abstract: bool = True, footnote_seps: dict | None = None) -> list[FullBlock]:
     """Walk the whole Marker document in global reading order.
 
     Emits a FullBlock for every layout block (title, authors, headers, paragraphs,
@@ -2708,6 +2773,20 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                     _extract_log(f"    → SKIP footnote_by_font {_snip(text)!r}")
                 continue
 
+            # Footnote-separator firewall: a block at/below the page's bottom
+            # separator rule is footnote text regardless of font — attach if it
+            # cites a symbol, otherwise drop. Captions/sources exempt.
+            if (
+                bt in _BODY_TEXT_TYPES
+                and not was_rescued
+                and not _is_caption_like(text)
+                and not _SOURCE_ATTRIBUTION_RE.match(text)
+                and _below_footnote_sep(bbox, (footnote_seps or {}).get(page_no))
+            ):
+                _try_attach_footnote(text, bbox, inner_lines, body_lh, page_paras, document, sup_cache)
+                _extract_log(f"    → FOOTNOTE (below separator rule) {_snip(text)!r}")
+                continue
+
             # Footnote that evaded the font test (body-size) but opens with an
             # unambiguous symbol marker (**, ††, †, ‡ …). Attach or drop — never
             # leak it as a body paragraph.
@@ -2844,7 +2923,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     has_abstract = _document_has_abstract(document)
-    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract)
+    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
     blocks = _merge_tables_linear(blocks)
     blocks = _merge_figure_captions_linear(blocks)
     blocks = _merge_algorithms_linear(blocks)
@@ -2873,9 +2952,10 @@ def extract_both(
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
     line_cache: dict[int, list[LineBlock]] = {}
     callout_regions = _detect_callout_regions(pdf_bytes)
+    footnote_seps = _detect_footnote_separators(pdf_bytes)
     has_abstract = _document_has_abstract(document, line_cache)
-    pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract)
-    linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract)
+    pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
+    linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
     linear = _merge_tables_linear(linear)
     linear = _merge_figure_captions_linear(linear)
     linear = _merge_algorithms_linear(linear)
