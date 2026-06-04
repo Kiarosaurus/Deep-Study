@@ -397,7 +397,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
-                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, text: payload.text }, { x: e.clientX, y: e.clientY })}
+                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text }, { x: e.clientX, y: e.clientY })}
               />
             )}
 
@@ -645,7 +645,7 @@ function EditToolbar() {
   const activeBtn = 'bg-indigo-600 text-white hover:bg-indigo-700'
 
   const showHistory = v.undo || v.redo
-  const showTools = v.demoteBlock || v.promoteBlock || v.mergeBlocks
+  const showTools = v.demoteBlock || v.promoteBlock || v.mergeBlocks || v.splitMerge
   if (!showHistory && !showTools) return null
 
   const svg = (children) => (
@@ -688,6 +688,12 @@ function EditToolbar() {
             <button type="button" onClick={() => armTool('merge')} title={t('viewer.toolMerge')} aria-label={t('viewer.toolMerge')}
               className={`${baseBtn} ${armedTool === 'merge' ? activeBtn : idleBtn}`}>
               {svg(<><path d="M7 22a5 5 0 0 1-2-4" /><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1" /><path d="M5 18a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" /></>)}
+            </button>
+          )}
+          {v.splitMerge && (
+            <button type="button" onClick={() => armTool('split')} title={t('viewer.toolSplit')} aria-label={t('viewer.toolSplit')}
+              className={`${baseBtn} ${armedTool === 'split' ? activeBtn : idleBtn}`}>
+              {svg(<><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></>)}
             </button>
           )}
         </div>

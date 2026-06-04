@@ -11,8 +11,10 @@ import { createContext, useCallback, useContext, useMemo, useState } from 'react
 
 const EditCtx = createContext(null)
 
-// The three click-mode tools. `null` = no tool armed (normal explain clicks).
-export const TOOLS = ['demote', 'promote', 'merge']
+// The click-mode tools. `null` = no tool armed (normal explain clicks).
+// 'split' (scissors) cuts a merge: removes a manual lazo group, or blocks a
+// natural continuation join.
+export const TOOLS = ['demote', 'promote', 'merge', 'split']
 
 export function EditProvider({ children }) {
   const [armedTool, setArmedTool] = useState(null)

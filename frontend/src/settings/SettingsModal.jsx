@@ -27,7 +27,7 @@ const L = {
       index: 'Abrir índice', home: 'Ir a inicio', settings: 'Abrir configuración',
       undo: 'Deshacer último cambio', redo: 'Rehacer último cambio',
       demoteBlock: 'Mazo: párrafo → no-párrafo', promoteBlock: 'Pincel: no-párrafo → párrafo',
-      mergeBlocks: 'Lazo: fusión manual',
+      mergeBlocks: 'Lazo: fusión manual', splitMerge: 'Tijeras: cortar fusión',
     },
     vis: {
       tracking: 'Botón de tracking', viewType: 'Navegación de vista (parada / contador)',
@@ -36,7 +36,7 @@ const L = {
       index: 'Botón de índice', home: 'Botón de inicio', settings: 'Botón de configuración',
       undo: 'Botón deshacer', redo: 'Botón rehacer',
       demoteBlock: 'Botón mazo (párrafo → no-párrafo)', promoteBlock: 'Botón pincel (no-párrafo → párrafo)',
-      mergeBlocks: 'Botón lazo (fusión manual)',
+      mergeBlocks: 'Botón lazo (fusión manual)', splitMerge: 'Botón tijeras (cortar fusión)',
     },
   },
   en: {
@@ -60,7 +60,7 @@ const L = {
       index: 'Open index', home: 'Go to home', settings: 'Open settings',
       undo: 'Undo last change', redo: 'Redo last change',
       demoteBlock: 'Mallet: paragraph → non-paragraph', promoteBlock: 'Brush: non-paragraph → paragraph',
-      mergeBlocks: 'Lasso: manual merge',
+      mergeBlocks: 'Lasso: manual merge', splitMerge: 'Scissors: cut merge',
     },
     vis: {
       tracking: 'Tracking button', viewType: 'View navigation (stop / counter)',
@@ -69,7 +69,7 @@ const L = {
       index: 'Index button', home: 'Home button', settings: 'Settings button',
       undo: 'Undo button', redo: 'Redo button',
       demoteBlock: 'Mallet button (paragraph → non-paragraph)', promoteBlock: 'Brush button (non-paragraph → paragraph)',
-      mergeBlocks: 'Lasso button (manual merge)',
+      mergeBlocks: 'Lasso button (manual merge)', splitMerge: 'Scissors button (cut merge)',
     },
   },
 }

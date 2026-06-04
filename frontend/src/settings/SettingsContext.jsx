@@ -32,6 +32,7 @@ export const ACTIONS = [
   'demoteBlock',
   'promoteBlock',
   'mergeBlocks',
+  'splitMerge',
 ]
 
 // Actions whose on-screen button can be hidden (see VISIBILITY_ITEMS), so the
@@ -39,7 +40,7 @@ export const ACTIONS = [
 // left empty. The Shortcuts editor hard-blocks Confirm if any of these is unset.
 export const REQUIRED_ACTIONS = [
   'trackingToggle', 'themeToggle', 'index', 'home', 'settings',
-  'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks',
+  'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge',
 ]
 
 // Two presets. 'right' = right-handed: left hand drives the Q/W/A/S/D cluster
@@ -57,7 +58,7 @@ export const DEFAULT_SHORTCUTS = {
     // Edit toolbar — left-hand keys (this 'right' preset is the one whose
     // UI label is "Mano izquierda" after the label swap; F/G/Z/X/C all sit
     // under the left hand).
-    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c',
+    undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v',
   },
   left: {
     focusToggle: 'o', scrollUp: 'i', scrollDown: 'k',
@@ -66,14 +67,14 @@ export const DEFAULT_SHORTCUTS = {
     trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
     // Edit toolbar — mirrored onto the right-hand cluster. Provisional; rebind
     // in settings if desired.
-    undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';',
+    undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';', splitMerge: 'b',
   },
 }
 
 // On-screen elements that can be individually shown/hidden. Hiding 'home' or
 // 'settings' leaves their keyboard shortcut as the only entry point, so the
 // SettingsModal surfaces those bindings in an info popup when toggled off.
-export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'theme', 'hidePanel', 'zoom', 'conceptScroll', 'index', 'home', 'settings', 'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks']
+export const VISIBILITY_ITEMS = ['tracking', 'viewType', 'theme', 'hidePanel', 'zoom', 'conceptScroll', 'index', 'home', 'settings', 'undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge']
 
 // Panel (global map + explanation) width as a percentage of the viewport.
 // Slider-controlled in settings; clamped so the panel stays usable without
@@ -87,7 +88,7 @@ export const DEFAULT_SETTINGS = {
   handMode: 'right',          // 'right' | 'left'
   panelSide: 'right',         // sidebar on the 'right' | 'left'
   panelWidthPct: PANEL_WIDTH_DEFAULT,   // panel width as % of viewport width
-  visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, index: true, home: true, settings: true, undo: true, redo: true, demoteBlock: true, promoteBlock: true, mergeBlocks: true },
+  visibility: { tracking: true, viewType: true, theme: true, hidePanel: true, zoom: true, conceptScroll: true, index: true, home: true, settings: true, undo: true, redo: true, demoteBlock: true, promoteBlock: true, mergeBlocks: true, splitMerge: true },
 }
 
 const SettingsCtx = createContext(null)

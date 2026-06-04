@@ -306,23 +306,27 @@ export default function Reader() {
     const raw = analysis?.linear_blocks ?? []
     const po = edits.pageOverrides
     if (!raw.length || !po || Object.keys(po).length === 0) return raw
-    const overridesByPage = {}  // page -> [{ bbox, role }]
+    const overridesByPage = {}  // page -> [{ bbox, role, continuation }]
     for (const [key, val] of Object.entries(po)) {
-      if (!val?.role) continue
+      if (!val) continue
       const [pageStr, riStr] = key.split(':')
       const pg = Number(pageStr)
       const ri = Number(riStr)
       const p = analysis?.pages?.find(x => x.page === pg)
       const b = p?.blocks?.find(bl => bl.reading_index === ri)
       if (!b?.boxes?.length) continue
-      ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role })
+      ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role, continuation: val.continuation })
     }
     if (Object.keys(overridesByPage).length === 0) return raw
     return raw.map(L => {
       const cands = overridesByPage[L.page]
       if (!cands || !L.bbox) return L
       const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
-      return m && m.role !== L.role ? { ...L, role: m.role } : L
+      if (!m) return L
+      let nb = L
+      if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
+      if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
+      return nb
     })
   }, [analysis, edits])
 
@@ -348,24 +352,41 @@ export default function Reader() {
       let changed = false
       const blocks = p.blocks.map(b => {
         const o = po[`${p.page}:${b.reading_index}`]
-        if (o?.role && o.role !== b.role) { changed = true; return { ...b, role: o.role } }
-        return b
+        if (!o) return b
+        let nb = b
+        if (o.role && o.role !== b.role) nb = { ...nb, role: o.role }
+        if (o.continuation === false && b.continuation) nb = { ...nb, continuation: false }
+        if (nb !== b) changed = true
+        return nb
       })
       return changed ? { ...p, blocks } : p
     })
   }, [analysis, edits])
 
-  // Commit a role override on one block, recorded for undo/redo.
-  const applyRoleOverride = useCallback((target, role) => {
+  // Merge a patch into one block's override (role and/or continuation),
+  // recorded for undo/redo. `patch` e.g. { role: 'ignored' } or
+  // { continuation: false } (scissors cutting a natural join).
+  const setOverride = useCallback((target, patch) => {
     const key = `${target.page}:${target.reading_index}`
     const prev = edits.pageOverrides[key]
+    const next = { ...(prev || {}), ...patch }
     commitEdit({
-      apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: { role } } })),
+      apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: next } })),
       revert: () => setEdits(e => {
         const po = { ...e.pageOverrides }
         if (prev) po[key] = prev; else delete po[key]
         return { ...e, pageOverrides: po }
       }),
+    })
+  }, [edits, commitEdit])
+
+  // Cut a manual lazo merge group (scissors), recorded for undo/redo.
+  const removeMergeGroup = useCallback((groupId) => {
+    const g = (edits.mergeGroups || []).find(x => x.id === groupId)
+    if (!g) return
+    commitEdit({
+      apply: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(x => x.id !== groupId) })),
+      revert: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(x => x.id !== groupId), g] })),
     })
   }, [edits, commitEdit])
 
@@ -377,7 +398,7 @@ export default function Reader() {
       // Mazo: paragraph → non-paragraph. Only an explainable paragraph block is
       // a valid target; images and already-demoted blocks are ignored.
       if (target.kind !== 'block' || target.role !== 'paragraph') return
-      applyRoleOverride(target, 'ignored')
+      setOverride(target, { role: 'ignored' })
       return
     }
     if (armedTool === 'promote') {
@@ -402,7 +423,20 @@ export default function Reader() {
       })
       return
     }
-  }, [armedTool, applyRoleOverride, addToMergeBuffer])
+    if (armedTool === 'split') {
+      // Tijeras: cut a merge. A manual lazo group is removed; otherwise a
+      // natural continuation join is blocked (this block stops continuing the
+      // previous one). Baked figure/caption/panel merges are not cut here.
+      const memberKey = `${target.kind}:${target.page}:${target.reading_index}`
+      const g = (edits.mergeGroups || []).find(grp =>
+        grp.members.some(m => `${m.kind}:${m.page}:${m.reading_index}` === memberKey))
+      if (g) { removeMergeGroup(g.id); return }
+      if (target.kind === 'block' && target.continuation) {
+        setOverride(target, { continuation: false })
+      }
+      return
+    }
+  }, [armedTool, setOverride, addToMergeBuffer, edits, removeMergeGroup])
 
   // Keys currently selected for an in-progress lazo merge (persistent tint).
   const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
@@ -447,7 +481,7 @@ export default function Reader() {
     for (const p of (editedPages || [])) {
       pageIdx[p.page] = {
         blocks: (p.blocks || []).filter(b => b.boxes?.length)
-          .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role })),
+          .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role, continuation: b.continuation })),
         images: (p.images || []).filter(im => im.bbox)
           .map(im => ({ bbox: im.bbox, reading_index: im.reading_index, role: im.role || 'figure' })),
       }
@@ -457,7 +491,7 @@ export default function Reader() {
       if (!p || !L.bbox) return null
       let target = null
       const b = p.blocks.find(x => bboxOverlapHigh(x.bbox, L.bbox))
-      if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role }
+      if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role, continuation: b.continuation }
       else {
         const im = p.images.find(x => bboxOverlapHigh(x.bbox, L.bbox))
         if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role }
@@ -1021,6 +1055,7 @@ export default function Reader() {
       if (action === 'demoteBlock')  { e.preventDefault(); armTool('demote');  return }
       if (action === 'promoteBlock') { e.preventDefault(); armTool('promote'); return }
       if (action === 'mergeBlocks')  { e.preventDefault(); armTool('merge');   return }
+      if (action === 'splitMerge')   { e.preventDefault(); armTool('split');   return }
 
       if (e.key === '<') {
         e.preventDefault()
@@ -1275,7 +1310,7 @@ export default function Reader() {
           y={promotePicker.y}
           t={t}
           onClose={() => setPromotePicker(null)}
-          onPick={(role) => { applyRoleOverride(promotePicker.target, role); setPromotePicker(null) }}
+          onPick={(role) => { setOverride(promotePicker.target, { role }); setPromotePicker(null) }}
         />
       )}
 
