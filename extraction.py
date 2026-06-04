@@ -888,9 +888,19 @@ def _is_source_attribution(b) -> bool:
 # optionally parenthesised, followed by ")" / "." — the WHOLE block is just that
 # marker plus at most a few words (some papers write "(a) Top view"). Absorbed
 # into the image so it never surfaces as a standalone paragraph.
+#
+# Case rule: the PARENTHESISED form accepts any case ("(A)", "(a)", "(i)") — the
+# brackets make it unambiguous. The BARE form ("a.", "i)") is lowercase ONLY, so
+# an author initial ("A. Einstein") or a sentence-leading pronoun ("I.") is not
+# mistaken for a panel marker and swallowed into an adjacent image.
 _PANEL_LABEL_RE = re.compile(
-    r"^\(?\s*(?:[a-z]|[ivxlcdm]{1,4})\s*[).．。）]",
-    re.IGNORECASE,
+    r"^(?:"
+    r"(?i:\(\s*(?:[a-z]|[ivxlcdm]{1,4})\s*[).．。）])"   # (a) (A) (i) — parenthesised, any case
+    r"|"
+    r"[a-z]\s*[).．。）]"                                   # a) a. — bare, lowercase letter only
+    r"|"
+    r"[ivxlcdm]{1,4}\s*[).．。）]"                          # i) ii. — bare roman, lowercase only
+    r")",
 )
 
 
@@ -899,6 +909,30 @@ def _is_panel_label(text: str) -> bool:
     if not t:
         return False
     return len(t.split()) <= 5 and bool(_PANEL_LABEL_RE.match(t))
+
+
+# Geometry for stitching stacked sub-panels of ONE multi-panel figure into a
+# single figure block. Vertically stacked panels share the same column (high
+# horizontal overlap) with only their "(a)/(b)" label and a thin gutter between
+# them. The label between panels is what authorises the stitch (see the merge
+# passes) — geometry alone never merges two captionless figures.
+_PANEL_RUN_HOVERLAP_MIN = 0.35
+_PANEL_RUN_GAP_FRAC = 0.75   # max inter-panel gap as a fraction of the shorter panel height
+_PANEL_RUN_GAP_ABS = 48.0    # absolute floor (PDF pts) tolerating the label line + gutter
+
+
+def _panels_contiguous(union: BBox, nxt: BBox) -> bool:
+    """True when `nxt` is the next vertically-stacked panel of the same figure:
+    same column (horizontal overlap with the running union) and a small downward
+    gap below it. `_hoverlap` is defined later in the module — resolved at call
+    time, so the forward reference is fine."""
+    if _hoverlap(union, nxt) < _PANEL_RUN_HOVERLAP_MIN:
+        return False
+    gap = nxt.y0 - union.y1
+    if gap < -_GEOM_TOL:
+        return False  # overlaps or sits above the union — not a clean downward stack
+    h = min(union.y1 - union.y0, nxt.y1 - nxt.y0)
+    return gap <= max(_PANEL_RUN_GAP_ABS, _PANEL_RUN_GAP_FRAC * h)
 
 
 def _is_caption_block_pages(b: ParagraphBlock) -> bool:
@@ -939,34 +973,60 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
         block_by_ri: dict[int, ParagraphBlock] = {
             b.reading_index: b for b in p.blocks
         }
+        img_by_ri: dict[int, ImageBlock] = {
+            im.reading_index: im for im in p.images
+        }
         consumed_ids: set[int] = set()
+        consumed_img_ids: set[int] = set()
         _cont_log(f"  -- page {p.page}: {len(p.images)} images, {len(p.blocks)} blocks --")
         for img in p.images:
+            if id(img) in consumed_img_ids:
+                continue
             ri = img.reading_index
             # Gather the visual's text pieces: its Figure/Table caption (above
             # OR below) PLUS a "Source: …" attribution line directly below. A
             # table with a "Table N" caption above AND a Source line below keeps
             # BOTH — they're all part of the same figure/table.
             pieces: list[ParagraphBlock] = []
+            panel_imgs: list[ImageBlock] = []   # sub-panel images stitched into this one
             have_caption = False
             have_source = False
+            saw_label = False                   # a panel label seen since the last image
+            run_union = BBox(**img.bbox.model_dump())  # image + stitched panels so far
             # FORWARD: sub-panel labels ("(a)", "b)", …) sitting between the
-            # image and its caption, then the caption ("Figure N: …") and a
-            # "Source: …" line. Walk forward and absorb each; stop at the first
-            # non-absorbable block.
+            # image and its caption, the sub-panel IMAGES those labels tag (a
+            # multi-panel figure stacks several images under one shared caption),
+            # then the caption ("Figure N: …") and a "Source: …" line. Walk
+            # forward and absorb each; stop at the first non-absorbable block. A
+            # following image is stitched in ONLY when a panel label sat between
+            # it and the running figure AND it is geometrically a stacked panel.
             d = 1
             while True:
                 neighbor = block_by_ri.get(ri + d)
-                if neighbor is None or id(neighbor) in consumed_ids:
-                    break
-                if not have_caption and _is_caption_block_pages(neighbor):
-                    pieces.append(neighbor)
-                    have_caption = True
-                elif not have_source and _is_source_attribution(neighbor):
-                    pieces.append(neighbor)
-                    have_source = True
-                elif _is_panel_label(neighbor.text):
-                    pieces.append(neighbor)
+                neighbor_img = img_by_ri.get(ri + d)
+                if neighbor is not None and id(neighbor) not in consumed_ids:
+                    if not (have_caption or have_source) and _is_panel_label(neighbor.text):
+                        pieces.append(neighbor)
+                        saw_label = True
+                    elif not have_caption and _is_caption_block_pages(neighbor):
+                        pieces.append(neighbor)
+                        have_caption = True
+                    elif not have_source and _is_source_attribution(neighbor):
+                        pieces.append(neighbor)
+                        have_source = True
+                    else:
+                        break
+                elif (
+                    neighbor_img is not None
+                    and neighbor_img is not img
+                    and id(neighbor_img) not in consumed_img_ids
+                    and not (have_caption or have_source)
+                    and saw_label
+                    and _panels_contiguous(run_union, neighbor_img.bbox)
+                ):
+                    panel_imgs.append(neighbor_img)
+                    run_union = _union_bbox([run_union, neighbor_img.bbox])
+                    saw_label = False
                 else:
                     break
                 d += 1
@@ -980,30 +1040,33 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
                         pieces.append(neighbor)
                         have_caption = True
                         break
-            if not pieces:
+            if not pieces and not panel_imgs:
                 _cont_log(f"    image ri={ri} role={img.role}: no caption found")
                 continue
             # Order top→bottom so a caption above reads before a source below.
             pieces.sort(key=lambda b: _union_bbox(b.boxes).y0 if b.boxes else 0.0)
             img.caption_text = "\n".join(b.text for b in pieces)
             _cont_log(
-                f"    image ri={ri} role={img.role} merge {len(pieces)} piece(s): "
-                f"{[_snip(b.text) for b in pieces]}"
+                f"    image ri={ri} role={img.role} merge {len(pieces)} piece(s) + "
+                f"{len(panel_imgs)} panel(s): {[_snip(b.text) for b in pieces]}"
             )
+            # Single bbox spanning the image, every stitched panel, and the
+            # caption — `run_union` already covers the image + panels.
+            union_boxes = [run_union]
             cap_bboxes = [bb for b in pieces for bb in (b.boxes or [])]
             if cap_bboxes:
                 cap_union = _union_bbox(cap_bboxes)
                 img.caption_bbox = cap_union
-                img.bbox = BBox(
-                    x0=min(img.bbox.x0, cap_union.x0),
-                    y0=min(img.bbox.y0, cap_union.y0),
-                    x1=max(img.bbox.x1, cap_union.x1),
-                    y1=max(img.bbox.y1, cap_union.y1),
-                )
+                union_boxes.append(cap_union)
+            img.bbox = _union_bbox(union_boxes)
             for b in pieces:
                 consumed_ids.add(id(b))
+            for pi in panel_imgs:
+                consumed_img_ids.add(id(pi))
         if consumed_ids:
             p.blocks = [b for b in p.blocks if id(b) not in consumed_ids]
+        if consumed_img_ids:
+            p.images = [im for im in p.images if id(im) not in consumed_img_ids]
     _cont_log("=== pages figure-caption merge end ===")
 
 
@@ -1110,54 +1173,76 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
             # for tables, BELOW for figures) PLUS a "Source: …" attribution line
             # below. A table with a caption above AND a Source line below keeps
             # BOTH. A Source line never belongs above the image.
-            piece_idxs: list[int] = []
+            piece_idxs: list[int] = []   # text pieces (labels / caption / source)
+            panel_idxs: list[int] = []   # extra figure/table panels stitched into this one
             have_caption = False
+            have_fwd_caption = False     # caption found BELOW (forward) — terminates the panel run
             have_source = False
-            # ABOVE: caption only.
+            saw_label = False            # a panel label was seen since the last image
+            run_union = BBox(**b.bbox.model_dump())  # figure + stitched panels so far
+            # ABOVE: caption only. Sets have_caption but NOT have_fwd_caption, so
+            # a caption above the figure does not block stitching panels below it.
             if i - 1 >= 0 and i - 1 not in consumed and _is_caption_block_linear(blocks[i - 1]):
                 piece_idxs.append(i - 1)
                 have_caption = True
             # BELOW: contiguous figure pieces — sub-panel labels ("(a)", "b)",
-            # …) that sit between the image and its caption, plus the caption
-            # ("Figure N: …") and a "Source: …" line. Walk forward, absorbing
-            # each; stop at the first block that is none of these.
+            # …), the sub-panel IMAGES they label (a multi-panel figure stacks
+            # several images, each tagged "(a)/(b)/…", under one shared caption),
+            # the caption ("Figure N: …"), and a "Source: …" line. Walk forward,
+            # absorbing each; stop at the first block that is none of these. A
+            # following figure/table is stitched in ONLY when a panel label sat
+            # between it and the running figure AND it is geometrically a stacked
+            # panel — so two independent captionless figures are never glued.
             j = i + 1
             while j < len(blocks) and j not in consumed:
                 nb = blocks[j]
-                if not have_caption and _is_caption_block_linear(nb):
+                if not (have_fwd_caption or have_source) and _is_panel_label(nb.text):
+                    piece_idxs.append(j)
+                    saw_label = True
+                elif not have_caption and _is_caption_block_linear(nb):
                     piece_idxs.append(j)
                     have_caption = True
+                    have_fwd_caption = True
                 elif not have_source and _is_source_attribution(nb):
                     piece_idxs.append(j)
                     have_source = True
-                elif _is_panel_label(nb.text):
-                    piece_idxs.append(j)
+                elif (
+                    not (have_fwd_caption or have_source)
+                    and saw_label
+                    and nb.role in ("figure", "table")
+                    and nb.page == b.page
+                    and _panels_contiguous(run_union, nb.bbox)
+                ):
+                    panel_idxs.append(j)
+                    run_union = _union_bbox([run_union, nb.bbox])
+                    saw_label = False
                 else:
                     break
                 j += 1
-            if piece_idxs:
+            if piece_idxs or panel_idxs:
                 # The above-caption was already appended to `merged` on its own
                 # iteration — drop it so it isn't emitted as a standalone block.
                 if (i - 1) in piece_idxs and merged and merged[-1] is blocks[i - 1]:
                     merged.pop()
                 caps = sorted((blocks[j] for j in piece_idxs), key=lambda c: c.bbox.y0)
                 _cont_log(
-                    f"  [{i}] {b.role} merge {len(caps)} piece(s) from {piece_idxs}: "
-                    f"{[_snip(c.text) for c in caps]}"
+                    f"  [{i}] {b.role} merge {len(caps)} piece(s) + {len(panel_idxs)} panel(s) "
+                    f"from {piece_idxs + panel_idxs}: {[_snip(c.text) for c in caps]}"
                 )
                 b.caption_text = "\n".join(c.text for c in caps)
-                b.caption_bbox = _union_bbox([c.bbox for c in caps])
-                b.bbox = BBox(
-                    x0=min(b.bbox.x0, b.caption_bbox.x0),
-                    y0=min(b.bbox.y0, b.caption_bbox.y0),
-                    x1=max(b.bbox.x1, b.caption_bbox.x1),
-                    y1=max(b.bbox.y1, b.caption_bbox.y1),
-                )
+                b.caption_bbox = _union_bbox([c.bbox for c in caps]) if caps else None
+                # Single bbox spanning the figure, every stitched panel, and the
+                # caption — one canvas crop renders the whole multi-panel figure.
+                union_boxes = [run_union]
+                if b.caption_bbox is not None:
+                    union_boxes.append(b.caption_bbox)
+                b.bbox = _union_bbox(union_boxes)
                 for c in caps:
                     if c.sentences:
                         b.sentences = c.sentences
                         break
                 consumed.update(piece_idxs)
+                consumed.update(panel_idxs)
             else:
                 _cont_log(f"  [{i}] {b.role} no adjacent caption found")
         merged.append(b)
