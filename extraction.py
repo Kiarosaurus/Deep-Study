@@ -827,6 +827,29 @@ def _below_footnote_sep(bbox: BBox, sep_y: float | None) -> bool:
     return sep_y is not None and bbox.y0 >= sep_y - _GEOM_TOL
 
 
+# Relative-width buckets for the format-incompatibility firewall. Fractions of
+# the page's content width (max_x1 - min_x0), so they scale across page sizes.
+# A single-column block (full-width abstract/intro) lands ≥0.70; a two-column
+# block lands ≤0.55 (~half width). The band between is ambiguous and never
+# blocks a merge.
+_WIDTH_WIDE_FRAC = 0.70
+_WIDTH_NARROW_FRAC = 0.55
+
+
+def _width_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
+    """'wide' (single-column proportions), 'narrow' (multi-column), or 'mid'."""
+    min_x0, max_x1 = bounds
+    w = max_x1 - min_x0
+    if w <= 0:
+        return "mid"
+    frac = (bbox.x1 - bbox.x0) / w
+    if frac >= _WIDTH_WIDE_FRAC:
+        return "wide"
+    if frac <= _WIDTH_NARROW_FRAC:
+        return "narrow"
+    return "mid"
+
+
 def _column_kind(bbox: BBox, bounds: tuple[float, float]) -> str:
     """Classify a block's horizontal placement on its page: 'full' (spans the
     content width — single-column / full-width), 'left' (left column), 'right'
@@ -927,6 +950,17 @@ def _continuation_geometry_ok(
     `intervening` are bboxes of non-paragraph blocks sitting between prev and
     next on the same page (their covered height is discounted from the gap).
     """
+    # Width-incompatibility firewall: a single-column ('wide') block never
+    # continues into a multi-column ('narrow') one, or vice versa — the format
+    # change (e.g. full-width Abstract → two-column Introduction) breaks the text
+    # flow regardless of Y proximity. Each width is taken relative to its own
+    # page's content span so it scales across page sizes. 'mid' is ambiguous and
+    # never blocks, so same-format merges (two narrow / two wide) are unaffected.
+    if prev_bounds is not None and next_bounds is not None:
+        kinds = {_width_kind(prev_bbox, prev_bounds), _width_kind(next_bbox, next_bounds)}
+        if kinds == {"wide", "narrow"}:
+            return False
+
     if next_page != prev_page:
         if next_page <= prev_page:
             return False
