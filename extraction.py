@@ -2247,10 +2247,33 @@ def _column_major_order(items: list[tuple[object, BBox]]) -> list:
         left.clear()
         right.clear()
 
+    def _band_exclusive(bb: BBox) -> bool:
+        # True when no OTHER block shares bb's vertical band — i.e. it has no
+        # left/right sibling. Two distinct blocks can't overlap in both X and Y,
+        # so any significant Y-overlap means a side-by-side column neighbour.
+        for _, ob in items:
+            if ob is bb:
+                continue
+            ov = min(bb.y1, ob.y1) - max(bb.y0, ob.y0)
+            if ov > 0.30 * min(bb.y1 - bb.y0, ob.y1 - ob.y0):
+                return False
+        return True
+
     def spans_columns(bb: BBox) -> bool:
-        # True barrier: reaches near both content edges (≈ full width). Any
-        # block narrower than that is rooted in one column and must not flush.
-        return bb.x0 <= min_x0 + 0.12 * w and bb.x1 >= max_x1 - 0.12 * w
+        # Barrier = a one-column zone divider the two columns sit under. NOT
+        # width-based (an Abstract indented to ~50% is still one-column). Two
+        # ways to qualify:
+        #   (a) reaches near BOTH content edges (classic full-width title/rule), OR
+        #   (b) it is ALONE in its vertical band (no left/right sibling) AND its
+        #       horizontal centre is aligned with the page mid (±0.15·w).
+        # Centring is the discriminator: a left column's short last line is also
+        # band-isolated but its centre sits left of mid → not a barrier (it stays
+        # in the left column). A broad table rooted in one column is off-centre
+        # too, so it is never mistaken for a divider.
+        if bb.x0 <= min_x0 + 0.12 * w and bb.x1 >= max_x1 - 0.12 * w:
+            return True
+        centre = (bb.x0 + bb.x1) / 2
+        return abs(centre - mid) <= 0.15 * w and _band_exclusive(bb)
 
     for b, bb in sorted(items, key=lambda it: it[1].y0):
         if w <= 0 or spans_columns(bb):  # full-width → barrier
