@@ -20,6 +20,20 @@ const DEFAULT_EDITS = { pageOverrides: {}, mergeGroups: [] }
 // Block types offered by the pincel (promote) picker, in display order.
 const PROMOTE_TYPES = ['paragraph', 'figure', 'table', 'footnote', 'equation', 'code', 'caption']
 
+// A lazo (manual) merge resolves its consolidated type the same way the backend
+// merge state machine does: a VISUAL block dominates text. Precedence table >
+// figure > algorithm; only when no member is visual does the result stay a
+// paragraph. Mirrors `extraction._merge_figure_captions_*` (the "visual wins"
+// rule) — replicated here because that pass is Python and not callable at
+// runtime from the client.
+const MERGE_VISUAL_ROLES = ['table', 'figure', 'algorithm']
+function resolveMergedRole(roles) {
+  for (const v of MERGE_VISUAL_ROLES) {
+    if (roles.includes(v)) return v
+  }
+  return 'paragraph'
+}
+
 // Bounding box of a list of per-line boxes.
 function unionOfBoxes(boxes) {
   return boxes.reduce((a, b) => ({
@@ -446,25 +460,30 @@ export default function Reader() {
   const mergeMembership = useMemo(() => {
     const map = {}
     for (const g of (edits.mergeGroups || [])) {
+      const resultRole = g.resultRole || (g.explainAs === 'figure' ? 'figure' : 'paragraph')
       g.members.forEach((m, i) => {
-        map[`${m.kind}:${m.page}:${m.reading_index}`] = { groupId: g.id, isRep: i === 0 }
+        map[`${m.kind}:${m.page}:${m.reading_index}`] = { groupId: g.id, isRep: i === 0, resultRole }
       })
     }
     return map
   }, [edits])
 
-  // Commit the buffered selection as one merge group. Members must share a page
-  // (the per-page overlay renders the group's ✦ on one page). explainAs=figure
-  // when any member is an image, else paragraph.
+  // Commit the buffered selection as ONE consolidated block, applying the same
+  // hierarchy rule as the automatic merge state machine: `resultRole` is the
+  // dominant visual type among the members (figure/table/algorithm), else
+  // paragraph. Members must share a page (the per-page overlay renders the
+  // group's ✦ on one page). Immutable update via setEdits.
   const confirmMerge = useCallback(() => {
     if (mergeBuffer.length < 2) return
     const page = mergeBuffer[0].page
     if (mergeBuffer.some(m => m.page !== page)) return
-    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index }))
-    const explainAs = members.some(m => m.kind === 'image') ? 'figure' : 'paragraph'
+    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, role: m.role }))
+    const resultRole = resolveMergedRole(
+      members.map(m => m.role || (m.kind === 'image' ? 'figure' : 'paragraph')),
+    )
     const id = `mg-${page}-${members.map(m => `${m.kind[0]}${m.reading_index}`).join('-')}`
     commitEdit({
-      apply: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(g => g.id !== id), { id, members, explainAs }] })),
+      apply: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(g => g.id !== id), { id, members, resultRole }] })),
       revert: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(g => g.id !== id) })),
     })
     clearMergeBuffer()
@@ -813,11 +832,13 @@ export default function Reader() {
 
   const handleHome = useCallback(() => navigate('/'), [navigate])
 
-  // Explain a lazo merge group as ONE unit. Type-aware, reusing the existing
-  // explain flows (no change to their internals): a group with any image member
-  // explains as a figure (union bbox + combined captions); otherwise the
-  // paragraph members are concatenated and footnote-role members feed the
-  // footnotes channel — the same path a symbol footnote already takes.
+  // Explain a lazo merge group as the ONE consolidated block it represents,
+  // following the group's resolved hierarchy (resultRole) — the same outcome
+  // the automatic merge state machine would produce. Reuses the existing
+  // explain flows unchanged: a visual result (figure/table/algorithm) rasters
+  // the recomputed union bbox of EVERY member with the combined captions;
+  // otherwise the paragraph members are concatenated and footnote-role members
+  // feed the footnotes channel (the symbol-footnote path).
   const explainGroup = useCallback((groupId) => {
     const g = (edits.mergeGroups || []).find(x => x.id === groupId)
     if (!g || !editedPages) return
@@ -833,19 +854,26 @@ export default function Reader() {
     }).filter(Boolean)
     if (!resolved.length) return
 
-    if (g.explainAs === 'figure') {
-      const imgs = resolved.filter(r => r.kind === 'image')
-      if (!imgs.length) return
-      const base = imgs[0]
-      const bbox = imgs.reduce((acc, im) => ({
-        x0: Math.min(acc.x0, im.bbox.x0), y0: Math.min(acc.y0, im.bbox.y0),
-        x1: Math.max(acc.x1, im.bbox.x1), y1: Math.max(acc.y1, im.bbox.y1),
-      }), { ...base.bbox })
+    // Back-compat: groups persisted before resultRole carried `explainAs`.
+    const resultRole = g.resultRole || (g.explainAs === 'figure' ? 'figure' : 'paragraph')
+
+    // Recompute the consolidated bbox across ALL members (images + text).
+    const memberBox = (r) => r.kind === 'image' ? r.bbox : (r.boxes?.length ? unionOfBoxes(r.boxes) : null)
+    const boxes = resolved.map(memberBox).filter(Boolean)
+    const bbox = boxes.length
+      ? boxes.reduce((a, b) => ({
+          x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0),
+          x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1),
+        }), { ...boxes[0] })
+      : null
+
+    if (MERGE_VISUAL_ROLES.includes(resultRole)) {
       const caption_text = resolved
         .map(r => r.kind === 'image' ? (r.caption_text || '') : (r.text || ''))
         .filter(Boolean)
         .join('\n')
-      handleExplain(caption_text, [], null, { role: base.role || 'figure', page: base.page, bbox, caption_text })
+      const page = (resolved.find(r => r.kind === 'image') || resolved[0]).page
+      handleExplain(caption_text, [], null, { role: resultRole, page, bbox, caption_text })
       return
     }
 

@@ -756,7 +756,11 @@ const BlockCrop = memo(function BlockCrop({
                   )
                 }
               }}
-              title={isFigure ? t('viewer.explainBlock', { role: block.role }) : t('viewer.explainParagraph')}
+              title={membership
+                ? (['figure', 'table', 'algorithm'].includes(membership.resultRole)
+                    ? t('viewer.explainBlock', { role: membership.resultRole })
+                    : t('viewer.explainParagraph'))
+                : (isFigure ? t('viewer.explainBlock', { role: block.role }) : t('viewer.explainParagraph'))}
             >
               ✦
             </button>
@@ -764,19 +768,20 @@ const BlockCrop = memo(function BlockCrop({
         </div>
       )}
 
-      {/* Edit-mode overlay: lazo selection (indigo) / committed group (emerald)
-          wash, plus a click-catcher that routes clicks to the edit handler while
-          a tool is armed. Rendered independently of isInteractive so demoted /
-          caption / equation blocks are still targetable by the tools. */}
-      {isRendered && (selected || membership || (armedTool && editTarget)) && (
+      {/* Edit-mode overlay: lazo selection (indigo) wash for an IN-PROGRESS
+          merge only — a committed group leaves no residual box (its ✦ is the
+          indicator) — plus a click-catcher while a tool is armed. Rendered
+          independently of isInteractive so demoted / caption / equation blocks
+          are still targetable by the tools. */}
+      {isRendered && (selected || (armedTool && editTarget)) && (
         <div className="absolute" style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight }}>
-          {(selected || membership) && (
+          {selected && (
             <div
               className="absolute pointer-events-none rounded-sm"
               style={{
                 left: 0, top: 0, width: canvasWidth, height: displayHeight,
-                background: selected ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
-                border: selected ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+                background: 'rgba(99,102,241,0.16)',
+                border: '1px dashed rgba(99,102,241,0.6)',
               }}
             />
           )}

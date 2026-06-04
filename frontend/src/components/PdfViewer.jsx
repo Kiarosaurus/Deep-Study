@@ -104,6 +104,17 @@ function ZoomToolbar({ displayZoom, onIncrease, onDecrease, onFit, canIncrease, 
   )
 }
 
+// Tooltip for a merge-group representative's ✦, reflecting the group's resolved
+// hierarchy (resultRole): "Explain figure/table/algorithm" for a visual result,
+// else the paragraph label. Non-group buttons use their own fallback title.
+const _MERGE_VISUAL_ROLES = new Set(['figure', 'table', 'algorithm'])
+function groupExplainTitle(t, membership, fallback) {
+  if (!membership) return fallback
+  return _MERGE_VISUAL_ROLES.has(membership.resultRole)
+    ? t('viewer.explainBlock', { role: membership.resultRole })
+    : t('viewer.explainParagraph')
+}
+
 function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
@@ -364,9 +375,10 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             )}
 
-            {/* Lazo: indigo wash on objects selected for an in-progress merge,
-                emerald wash on objects already committed to a merge group. */}
-            {isLeader && unionBox && (mergeSelectedKeys?.has(blockKey) || blockMembership) && (
+            {/* Lazo: indigo wash on objects selected for an in-progress merge
+                ONLY. A committed group leaves no residual box — its single ✦ is
+                the indicator. */}
+            {isLeader && unionBox && mergeSelectedKeys?.has(blockKey) && (
               <div
                 className="absolute pointer-events-none rounded-sm"
                 style={{
@@ -374,8 +386,8 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   top:    unionBox.y0 * scale,
                   width:  (unionBox.x1 - unionBox.x0) * scale,
                   height: (unionBox.y1 - unionBox.y0) * scale,
-                  background: mergeSelectedKeys?.has(blockKey) ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
-                  border: mergeSelectedKeys?.has(blockKey) ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+                  background: 'rgba(99,102,241,0.16)',
+                  border: '1px dashed rgba(99,102,241,0.6)',
                 }}
               />
             )}
@@ -427,7 +439,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   : onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
                 onMouseEnter={() => onHoveredChainChange?.(chainKey)}
                 onMouseLeave={() => onHoveredChainChange?.(null)}
-                title={t('viewer.explainParagraph')}
+                title={groupExplainTitle(t, blockMembership, t('viewer.explainParagraph'))}
               >
                 ✦
               </button>
@@ -468,14 +480,14 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   : (isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent'),
               }}
             />
-            {/* Lazo selection (indigo) / committed merge-group (emerald) wash. */}
-            {(mergeSelectedKeys?.has(imgKey) || imgMembership) && (
+            {/* Lazo selection (indigo) wash ONLY — no residual box after merge. */}
+            {mergeSelectedKeys?.has(imgKey) && (
               <div
                 className="absolute pointer-events-none rounded-sm"
                 style={{
                   left, top, width, height,
-                  background: mergeSelectedKeys?.has(imgKey) ? 'rgba(99,102,241,0.16)' : 'rgba(16,185,129,0.12)',
-                  border: mergeSelectedKeys?.has(imgKey) ? '1px dashed rgba(99,102,241,0.6)' : '1px solid rgba(16,185,129,0.4)',
+                  background: 'rgba(99,102,241,0.16)',
+                  border: '1px dashed rgba(99,102,241,0.6)',
                 }}
               />
             )}
@@ -535,7 +547,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                     )}
                 onMouseEnter={() => setHoveredImgIdx(i)}
                 onMouseLeave={() => setHoveredImgIdx(null)}
-                title={t('viewer.explainBlock', { role: img.role })}
+                title={groupExplainTitle(t, imgMembership, t('viewer.explainBlock', { role: img.role }))}
               >
                 ✦
               </button>
