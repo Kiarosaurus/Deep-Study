@@ -638,7 +638,7 @@ function EditToolbar() {
   const v = settings.visibility
   const { armedTool, armTool, undo, redo, canUndo, canRedo } = useEdit()
 
-  const pillCls = 'flex items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none'
+  const pillCls = 'flex flex-col items-center gap-1 bg-white/95 backdrop-blur rounded-xl shadow-md border border-slate-200 p-1.5 select-none'
   const baseBtn = 'w-8 h-8 flex items-center justify-center rounded-lg transition-colors'
   const idleBtn = 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
   const disBtn  = 'text-slate-300 pointer-events-none'
