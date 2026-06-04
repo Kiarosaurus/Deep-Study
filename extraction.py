@@ -221,6 +221,16 @@ def _is_body_section_name(text: str) -> bool:
     return bool(_BODY_SECTION_RE.match(text.strip()))
 
 
+# The Abstract / Resumen heading specifically. When present, everything sitting
+# ABOVE it on the title page is masthead (title, authors, affiliations, emails)
+# and must never surface as a body paragraph.
+_ABSTRACT_RE = re.compile(r"^\s*(?:\d+[.\s]*)?(?:abstract|resumen)\b", re.IGNORECASE)
+
+
+def _is_abstract_header(text: str) -> bool:
+    return bool(_ABSTRACT_RE.match(text.strip()))
+
+
 # ── Page-1 noise heuristics ──────────────────────────────────────────────────
 # Hard signals: copyright / ISBN / DOI / preprint / ACM-IEEE boilerplate.
 # Drops anywhere on page 1, regardless of length.
@@ -1902,6 +1912,9 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
         paragraphs: list[ParagraphBlock] = []
         images: list[ImageBlock] = []
         reading_idx = 0
+        # Top edge (y0) of the Abstract heading on this page, once seen. Anything
+        # above it is masthead and gets dropped before the page is emitted.
+        abstract_top = None
         rescued_footnotes = _rescue_footnotes_on_page(page)
         page_blocks = _reorder_reading_order(list(_iter_layout_blocks(page)))
         body_lh, body_bboxes = _page_footnote_context(page, document, line_cache)
@@ -1955,6 +1968,8 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
                 elif _is_body_section_name(header_text):
                     skip_section = False
                     pre_abstract = False
+                    if abstract_top is None and _is_abstract_header(header_text):
+                        abstract_top = bbox.y0
                 continue
 
             if bt not in _TEXT_TYPES:
@@ -2058,6 +2073,17 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
 
         if page_idx == 0:
             pre_abstract = False
+
+        # Abstract found → everything sitting above its heading is masthead
+        # (title, authors, affiliations, emails). Drop those blocks so they never
+        # surface as body paragraphs, regardless of what the noise heuristics
+        # caught. A block counts as "above" when its whole box clears the
+        # heading's top edge.
+        if abstract_top is not None:
+            paragraphs = [
+                b for b in paragraphs
+                if not (b.boxes and _union_bbox(b.boxes).y1 <= abstract_top + 4)
+            ]
 
         output.append(
             PageBlocks(
@@ -2410,6 +2436,23 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
 
         if page_idx == 0:
             pre_abstract = False
+
+    # Abstract found → demote every paragraph sitting above its heading on the
+    # same page to 'author' (non-paragraph), so masthead (title, authors,
+    # affiliations, emails) never surfaces as a body paragraph even when the
+    # noise heuristics missed it. Mirrors the per-page pipeline's drop.
+    abs_hdr = next(
+        (b for b in output
+         if b.role in ("section_header", "title", "author")
+         and _is_abstract_header(b.text or "")),
+        None,
+    )
+    if abs_hdr is not None:
+        top = abs_hdr.bbox.y0
+        pg = abs_hdr.page
+        for b in output:
+            if b.page == pg and b.role == "paragraph" and b.bbox and b.bbox.y1 <= top + 4:
+                b.role = "author"
 
     return output
 
