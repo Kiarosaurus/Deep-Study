@@ -359,9 +359,11 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               )
             })}
 
-            {/* Demoted (mazo) blocks: faint gray wash so the user sees they are
-                no longer explainable paragraphs. */}
-            {isLeader && unionBox && block.role === 'ignored' && (
+            {/* Demoted (mazo/hammer) blocks: faint gray wash, shown ONLY while
+                the hammer tool is armed. With any other tool — or none — an
+                ignored block is visually imperceptible (clean reading), though
+                still soft-deleted in the edit state. */}
+            {isLeader && unionBox && block.role === 'ignored' && armedTool === 'demote' && (
               <div
                 className="absolute pointer-events-none rounded-sm"
                 style={{

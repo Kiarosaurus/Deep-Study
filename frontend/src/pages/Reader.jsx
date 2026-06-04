@@ -415,10 +415,11 @@ export default function Reader() {
   const onBlockEdit = useCallback((target, pos) => {
     if (!target) return
     if (armedTool === 'demote') {
-      // Mazo: paragraph → non-paragraph. Only an explainable paragraph block is
-      // a valid target; images and already-demoted blocks are ignored.
-      if (target.kind !== 'block' || target.role !== 'paragraph') return
-      setOverride(target, { role: 'ignored' })
+      // Mazo/hammer toggles a block's soft-delete: paragraph → 'ignored', and
+      // clicking an already-ignored block clears the role override (un-ignore).
+      if (target.kind !== 'block') return
+      if (target.role === 'paragraph') setOverride(target, { role: 'ignored' })
+      else if (target.role === 'ignored') setOverride(target, { role: null })
       return
     }
     if (armedTool === 'promote') {
