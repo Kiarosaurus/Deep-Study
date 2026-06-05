@@ -72,12 +72,32 @@ class ImageBlock(BaseModel):
     caption_bbox: BBox | None = None
 
 
+class MetadataBlock(BaseModel):
+    # An OCR'd TEXT block the reading-flow pipeline DROPPED (page header/footer,
+    # footnote, reference, table-of-contents, skip section like Acknowledgments /
+    # Keywords, license / contact / noise). Preserved ONLY so the universal pincel
+    # can enclose it and re-type it into the flow — it never enters `blocks` /
+    # `linear_blocks` and carries no reading_index, so the reading experience is
+    # unchanged until the user promotes it. `sentences` are precomputed so a
+    # promotion to an explainable paragraph highlights per-sentence like any other.
+    bbox: BBox
+    text: str = ""
+    sentences: list[SentenceBlock] = []
+    # Originating Marker block type (Text / Footnote / PageHeader / SectionHeader
+    # / Reference …) — informational, for the picker / debugging.
+    source_type: str = ""
+
+
 class PageBlocks(BaseModel):
     page: int
     width: float = 0.0
     height: float = 0.0
     blocks: list[ParagraphBlock]
     images: list[ImageBlock] = []
+    # OCR text the pipeline dropped from the reading flow, kept for the universal
+    # pincel (see MetadataBlock). Empty on analysis.json files generated before
+    # this field existed — such documents must be re-analyzed to populate it.
+    metadata_blocks: list[MetadataBlock] = []
 
 
 class Acronym(BaseModel):

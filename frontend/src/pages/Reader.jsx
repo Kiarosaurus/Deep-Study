@@ -17,8 +17,32 @@ const RETRYABLE_STATUSES = new Set([429, 502, 503, 504])
 // member, else combined paragraph + footnote-type members).
 const DEFAULT_EDITS = { pageOverrides: {}, mergeGroups: [] }
 
-// Block types offered by the pincel (promote) picker, in display order.
-const PROMOTE_TYPES = ['paragraph', 'figure', 'table', 'footnote', 'equation', 'code', 'caption']
+// Roles offered by the pincel (promote) picker, split into two UX groups:
+// GROUP A are explainable (carry a ✦ + an explanation); GROUP B are metadata that
+// reshape structure without being independently explainable. Any role can be
+// assigned to any object — that's how broken extractions get repaired.
+const PROMOTE_GROUPS = [
+  {
+    titleKey: 'viewer.typeGroupExplainable',
+    items: [
+      { role: 'paragraph', labelKey: 'viewer.typeParagraph' },
+      { role: 'figure',    labelKey: 'viewer.typeFigure' },
+      { role: 'table',     labelKey: 'viewer.typeTable' },
+      { role: 'algorithm', labelKey: 'viewer.typeAlgorithm' },
+      { role: 'equation',  labelKey: 'viewer.typeEquation' },
+    ],
+  },
+  {
+    titleKey: 'viewer.typeGroupMetadata',
+    items: [
+      { role: 'ignored',        labelKey: 'viewer.typeIgnored' },
+      { role: 'footnote',       labelKey: 'viewer.typeFootnote' },
+      { role: 'title',          labelKey: 'viewer.typeTitle' },
+      { role: 'author',         labelKey: 'viewer.typeAuthor' },
+      { role: 'section_header', labelKey: 'viewer.typeSectionHeader' },
+    ],
+  },
+]
 
 // A lazo (manual) merge resolves its consolidated type the same way the backend
 // merge state machine does: a VISUAL block dominates text. Precedence table >
@@ -74,31 +98,55 @@ function isExplainableParagraph(b) {
   return b.role === 'paragraph' && (b.sentences?.length ?? 0) > 0
 }
 
+// Unified per-object identity for the edit tools (lazo membership/selection and
+// merge-group resolution). Injected/linear-only blocks have no reading_index, so
+// they key on their geometric linearKey; native blocks and images key on
+// page+reading_index. This is what makes a promoted block a FIRST-CLASS citizen
+// of the linker/scissors — the exact same lookup as any native object. NOTE: the
+// `block:` variant is mirrored inline by ParagraphOverlay's blockKey in PdfViewer.
+function editKeyOf(t) {
+  return t.linearKey ? `block:${t.linearKey}` : `${t.kind}:${t.page}:${t.reading_index}`
+}
+
 // Floating block-type picker for the pincel tool. Anchored at the click point,
-// clamped to the viewport. Backdrop closes it without choosing.
+// clamped to the viewport. Two visual columns: explainable roles vs metadata
+// (`ignored` flagged red as the destructive choice). Backdrop closes it.
 function TypePicker({ x, y, onPick, onClose, t }) {
-  const left = Math.max(8, Math.min(x, window.innerWidth - 220))
-  const top  = Math.max(8, Math.min(y, window.innerHeight - 320))
+  const left = Math.max(8, Math.min(x, window.innerWidth - 360))
+  const top  = Math.max(8, Math.min(y, window.innerHeight - 260))
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="fixed z-50 w-52 bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 py-1.5 select-none"
+        className="fixed z-50 w-[22rem] bg-white/95 backdrop-blur rounded-xl shadow-lg border border-slate-200 p-2 select-none"
         style={{ left, top }}
       >
-        <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+        <div className="px-1.5 pb-1 text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
           {t('viewer.typePickerTitle')}
         </div>
-        {PROMOTE_TYPES.map(role => (
-          <button
-            key={role}
-            type="button"
-            onClick={() => onPick(role)}
-            className="block w-full text-left px-3 py-1.5 text-[13px] text-slate-600 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-          >
-            {t(`viewer.type${role.charAt(0).toUpperCase()}${role.slice(1)}`)}
-          </button>
-        ))}
+        <div className="grid grid-cols-2 gap-1.5">
+          {PROMOTE_GROUPS.map(group => (
+            <div key={group.titleKey} className="flex flex-col">
+              <div className="px-1.5 py-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                {t(group.titleKey)}
+              </div>
+              {group.items.map(({ role, labelKey }) => (
+                <button
+                  key={role}
+                  type="button"
+                  onClick={() => onPick(role)}
+                  className={`block w-full text-left px-2 py-1.5 rounded-lg text-[13px] transition-colors ${
+                    role === 'ignored'
+                      ? 'text-red-600 hover:bg-red-50'
+                      : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-600'
+                  }`}
+                >
+                  {t(labelKey)}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
     </>
   )
@@ -395,6 +443,47 @@ export default function Reader() {
   // blocks — so it can re-type any of them into the reading flow.
   const paintableBlocks = projectedLinear
 
+  // Dropped OCR text the backend preserved in pages[].metadata_blocks — footnotes,
+  // page headers/footers, references, acknowledgments/keywords, contact/noise:
+  // every text object the reading-flow pipeline discarded. They live OUTSIDE the
+  // reading flow (never added to linearBlocks/tracking) and default to role
+  // 'ignored' so they neither auto-inject nor show a ✦. They exist purely so the
+  // universal pincel can enclose and re-type them. Empty on analysis.json files
+  // generated before the backend field existed (those docs must be re-analyzed).
+  const metadataBlocksRaw = useMemo(() => {
+    const out = []
+    for (const p of (analysis?.pages || [])) {
+      for (const mb of (p.metadata_blocks || [])) {
+        if (mb?.bbox) out.push({
+          page: p.page, bbox: mb.bbox, role: 'ignored',
+          text: mb.text ?? '', sentences: mb.sentences ?? [], source: mb.source_type,
+        })
+      }
+    }
+    return out
+  }, [analysis])
+
+  // Same bbox-first override bridge as projectedLinear, but over the dropped
+  // blocks: a pincel promotion (stored under the block's linearKey WITH its bbox)
+  // re-types the metadata block by geometry. Only bbox-carrying overrides apply.
+  const projectedMetadata = useMemo(() => {
+    const raw = metadataBlocksRaw
+    const po = edits.pageOverrides
+    if (!raw.length || !po || Object.keys(po).length === 0) return raw
+    const overridesByPage = {}
+    for (const val of Object.values(po)) {
+      if (!val?.bbox) continue
+      ;(overridesByPage[val.page] ||= []).push({ bbox: val.bbox, role: val.role })
+    }
+    if (Object.keys(overridesByPage).length === 0) return raw
+    return raw.map(M => {
+      const cands = overridesByPage[M.page]
+      if (!cands) return M
+      const m = cands.find(c => bboxOverlapHigh(c.bbox, M.bbox))
+      return (m && m.role && m.role !== M.role) ? { ...M, role: m.role } : M
+    })
+  }, [metadataBlocksRaw, edits])
+
   // Persist edits to the backend (debounced) whenever they change post-hydration.
   useEffect(() => {
     if (lastPersisted.current === null) return  // not hydrated yet
@@ -420,17 +509,32 @@ export default function Reader() {
 
     // 1. Role/continuation overrides over the native pages.blocks.
     const based = !hasOverrides ? pages : pages.map(p => {
-      let changed = false
+      let blocksChanged = false
       const blocks = p.blocks.map(b => {
         const o = po[`${p.page}:${b.reading_index}`]
         if (!o) return b
         let nb = b
         if (o.role && o.role !== b.role) nb = { ...nb, role: o.role }
         if (o.continuation === false && b.continuation) nb = { ...nb, continuation: false }
-        if (nb !== b) changed = true
+        if (nb !== b) blocksChanged = true
         return nb
       })
-      return changed ? { ...p, blocks } : p
+      // Images carry a role too (figure/table/algorithm). The pincel re-types
+      // them via an `img:` override so figures/tables are first-class pincel
+      // targets. Keyed apart from blocks to avoid reading_index collisions.
+      let imagesChanged = false
+      const images = (p.images || []).map(im => {
+        const o = po[`img:${p.page}:${im.reading_index}`]
+        if (!o || !o.role || o.role === im.role) return im
+        imagesChanged = true
+        return { ...im, role: o.role }
+      })
+      if (!blocksChanged && !imagesChanged) return p
+      return {
+        ...p,
+        blocks: blocksChanged ? blocks : p.blocks,
+        images: imagesChanged ? images : p.images,
+      }
     })
 
     // 2. Inject linear-only paragraphs that carry no pages identity. The bbox-
@@ -444,8 +548,11 @@ export default function Reader() {
         ...(p.images || []).filter(im => im.bbox).map(im => im.bbox),
       ]
     }
+    // Source = the reading-flow linear blocks PLUS the dropped metadata blocks:
+    // promoting either to a sentence-bearing paragraph injects it identically, so
+    // a re-typed footnote/acknowledgment becomes a first-class paginated block.
     const injectByPage = {}
-    for (const L of linearBlocks) {
+    for (const L of [...linearBlocks, ...projectedMetadata]) {
       if (!L.bbox || !isExplainableParagraph(L)) continue
       const boxes = nativeBoxesByPage[L.page]
       if (!boxes || boxes.some(bb => bboxOverlapHigh(bb, L.bbox))) continue  // has a pages identity
@@ -473,7 +580,7 @@ export default function Reader() {
       const extra = injectByPage[p.page]
       return extra ? { ...p, blocks: [...p.blocks, ...extra] } : p
     })
-  }, [analysis, edits, linearBlocks])
+  }, [analysis, edits, linearBlocks, projectedMetadata])
 
   // Merge a patch into one block's override (role and/or continuation),
   // recorded for undo/redo. `patch` e.g. { role: 'ignored' } or
@@ -482,8 +589,17 @@ export default function Reader() {
     // Linear-only targets (pincel on title/author/section_header/list) carry a
     // geometric key + their bbox, so the projection bridge can match them with
     // no pages.blocks row. Everything else keys on the per-page reading_index.
-    const key = target.linearKey || `${target.page}:${target.reading_index}`
-    const identity = target.linearKey ? { bbox: target.bbox, page: target.page } : {}
+    const key = target.linearKey
+      ? target.linearKey
+      : target.kind === 'image'
+        ? `img:${target.page}:${target.reading_index}`
+        : `${target.page}:${target.reading_index}`
+    // linearKey and image overrides both stash their bbox so the linear
+    // projection can bridge the new role into tracking by geometry (`img:` keys
+    // don't parse as page:reading_index, so projectedLinear matches them by bbox).
+    const identity = (target.linearKey || target.kind === 'image')
+      ? { bbox: target.bbox, page: target.page }
+      : {}
     const prev = edits.pageOverrides[key]
     const next = { ...(prev || {}), ...identity, ...patch }
     commitEdit({
@@ -521,24 +637,26 @@ export default function Reader() {
       return
     }
     if (armedTool === 'promote') {
-      // Pincel: open the block-type picker at the click; the chosen type becomes
-      // the block's role. Text blocks only (images are already figure/table).
-      if (target.kind !== 'block') return
+      // Pincel: open the block-type picker at the click. Works on EVERY object —
+      // blocks (incl. injected linear-only + ignored) AND images (figure/table/
+      // algorithm). The chosen role flows through setOverride's geometric /
+      // reading_index / img routing.
       setPromotePicker({ target, x: pos?.x ?? 0, y: pos?.y ?? 0 })
       return
     }
     if (armedTool === 'merge') {
       // Lazo: toggle the object in the selection buffer. Only explainables are
-      // selectable — an image, or a non-demoted block (demote a block first via
-      // pincel to make it explainable). The buffer is committed on confirm.
-      if (target.reading_index == null) return  // linear-only block: no merge identity
+      // selectable — an image, or a non-ignored block (including injected
+      // linear-only ones, keyed geometrically). The buffer commits on confirm.
       const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
       if (!explainable) return
       addToMergeBuffer({
-        key: `${target.kind}:${target.page}:${target.reading_index}`,
+        key: editKeyOf(target),
         kind: target.kind,
         page: target.page,
         reading_index: target.reading_index,
+        linearKey: target.linearKey,
+        bbox: target.bbox,
         role: target.role,
       })
       return
@@ -547,10 +665,9 @@ export default function Reader() {
       // Tijeras: cut a merge. A manual lazo group is removed; otherwise a
       // natural continuation join is blocked (this block stops continuing the
       // previous one). Baked figure/caption/panel merges are not cut here.
-      if (target.reading_index == null) return  // linear-only block: nothing to cut
-      const memberKey = `${target.kind}:${target.page}:${target.reading_index}`
+      const memberKey = editKeyOf(target)
       const g = (edits.mergeGroups || []).find(grp =>
-        grp.members.some(m => `${m.kind}:${m.page}:${m.reading_index}` === memberKey))
+        grp.members.some(m => editKeyOf(m) === memberKey))
       if (g) { removeMergeGroup(g.id); disarm(); return }
       if (target.kind === 'block' && target.continuation) {
         setOverride(target, { continuation: false })
@@ -570,7 +687,7 @@ export default function Reader() {
     for (const g of (edits.mergeGroups || [])) {
       const resultRole = g.resultRole || (g.explainAs === 'figure' ? 'figure' : 'paragraph')
       g.members.forEach((m, i) => {
-        map[`${m.kind}:${m.page}:${m.reading_index}`] = { groupId: g.id, isRep: i === 0, resultRole }
+        map[editKeyOf(m)] = { groupId: g.id, isRep: i === 0, resultRole }
       })
     }
     return map
@@ -585,11 +702,11 @@ export default function Reader() {
     if (mergeBuffer.length < 2) return
     const page = mergeBuffer[0].page
     if (mergeBuffer.some(m => m.page !== page)) return
-    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, role: m.role }))
+    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, linearKey: m.linearKey, bbox: m.bbox, role: m.role }))
     const resultRole = resolveMergedRole(
       members.map(m => m.role || (m.kind === 'image' ? 'figure' : 'paragraph')),
     )
-    const id = `mg-${page}-${members.map(m => `${m.kind[0]}${m.reading_index}`).join('-')}`
+    const id = `mg-${page}-${members.map(m => editKeyOf(m).replace(/[^\w]/g, '')).join('-')}`
     commitEdit({
       apply: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(g => g.id !== id), { id, members, resultRole }] })),
       revert: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(g => g.id !== id) })),
@@ -628,18 +745,23 @@ export default function Reader() {
       // Linear-only block (title/author/section_header/list): no pages.blocks
       // row, so hand the pincel a geometric override target to convert it.
       else target = { kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role }
-      const key = target.linearKey || `${target.kind}:${target.page}:${target.reading_index}`
+      const key = editKeyOf(target)
       return { target, membership: mergeMembership[key], selected: selectedKeys.has(key) }
     })
   }, [linearBlocks, editedPages, mergeMembership, selectedKeys])
 
-  // Pincel (promote) affordance for blocks the paginated overlay can't reach:
-  // linear-only roles (title/author/section_header/list) absent from
-  // pages.blocks/images. Blocks WITH a pages identity already get their blue box
-  // from ParagraphOverlay over editedPages, so they're excluded here (no double
-  // layer). Sourced from paintableBlocks so hammer-ignored ones stay paintable.
+  // Pincel (promote) affordance for objects the paginated overlay can't reach by
+  // an editedPages.blocks row:
+  //   - linear-only roles (title/author/section_header/list), AND
+  //   - dropped OCR metadata (footnotes, headers/footers, references,
+  //     acknowledgments, …) — projectedMetadata.
+  // This is what makes the pincel UNIVERSAL: every OCR text object gets a blue
+  // box. Objects WITH a pages identity (incl. promoted+injected ones) already
+  // get their box from ParagraphOverlay over editedPages, so the bbox-overlap
+  // test excludes them here — drawn exactly once. Sourced so hammer-ignored and
+  // metadata blocks alike stay paintable.
   const linearOnlyPaintTargets = useMemo(() => {
-    if (!paintableBlocks.length) return []
+    if (!paintableBlocks.length && !projectedMetadata.length) return []
     const pageBoxes = {}
     for (const p of (editedPages || [])) {
       pageBoxes[p.page] = [
@@ -648,14 +770,14 @@ export default function Reader() {
       ]
     }
     const out = []
-    for (const L of paintableBlocks) {
+    for (const L of [...paintableBlocks, ...projectedMetadata]) {
       if (!L.bbox) continue
       const boxes = pageBoxes[L.page] || []
       if (boxes.some(bb => bboxOverlapHigh(bb, L.bbox))) continue  // has a pages identity
       out.push({ kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role })
     }
     return out
-  }, [paintableBlocks, editedPages])
+  }, [paintableBlocks, projectedMetadata, editedPages])
 
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
@@ -985,7 +1107,8 @@ export default function Reader() {
         const img = (p.images || []).find(im => im.reading_index === m.reading_index)
         return img ? { kind: 'image', page: m.page, ...img } : null
       }
-      const b = (p.blocks || []).find(bl => bl.reading_index === m.reading_index)
+      const b = (p.blocks || []).find(bl =>
+        m.linearKey ? bl.linearKey === m.linearKey : bl.reading_index === m.reading_index)
       return b ? { kind: 'block', page: m.page, ...b } : null
     }).filter(Boolean)
     if (!resolved.length) return

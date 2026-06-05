@@ -51,6 +51,7 @@ from models import (
     FullBlock,
     ImageBlock,
     LineBlock,
+    MetadataBlock,
     PageBlocks,
     ParagraphBlock,
     SentenceBlock,
@@ -3182,6 +3183,87 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     return blocks
 
 
+# Visual Marker types never collected as metadata TEXT (figures/tables/groups).
+_METADATA_SKIP_TYPES = _IMAGE_TYPES | _GROUP_TYPES
+
+
+def _bbox_area_overlap(a: BBox, b: BBox) -> float:
+    """Intersection over the SMALLER area — the mirror of the frontend's
+    `bboxOverlapHigh`. Used to decide whether a Marker block was already emitted
+    into the reading flow (and therefore must NOT be collected as metadata)."""
+    ix = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+    iy = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    area_a = (a.x1 - a.x0) * (a.y1 - a.y0)
+    area_b = (b.x1 - b.x0) * (b.y1 - b.y0)
+    return inter / max(1e-6, min(area_a, area_b))
+
+
+def _collect_metadata_blocks(
+    document, pages: list[PageBlocks], linear: list[FullBlock], line_cache: dict | None = None,
+) -> dict[int, list[MetadataBlock]]:
+    """Every OCR'd TEXT block Marker produced that the reading-flow pipeline
+    DROPPED — page headers/footers, footnotes, references, TOC, skip sections
+    (Acknowledgments / Keywords / license), contact/noise, and everything after a
+    stop-header (References onward, which the page loop abandons entirely).
+
+    Found by SUBTRACTING, geometrically, everything already emitted into
+    pages.blocks / images / attached footnotes / linear. Pure and read-only: it
+    re-walks the same Marker document but never mutates the reading flow. These
+    power the universal pincel — the user can enclose and re-type any of them,
+    while by default they stay out of the reading order. Returns page → blocks."""
+    emitted: dict[int, list[BBox]] = {}
+
+    def _seen(page_no: int, bb: BBox | None) -> None:
+        if bb is not None:
+            emitted.setdefault(page_no, []).append(bb)
+
+    for p in pages:
+        for b in p.blocks:
+            if b.boxes:
+                _seen(p.page, _union_bbox(b.boxes))
+            for fn in b.footnotes:
+                _seen(p.page, fn.bbox)
+        for im in p.images:
+            _seen(p.page, im.bbox)
+            if im.caption_bbox:
+                _seen(p.page, im.caption_bbox)
+    for L in linear:
+        _seen(L.page, L.bbox)
+        for fn in L.footnotes:
+            _seen(L.page, fn.bbox)
+
+    out: dict[int, list[MetadataBlock]] = {}
+    for page_idx, page in enumerate(getattr(document, "pages", [])):
+        page_no = page_idx + 1               # matches PageBlocks(page=page_idx + 1)
+        seen = emitted.setdefault(page_no, [])
+        metas: list[MetadataBlock] = []
+        for block in _iter_layout_blocks(page):
+            if _block_type_name(block) in _METADATA_SKIP_TYPES:
+                continue
+            lines = _collect_lines(block, document, line_cache)
+            if not lines:
+                continue
+            text = " ".join(l.text for l in lines).strip()
+            if not text:
+                continue
+            bbox = _union_bbox([l.bbox for l in lines])
+            if any(_bbox_area_overlap(bbox, e) >= 0.6 for e in seen):
+                continue  # already emitted somewhere — not actually dropped
+            metas.append(MetadataBlock(
+                bbox=bbox,
+                text=text,
+                sentences=_build_sentences(text, lines),
+                source_type=_block_type_name(block),
+            ))
+            seen.append(bbox)  # also dedup later blocks on this page against it
+        if metas:
+            out[page_no] = metas
+    return out
+
+
 def extract_both(
     pdf_bytes: bytes,
     *,
@@ -3218,4 +3300,9 @@ def extract_both(
     _assign_layout_types_linear(linear)
     _merge_continuations_linear(linear)
     _clip_vertical_overlaps_linear(linear)
+    # Preserve every OCR text block the passes above dropped, so the universal
+    # pincel can reach it. Runs last: needs the FINAL emitted geometry to subtract.
+    metadata = _collect_metadata_blocks(document, pages, linear, line_cache)
+    for p in pages:
+        p.metadata_blocks = metadata.get(p.page, [])
     return pages, linear

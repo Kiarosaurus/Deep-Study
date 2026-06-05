@@ -115,6 +115,11 @@ function groupExplainTitle(t, membership, fallback) {
     : t('viewer.explainParagraph')
 }
 
+// Roles that carry NO ✦ in the paginated overlay — metadata that reshapes
+// structure but isn't independently explainable. Mirrors the picker's GROUP B,
+// so re-typing a block to one of these (e.g. footnote) drops its ✦.
+const _METADATA_ROLES = new Set(['ignored', 'footnote', 'title', 'author', 'section_header'])
+
 function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
@@ -183,7 +188,10 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
         const isLeader = groupLeader[i] === i
         const unionBox = groupUnion.get(groupLeader[i])
         // Lazo identity for this block + its committed merge-group membership.
-        const blockKey = `block:${page}:${block.reading_index}`
+        // Linear-only injected blocks have no reading_index; key them on their
+        // geometric linearKey (kept in sync with Reader.editKeyOf) so the lazo
+        // membership + selection treat them as first-class.
+        const blockKey = block.linearKey ? `block:${block.linearKey}` : `block:${page}:${block.reading_index}`
         const blockMembership = mergeMembership?.[blockKey]
 
         const ownFlatRef = flatBase + i
@@ -443,7 +451,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 and on non-representative members of a merge group (the group's
                 ✦ lives on its representative). A representative explains the
                 whole merge group via onExplainGroup. */}
-            {isLeader && !armedTool && block.role !== 'ignored' && (!blockMembership || blockMembership.isRep) && (
+            {isLeader && !armedTool && !_METADATA_ROLES.has(block.role) && (!blockMembership || blockMembership.isRep) && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -546,7 +554,22 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 onClick={e => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' }, { x: e.clientX, y: e.clientY })}
               />
             )}
-            {!armedTool && (!imgMembership || imgMembership.isRep) && (
+            {/* Pincel (promote) surface for images — figures/tables/algorithms
+                get the same blue affordance as text blocks and open the picker. */}
+            {armedTool === 'promote' && (
+              <button
+                type="button"
+                className="absolute pointer-events-auto rounded-sm"
+                style={{
+                  left, top, width, height,
+                  background: 'rgba(59,130,246,0.2)',
+                  border: '1px solid rgba(59,130,246,0.7)',
+                  cursor: 'crosshair',
+                }}
+                onClick={e => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' }, { x: e.clientX, y: e.clientY })}
+              />
+            )}
+            {!armedTool && !_METADATA_ROLES.has(img.role || 'figure') && (!imgMembership || imgMembership.isRep) && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
