@@ -420,6 +420,8 @@ export default function Reader() {
       if (target.kind !== 'block') return
       if (target.role === 'paragraph') setOverride(target, { role: 'ignored' })
       else if (target.role === 'ignored') setOverride(target, { role: null })
+      else return  // nothing toggled → tool stays armed
+      disarm()  // effective use → auto-disarm
       return
     }
     if (armedTool === 'promote') {
@@ -451,13 +453,14 @@ export default function Reader() {
       const memberKey = `${target.kind}:${target.page}:${target.reading_index}`
       const g = (edits.mergeGroups || []).find(grp =>
         grp.members.some(m => `${m.kind}:${m.page}:${m.reading_index}` === memberKey))
-      if (g) { removeMergeGroup(g.id); return }
+      if (g) { removeMergeGroup(g.id); disarm(); return }
       if (target.kind === 'block' && target.continuation) {
         setOverride(target, { continuation: false })
+        disarm()  // effective cut → auto-disarm
       }
       return
     }
-  }, [armedTool, setOverride, addToMergeBuffer, edits, removeMergeGroup])
+  }, [armedTool, setOverride, addToMergeBuffer, edits, removeMergeGroup, disarm])
 
   // Keys currently selected for an in-progress lazo merge (persistent tint).
   const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
@@ -494,7 +497,8 @@ export default function Reader() {
       revert: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(g => g.id !== id) })),
     })
     clearMergeBuffer()
-  }, [mergeBuffer, commitEdit, clearMergeBuffer])
+    disarm()  // effective merge → auto-disarm
+  }, [mergeBuffer, commitEdit, clearMergeBuffer, disarm])
 
   // Reverse bridge for tracking-mode editing: per linear block, the page-
   // projection identity it maps to (by bbox overlap) plus its lazo state.
@@ -918,6 +922,7 @@ export default function Reader() {
     const sel = searchSel
     if (!sel?.text || !analysis || searchBusy) return
     setSearchBusy(true)
+    let extracted = false
     try {
       const { data } = await axios.post('/api/extract-concept/', {
         selected_text: sel.text,
@@ -927,6 +932,7 @@ export default function Reader() {
       })
       const concepts = Array.isArray(data?.concepts) ? data.concepts : []
       if (concepts.length) {
+        extracted = true
         setIsSidebarOpen(true)
         setTab('explain')
         const item = { sentence_indices: [], quote: sel.text, concepts, forced: true }
@@ -940,9 +946,12 @@ export default function Reader() {
     } catch { /* surfaced as no-op; the selection is cleared regardless */ }
     finally {
       setSearchBusy(false)
-      clearSearchSelection()  // keep the tool armed for further extractions
+      clearSearchSelection()
+      // Effective extraction → auto-disarm. A failed/empty search keeps the tool
+      // armed so the user can retry without re-selecting it.
+      if (extracted) disarm()
     }
-  }, [searchSel, analysis, searchBusy, clearSearchSelection])
+  }, [searchSel, analysis, searchBusy, clearSearchSelection, disarm])
 
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {
@@ -1409,7 +1418,7 @@ export default function Reader() {
           y={promotePicker.y}
           t={t}
           onClose={() => setPromotePicker(null)}
-          onPick={(role) => { setOverride(promotePicker.target, { role }); setPromotePicker(null) }}
+          onPick={(role) => { setOverride(promotePicker.target, { role }); setPromotePicker(null); disarm() }}
         />
       )}
 
