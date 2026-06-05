@@ -180,8 +180,8 @@ export default function LinearReader({
     let lastRenderedIdx = -1
     let chainHeadResultIdx = -1   // result index of the open chain's head, or -1
 
-    const emit = (origIdx) => {
-      result.push({ origIdx, prevOrigIdx: lastRenderedIdx })
+    const emit = (origIdx, extra = {}) => {
+      result.push({ origIdx, prevOrigIdx: lastRenderedIdx, ...extra })
       lastRenderedIdx = origIdx
     }
 
@@ -213,7 +213,11 @@ export default function LinearReader({
           emit(i)
         }
       } else {
-        emit(i)
+        // isChainTail: the LAST paragraph of a continuation chain (the next
+        // paragraph does not continue it) or a standalone paragraph. In tracking
+        // mode the ✦ renders ONLY on the tail, so a backend-merged paragraph
+        // shows one button instead of one per crop.
+        emit(i, { isChainTail: !nextParaIsContinuation(i) })
         if (chainHeadResultIdx === -1 && nextParaIsContinuation(i)) {
           chainHeadResultIdx = result.length - 1   // this paragraph opened a chain
         }
@@ -241,7 +245,7 @@ export default function LinearReader({
           alignItems: 'center',
         }}
       >
-        {renderList.map(({ origIdx, prevOrigIdx }) => {
+        {renderList.map(({ origIdx, prevOrigIdx, isChainTail = true }) => {
           const block = linearBlocks[origIdx]
           const chainKey = chainIds[origIdx] != null ? `c-${chainIds[origIdx]}` : `__b-${origIdx}`
           return (
@@ -268,6 +272,7 @@ export default function LinearReader({
               armedTool={armedTool}
               onBlockEdit={onBlockEdit}
               onExplainGroup={onExplainGroup}
+              isChainTail={isChainTail}
               editInfo={editInfo?.[origIdx] ?? null}
             />
           )
@@ -380,6 +385,7 @@ const BlockCrop = memo(function BlockCrop({
   armedTool = null,
   onBlockEdit,
   onExplainGroup,
+  isChainTail = true,
   editInfo,
 }) {
   const { t } = useUiLang()
@@ -608,21 +614,16 @@ const BlockCrop = memo(function BlockCrop({
     ? toLocalRect(block.caption_bbox)
     : null
 
+  // ✦ button anchors at the bottom-right VERTEX of the block's bounding box
+  // (x_max, y_max) for EVERY kind (paragraph, figure, table) — the translate on
+  // the button then centers the circle exactly on that vertex. bbox.x1 maps to
+  // the crop's right edge (canvasWidth); bbox.y1 maps to its crop-local y
+  // (excludes the bottom inflation pad so the circle sits on the real corner).
   let anchor = null
   if (isInteractive) {
-    if (isFigure) {
-      // Figures/tables: anchor at the bottom-right corner of the rendered
-      // canvas (no sentence geometry to anchor to).
-      anchor = { left: canvasWidth, top: displayHeight }
-    } else {
-      const lastSent = block.sentences[block.sentences.length - 1]
-      const lastBox  = lastSent?.boxes?.[lastSent.boxes.length - 1]
-      if (lastBox) {
-        anchor = {
-          left: (lastBox.x1 - bbox.x0) * bboxScale,
-          top:  (lastBox.y1 - inflatedY0) * bboxScale,
-        }
-      }
+    anchor = {
+      left: canvasWidth,
+      top:  (bbox.y1 - inflatedY0) * bboxScale,
     }
   }
 
@@ -716,21 +717,27 @@ const BlockCrop = memo(function BlockCrop({
             />
           )}
 
-          {anchor && !armedTool && (!membership || membership.isRep) && (
+          {anchor && !armedTool && (membership ? membership.isRep : isChainTail) && (
             <button
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
                 left: anchor.left,
                 top:  anchor.top,
+                // High z so the vertex-centered circle (half outside the crop)
+                // is never painted under an adjacent crop or the text layer.
+                zIndex: 30,
                 background: hovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
                 border: '1.5px solid rgba(99,102,241,0.6)',
                 color: hovered ? 'white' : 'rgb(79,70,229)',
                 fontSize: '8px',
                 fontWeight: 700,
                 boxShadow: hovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                // Center the circle ON the bottom-right vertex (was -100%,-100%,
+                // which tucked it fully inside). Equivalent to bottom:0;right:0 +
+                // translate(50%,50%).
                 transform: hovered
-                  ? 'translate(-100%, -100%) scale(1.15)'
-                  : 'translate(-100%, -100%)',
+                  ? 'translate(-50%, -50%) scale(1.15)'
+                  : 'translate(-50%, -50%)',
               }}
               onClick={() => {
                 if (membership) {

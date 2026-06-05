@@ -428,15 +428,20 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 style={{
                   left: anchorLeft,
                   top:  anchorTop,
+                  // High z so the vertex-centered circle stays above adjacent
+                  // block boxes and the text layer.
+                  zIndex: 30,
                   background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
                   border: '1.5px solid rgba(99,102,241,0.6)',
                   color: isHovered ? 'white' : 'rgb(79,70,229)',
                   fontSize: '8px',
                   fontWeight: 700,
                   boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                  // Center the circle ON the union's bottom-right vertex (was
+                  // -100%,-100%). Equivalent to bottom:0;right:0 + translate(50%,50%).
                   transform: isHovered
-                    ? 'translate(-100%, -100%) scale(1.15)'
-                    : 'translate(-100%, -100%)',
+                    ? 'translate(-50%, -50%) scale(1.15)'
+                    : 'translate(-50%, -50%)',
                 }}
                 onClick={() => blockMembership
                   ? onExplainGroup?.(blockMembership.groupId)
@@ -526,15 +531,20 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 style={{
                   left: anchorLeft,
                   top:  anchorTop,
+                  // High z so the vertex-centered circle stays above adjacent
+                  // block boxes and the text layer.
+                  zIndex: 30,
                   background: isHovered ? 'rgb(79,70,229)' : 'rgba(99,102,241,0.15)',
                   border: '1.5px solid rgba(99,102,241,0.6)',
                   color: isHovered ? 'white' : 'rgb(79,70,229)',
                   fontSize: '8px',
                   fontWeight: 700,
                   boxShadow: isHovered ? '0 2px 8px rgba(99,102,241,0.45)' : 'none',
+                  // Center the circle ON the image's bottom-right vertex (was
+                  // -100%,-100%). Equivalent to bottom:0;right:0 + translate(50%,50%).
                   transform: isHovered
-                    ? 'translate(-100%, -100%) scale(1.15)'
-                    : 'translate(-100%, -100%)',
+                    ? 'translate(-50%, -50%) scale(1.15)'
+                    : 'translate(-50%, -50%)',
                 }}
                 onClick={() => imgMembership
                   ? onExplainGroup?.(imgMembership.groupId)
