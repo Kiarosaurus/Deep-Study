@@ -160,7 +160,13 @@ function UploadQueueView({ queue, currentIdx, allDone, onClose, onOpen }) {
   const skippedCount = queue.filter(q => q.status === 'skipped').length
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-6 py-10">
+    <div className="relative min-h-screen bg-slate-50 flex items-center justify-center px-6 py-10">
+      {/* Theme (light/sepia/dark) + UI-language controls — usable even while the
+          queue is still uploading/analyzing, mirroring the library header. */}
+      <div className="absolute top-4 right-4 z-10 flex items-center gap-2.5">
+        <ThemeSwitch />
+        <LanguageSwitcher />
+      </div>
       <div className="w-full max-w-lg flex flex-col gap-5">
         <div className="text-center">
           {allDone ? (
