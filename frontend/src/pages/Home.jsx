@@ -13,7 +13,7 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function DocumentCard({ doc, onOpen, onDelete }) {
+function DocumentCard({ doc, onOpen, onDelete, selectable = false, selected = false, onToggleSelect }) {
   const { t } = useUiLang()
   const [deleting, setDeleting] = useState(false)
 
@@ -25,11 +25,30 @@ function DocumentCard({ doc, onOpen, onDelete }) {
 
   return (
     <div
-      onClick={() => onOpen(doc.filename)}
-      className="bg-white border border-slate-200 rounded-2xl p-5 flex flex-col gap-3 hover:shadow-md hover:border-indigo-200 transition-all cursor-pointer group"
+      onClick={() => (selectable ? onToggleSelect(doc.filename) : onOpen(doc.filename))}
+      className={`relative rounded-2xl p-5 flex flex-col gap-3 border transition-all cursor-pointer group ${
+        selectable && selected
+          ? 'bg-indigo-50/50 border-indigo-400 ring-2 ring-indigo-300'
+          : 'bg-white border-slate-200 hover:shadow-md hover:border-indigo-200'
+      }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="text-3xl">📄</span>
+        <div className="flex items-center gap-2.5">
+          {selectable && (
+            <span
+              className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                selected ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-slate-300'
+              }`}
+            >
+              {selected && (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              )}
+            </span>
+          )}
+          <span className="text-3xl">📄</span>
+        </div>
         {doc.has_analysis && (
           <span className="text-[10px] font-semibold px-2 py-0.5 bg-emerald-50 text-emerald-600 border border-emerald-200 rounded-full shrink-0">
             {t('home.analyzed')}
@@ -42,31 +61,33 @@ function DocumentCard({ doc, onOpen, onDelete }) {
         </p>
         <p className="text-xs text-slate-400 mt-0.5">{formatBytes(doc.size_bytes)}</p>
       </div>
-      <div className="flex gap-2" onClick={e => e.stopPropagation()}>
-        <button
-          onClick={() => onOpen(doc.filename)}
-          className="flex-1 text-xs font-semibold py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"
-        >
-          {t('common.open')}
-        </button>
-        <button
-          onClick={handleDelete}
-          disabled={deleting}
-          className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-40 shrink-0"
-          title={t('common.delete')}
-        >
-          {deleting ? (
-            <span className="w-3.5 h-3.5 border-2 border-slate-200 border-t-slate-500 rounded-full animate-spin block" />
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6l-1 14H6L5 6" />
-              <path d="M10 11v6M14 11v6" />
-              <path d="M9 6V4h6v2" />
-            </svg>
-          )}
-        </button>
-      </div>
+      {!selectable && (
+        <div className="flex gap-2" onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => onOpen(doc.filename)}
+            className="flex-1 text-xs font-semibold py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-colors"
+          >
+            {t('common.open')}
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="w-9 h-9 flex items-center justify-center text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-40 shrink-0"
+            title={t('common.delete')}
+          >
+            {deleting ? (
+              <span className="w-3.5 h-3.5 border-2 border-slate-200 border-t-slate-500 rounded-full animate-spin block" />
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14H6L5 6" />
+                <path d="M10 11v6M14 11v6" />
+                <path d="M9 6V4h6v2" />
+              </svg>
+            )}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -269,6 +290,14 @@ export default function Home() {
   const overwriteResolverRef = useRef(null)
   const [uploadError, setUploadError] = useState(null)
 
+  // Multi-select for bulk deletion. selectMode swaps the cards into checkbox
+  // mode; `selected` holds the chosen filenames; confirmBulk gates the
+  // destructive delete behind a second, explicit click.
+  const [selectMode, setSelectMode] = useState(false)
+  const [selected, setSelected] = useState(() => new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [confirmBulk, setConfirmBulk] = useState(false)
+
   useEffect(() => { fetchDocs() }, [location.key])
 
   async function fetchDocs() {
@@ -284,10 +313,53 @@ export default function Home() {
 
   async function handleDelete(filename) {
     try {
-      await axios.delete(`/api/documents/${filename}`)
+      await axios.delete(`/api/documents/${encodeURIComponent(filename)}`)
       await fetchDocs()
     } catch {
       // ignore
+    }
+  }
+
+  function exitSelectMode() {
+    setSelectMode(false)
+    setSelected(new Set())
+    setConfirmBulk(false)
+  }
+
+  function toggleSelected(filename) {
+    setConfirmBulk(false)
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(filename)) next.delete(filename)
+      else next.add(filename)
+      return next
+    })
+  }
+
+  // Select-all toggles to clear once everything is already picked.
+  function toggleSelectAll() {
+    setConfirmBulk(false)
+    setSelected(prev =>
+      prev.size >= documents.length ? new Set() : new Set(documents.map(d => d.filename)),
+    )
+  }
+
+  // Delete every selected document in parallel; per-file failures are swallowed
+  // so one bad delete doesn't abort the rest, and fetchDocs reconciles with the
+  // server's truth afterwards.
+  async function handleDeleteSelected() {
+    if (selected.size === 0) return
+    setBulkDeleting(true)
+    try {
+      await Promise.all(
+        [...selected].map(fn =>
+          axios.delete(`/api/documents/${encodeURIComponent(fn)}`).catch(() => {}),
+        ),
+      )
+      await fetchDocs()
+    } finally {
+      setBulkDeleting(false)
+      exitSelectMode()
     }
   }
 
@@ -548,9 +620,58 @@ export default function Home() {
 
         {!loadingDocs && documents.length > 0 && (
           <section>
-            <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest mb-4">
-              {t('home.yourDocs', { n: documents.length })}
-            </h2>
+            <div className="flex items-center justify-between gap-3 mb-4 min-h-[34px]">
+              <h2 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">
+                {selectMode
+                  ? t('home.selectedCount', { n: selected.size })
+                  : t('home.yourDocs', { n: documents.length })}
+              </h2>
+
+              {!selectMode ? (
+                <button
+                  onClick={() => setSelectMode(true)}
+                  className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 transition-colors"
+                >
+                  {t('home.select')}
+                </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={toggleSelectAll}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 transition-colors"
+                  >
+                    {selected.size >= documents.length ? t('home.deselectAll') : t('home.selectAll')}
+                  </button>
+                  {confirmBulk ? (
+                    <button
+                      onClick={handleDeleteSelected}
+                      disabled={bulkDeleting}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50 disabled:pointer-events-none flex items-center gap-1.5"
+                    >
+                      {bulkDeleting && (
+                        <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin block" />
+                      )}
+                      {t('home.confirmDelete', { n: selected.size })}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmBulk(true)}
+                      disabled={selected.size === 0}
+                      className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                    >
+                      {t('home.deleteSelected', { n: selected.size })}
+                    </button>
+                  )}
+                  <button
+                    onClick={exitSelectMode}
+                    disabled={bulkDeleting}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 hover:text-slate-800 transition-colors disabled:opacity-40"
+                  >
+                    {t('home.cancelSelect')}
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {documents.map(doc => (
                 <DocumentCard
@@ -558,6 +679,9 @@ export default function Home() {
                   doc={doc}
                   onOpen={handleOpen}
                   onDelete={handleDelete}
+                  selectable={selectMode}
+                  selected={selected.has(doc.filename)}
+                  onToggleSelect={toggleSelected}
                 />
               ))}
             </div>
