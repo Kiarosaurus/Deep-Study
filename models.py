@@ -128,6 +128,12 @@ class FullBlock(BaseModel):
     # Symbol-marked footnotes cited by this paragraph (Phase 1). Distinct green
     # boxes in the reader; their text is fed into the explanation.
     footnotes: list[FootnoteAnnotation] = []
+    # Reading-order layout class assigned during column bucketing: 'one-column'
+    # (full-width / gutter-crossing), 'left-column', or 'right-column'. The
+    # continuation linker uses it as the authoritative predecessor firewall (a
+    # one-column block may precede a left-column block but never a right-column
+    # one). None = not yet classified. Frontend ignores it.
+    layout_type: str | None = None
 
 
 class UploadResponse(BaseModel):

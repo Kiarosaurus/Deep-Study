@@ -808,13 +808,46 @@ def _in_callout_region(bbox: BBox, regions: list[BBox] | None) -> bool:
 _FOOTNOTE_SEP_MIN_WIDTH_FRAC = 0.30   # line must span ≥30% of the page width
 _FOOTNOTE_SEP_MAX_HEIGHT = 3.0        # near-zero height → a rule, not a box
 _FOOTNOTE_SEP_BOTTOM_FRAC = 0.72      # only rules in the bottom ~28% qualify
+# A footnote separator is an ISOLATED rule. A table/figure grid in the bottom
+# region is ≥2 parallel rules stacked close together (top border, header rule,
+# bottom border). The width gate alone does NOT tell them apart — a single-column
+# APA table is ~0.40W, same as a column-wide footnote rule — so rules within this
+# vertical gap are treated as one grid cluster and excluded (a bottom-of-page
+# table whose rules would otherwise be mistaken for a separator, dropping the
+# table's Note and any body text beneath it).
+_FOOTNOTE_SEP_CLUSTER_GAP = 90.0
+
+
+def _isolated_separator_y(ys: list[float]) -> float | None:
+    """Topmost ISOLATED rule from a page's qualifying bottom-region rule tops.
+
+    A footnote separator is a single thin rule with whitespace around it; a
+    table/figure grid is ≥2 parallel rules stacked within
+    `_FOOTNOTE_SEP_CLUSTER_GAP`. Sort the rule tops, group consecutive ones by
+    that gap, discard every cluster of ≥2 (a grid), and return the smallest y
+    among the surviving lone rules — or None when every rule belongs to a grid
+    (a bottom-of-page table, NOT a footnote zone). This is what stops a table's
+    top border from being chosen as the separator and dropping its Note."""
+    if not ys:
+        return None
+    ys = sorted(ys)
+    clusters: list[list[float]] = [[ys[0]]]
+    for y in ys[1:]:
+        if y - clusters[-1][-1] <= _FOOTNOTE_SEP_CLUSTER_GAP:
+            clusters[-1].append(y)
+        else:
+            clusters.append([y])
+    lone = [c[0] for c in clusters if len(c) == 1]
+    return min(lone) if lone else None
 
 
 def _detect_footnote_separators(pdf_bytes: bytes) -> dict[int, float]:
-    """Per-page top-Y of the topmost horizontal separator rule in the page's
-    bottom region (text at/below it is a footnote). Best-effort; {} if PyMuPDF
-    is unavailable. The bottom-only + width gate keeps table/figure rules from
-    being mistaken for a footnote separator."""
+    """Per-page top-Y of the topmost ISOLATED horizontal separator rule in the
+    page's bottom region (text at/below it is a footnote). Best-effort; {} if
+    PyMuPDF is unavailable. The bottom-only + width gate narrows candidates; a
+    cluster filter (`_isolated_separator_y`) then rejects table/figure grids —
+    the width gate alone is NOT enough, since a single-column table rule is the
+    same width as a column-wide footnote rule."""
     try:
         import fitz
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -840,8 +873,9 @@ def _detect_footnote_separators(pdf_bytes: bytes) -> dict[int, float]:
                     and r.y0 >= _FOOTNOTE_SEP_BOTTOM_FRAC * H
                 ):
                     ys.append(round(r.y0, 2))
-            if ys:
-                seps[pno] = min(ys)  # topmost bottom-rule → everything below is footnote
+            sep_y = _isolated_separator_y(ys)
+            if sep_y is not None:
+                seps[pno] = sep_y  # topmost ISOLATED rule → everything below is footnote
     finally:
         doc.close()
     return seps
@@ -923,6 +957,66 @@ def _page_x_bounds_linear(blocks: list) -> dict[int, tuple[float, float]]:
     for b in blocks:
         _accumulate_bounds(bounds, b.page, b.bbox.x0, b.bbox.x1)
     return bounds
+
+
+def _assign_layout_types_linear(blocks: list) -> None:
+    """Tag each block in place with its reading-order layout class —
+    'one-column', 'left-column' or 'right-column' — from page geometry, using
+    the SAME rule as the column-bucketing barrier: a block that reaches both
+    content edges OR crosses the central gutter is one-column; otherwise it is
+    left/right by its horizontal centre vs the page mid. The continuation linker
+    then reads `layout_type` instead of re-deriving geometry, so its predecessor
+    firewall is deterministic and the class travels with the block."""
+    bounds = _page_x_bounds_linear(blocks)
+    for b in blocks:
+        bnds = bounds.get(b.page)
+        if not bnds:
+            b.layout_type = "one-column"
+            continue
+        min_x0, max_x1 = bnds
+        w = max_x1 - min_x0
+        if w <= 0:
+            b.layout_type = "one-column"
+            continue
+        mid = min_x0 + w / 2
+        gutter = 0.05 * w
+        bx = b.bbox
+        reaches_both = bx.x0 <= min_x0 + 0.12 * w and bx.x1 >= max_x1 - 0.12 * w
+        crosses = bx.x0 < mid - gutter and bx.x1 > mid + gutter
+        if reaches_both or crosses:
+            b.layout_type = "one-column"
+        else:
+            centre = (bx.x0 + bx.x1) / 2
+            b.layout_type = "left-column" if centre < mid else "right-column"
+
+
+def _layout_predecessor_ok(prev_type: str | None, cur_type: str | None) -> bool:
+    """Predecessor firewall for the reading-order continuation linker, keyed on
+    the column layout class (`layout_type`) set during bucketing. Encodes the
+    reading-order state machine that decides whether `prev`→`cur` is an
+    ADMISSIBLE continuation pairing, independent of geometry:
+
+      - a 'one-column' (full-width) block MAY precede a 'left-column' block — a
+        full-width intro/abstract flowing into the first column. Allowed.
+      - a 'one-column' block NEVER precedes a 'right-column' block: the wide
+        block sits above BOTH columns, so the right column's logical predecessor
+        is the last 'left-column' block, not the block physically above it.
+      - therefore a 'right-column' block may continue ONLY a 'left-column' (its
+        first line wraps up from the bottom of the left column — which, in the
+        column-major array order `[one-column] + [left-column] + [right-column]`,
+        is the immediately preceding block at i-1) or another 'right-column'
+        (mid-column downward flow). Any other predecessor is rejected.
+
+    Only 'right-column' carries a layout restriction here; 'one-column' and
+    'left-column' predecessors are deferred to the lexical + geometric gates.
+    Because `continuation` is consumed POSITIONALLY downstream (the frontend
+    chain builder joins a block to its array-predecessor), this check only needs
+    to REJECT the wide-block-above mis-link — the correct predecessor already
+    sits at i-1 under column-major order. Returns True when the pairing is
+    layout-consistent (the merge may proceed)."""
+    if cur_type == "right-column":
+        return prev_type in ("left-column", "right-column")
+    return True
 
 
 def _page_x_bounds_pages(pages: list) -> dict[int, tuple[float, float]]:
@@ -1345,6 +1439,50 @@ def _merge_figure_captions_pages(pages: list[PageBlocks]) -> None:
     _cont_log("=== pages figure-caption merge end ===")
 
 
+def _merge_table_notes_pages(pages: list[PageBlocks]) -> None:
+    """Per-page mirror of the linear table-note capture (`_capture_table_note`).
+
+    `_merge_figure_captions_pages` binds a table's "Table N" caption ABOVE the
+    image, but the APA "Note." sits BELOW it and is neither caption-like nor a
+    Source line, so it stays a floating ParagraphBlock (the canvas Reader shows
+    it as a paragraph next to — not part of — the table). For each table
+    ImageBlock find the closest note-like paragraph just beneath it (SPATIAL:
+    same page, within `_TABLE_NOTE_MAX_GAP`, h-overlapping the table's column —
+    reading_index adjacency is unreliable under column bucketing), append its
+    text to `caption_text`, extend `caption_bbox` and the image `bbox` to swallow
+    it, and drop the paragraph so the overlay no longer hovers it standalone.
+    Mirrors how the linear pipeline folds the note into the role='table'
+    FullBlock. Figures are untouched — role=='table' only."""
+    for p in pages:
+        consumed: set[int] = set()
+        for im in p.images:
+            if im.role != "table":
+                continue
+            best, best_gap = None, None
+            for b in p.blocks:
+                if id(b) in consumed or not b.boxes or not _is_table_note(b):
+                    continue
+                nb = _union_bbox(b.boxes)
+                gap = nb.y0 - im.bbox.y1
+                if gap < -_GEOM_TOL or gap > _TABLE_NOTE_MAX_GAP:
+                    continue
+                if _hoverlap(im.bbox, nb) < _TABLE_LOOKAHEAD_HOVERLAP:
+                    continue
+                if best_gap is None or gap < best_gap:
+                    best_gap, best = gap, b
+            if best is None:
+                continue
+            consumed.add(id(best))
+            nb = _union_bbox(best.boxes)
+            existing = [im.caption_text] if im.caption_text else []
+            im.caption_text = "\n".join(existing + [best.text])
+            im.caption_bbox = nb if im.caption_bbox is None else _union_bbox([im.caption_bbox, nb])
+            im.bbox = _union_bbox([im.bbox, nb])
+            _cont_log(f"  [p{p.page}] table-note merge: {_snip(best.text)!r}")
+        if consumed:
+            p.blocks = [b for b in p.blocks if id(b) not in consumed]
+
+
 def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
     """Post-pass over the per-page projection. Mirrors `_merge_continuations_
     linear`: walks every paragraph and checks against the most recent prior
@@ -1662,16 +1800,26 @@ _TABLE_LABEL_RE = re.compile(r"^\s*(?:table|tabla)\b", re.IGNORECASE)
 # Table footnote opener. Widened beyond "Note."/"Nota.": also "Notes."/"Notas.",
 # a trailing colon, and a leading "*" (asterisk note common in APA tables).
 # Table-note opener, anchored at the start. Covers "Note." / "Notes." /
-# "Note:" / "Notes:" / "Nota[s][.:]", a leading "*", and a single-letter
-# superscript marker followed by a separator ("a.", "a)") — but not "e.g." (no
-# space after) nor a sentence merely starting with "Note the …" (no separator).
+# "Note:" / "Notes:" / "Nota[s][.:]" plus the em/en-dash variant ("Note—"), a
+# leading "*", and a single-letter superscript marker followed by a separator
+# ("a.", "a)") — but not "e.g." (no space after) nor a sentence merely starting
+# with "Note the …" (no separator). The bare-letter form keeps its REQUIRED
+# separator so a normal lowercase paragraph ("a survey of …") is never mistaken
+# for a note.
 _TABLE_NOTE_RE = re.compile(
-    r"^\s*(?:(?:notes?|notas?)\s*[.:]|\*|[a-z][.)](?=\s))",
+    r"^\s*(?:"
+    r"(?:notes?|notas?)\s*[.:—–]"  # Note. Notes. Note: Nota. Note—
+    r"|\*"                                     # bare asterisk note marker
+    r"|[a-z][.)](?=\s)"                       # superscript-letter note: "a. " / "a) "
+    r")",
     re.IGNORECASE,
 )
 # Generous vertical gap (PDF pts) tolerated between the table's bottom edge and
-# its "Note." block — APA tables leave a lot of whitespace before the note.
-_TABLE_NOTE_MAX_GAP = 140.0
+# its "Note." block — APA tables leave a lot of whitespace before the note, and
+# Marker's table bbox sometimes stops short of the last printed row. The closest
+# qualifying note wins (best_gap), so a wide ceiling only extends reach; it never
+# steals a nearer note.
+_TABLE_NOTE_MAX_GAP = 200.0
 _TABLE_LABEL_ROLES = frozenset({"paragraph", "caption", "section_header"})
 # How aggressively the label looks DOWN for its table: scan up to this many
 # blocks past the label (title lines may sit between), accepting a generous
@@ -1698,15 +1846,77 @@ def _is_table_note(b: FullBlock) -> bool:
     )
 
 
+def _capture_table_note(
+    table: FullBlock,
+    linear: list[FullBlock],
+    consumed: set[int],
+    members: list[int],
+) -> int | None:
+    """SPATIAL note capture, independent of reading-order adjacency.
+
+    A wide table is a column-zone barrier, so the topological order pushes its
+    narrow "Note." into a column bucket BELOW the table — often with body
+    paragraphs wedged between them in the array (verified: 3 blocks in the APA
+    repro). Array index ±1 therefore can't find it. Instead scan every block for
+    the CLOSEST note-like one that sits just under the table's bottom edge,
+    shares its horizontal span (h-overlap, lenient because the note is narrower),
+    on the same page, within `_TABLE_NOTE_MAX_GAP`. Only notes that appear LATER
+    in the array than the table are eligible, so a captured note is never one
+    already emitted upstream (no duplication). Returns the winning index, or None
+    when the table has no note. `members`/`consumed` indices are skipped."""
+    note_idx, best_gap = None, None
+    table_pos = members[0] if members else -1
+    for k in range(table_pos + 1, len(linear)):
+        if k in consumed or k in members:
+            continue
+        nb = linear[k]
+        if not nb.bbox or nb.page != table.page:
+            continue
+        gap = nb.bbox.y0 - table.bbox.y1
+        if gap < -_GEOM_TOL or gap > _TABLE_NOTE_MAX_GAP:
+            continue
+        if _hoverlap(table.bbox, nb.bbox) < _TABLE_LOOKAHEAD_HOVERLAP:
+            continue
+        if not _is_table_note(nb):
+            continue
+        if best_gap is None or gap < best_gap:
+            best_gap, note_idx = gap, k
+    return note_idx
+
+
+def _stitch_table_members(
+    table: FullBlock, linear: list[FullBlock], table_idx: int, members: list[int]
+) -> None:
+    """Fold `members` (label / titles / table / note indices) into `table`
+    in place: newline-joined text, union bbox, descriptive parts appended to
+    `caption_text`, reading_index pinned to the first member."""
+    parts = [linear[m] for m in members]
+    table.text = "\n".join(p.text for p in parts if p.text)
+    table.bbox = _union_bbox([p.bbox for p in parts])
+    desc = [linear[m].text for m in members if m != table_idx and linear[m].text]
+    existing = [table.caption_text] if table.caption_text else []
+    table.caption_text = "\n".join(existing + desc)
+    table.reading_index = parts[0].reading_index
+
+
 def _merge_tables_linear(linear: list[FullBlock]) -> list[FullBlock]:
     """Fuse a scattered table — Label, [Title], Table, [Note] — into ONE
-    role='table' block. Anchored on the "Table N" label, look ahead at most two
-    positions for the actual `role='table'` block (an intervening text block is
-    the title); if the block right after the table starts with "Note."/"Nota.",
-    absorb it too. The members' `.text` are joined with newlines on the result;
-    the descriptive parts (label / title / note) also feed `caption_text` so the
-    table-explain flow uses them, and the bbox is recomputed as the union of all
-    members. Absorbed blocks are dropped so nothing is duplicated."""
+    role='table' block. Two entry points feed the same stitch:
+
+    - LABEL-ANCHORED: a "Table N" label looks ahead up to `_TABLE_LOOKAHEAD_MAX`
+      for the actual `role='table'` block (intervening short text = title).
+    - STANDALONE: any `role='table'` block the label scan did not consume —
+      tables without a separate "Table N" caption. This path exists because note
+      capture used to be gated behind label detection, orphaning the Note of
+      every label-less table.
+
+    Either way the table then claims its "Note." via SPATIAL proximity
+    (`_capture_table_note`), not array adjacency, since topological ordering
+    wedges body paragraphs between a wide table (column barrier) and its narrow
+    note. Members' `.text` join with newlines; the descriptive parts (label /
+    title / note) also feed `caption_text` for the table-explain flow; the bbox
+    is the union of all members. Absorbed blocks are dropped (deduped via
+    `consumed`) so nothing is duplicated."""
     consumed: set[int] = set()
     out: list[FullBlock] = []
     n = len(linear)
@@ -1740,43 +1950,35 @@ def _merge_tables_linear(linear: list[FullBlock]) -> list[FullBlock]:
             if table_idx is not None:
                 table = linear[table_idx]
                 members = [i] + title_idxs + [table_idx]  # label, [titles], table
-                # SPATIAL note capture (bypasses reading-order adjacency): a
-                # wide table is a column-zone barrier, so its narrow Note gets
-                # bucketed elsewhere in the array. Find the CLOSEST note-like
-                # block sitting just below the table's bottom edge, sharing its
-                # column (h-overlap), within a generous Y-gap — wherever it
-                # landed in the list.
-                note_idx, best_gap = None, None
-                for k, nb in enumerate(linear):
-                    if k in consumed or k in members or not nb.bbox:
-                        continue
-                    if nb.page != table.page:
-                        continue
-                    gap = nb.bbox.y0 - table.bbox.y1
-                    if gap < -_GEOM_TOL or gap > _TABLE_NOTE_MAX_GAP:
-                        continue
-                    if _hoverlap(table.bbox, nb.bbox) < _TABLE_LOOKAHEAD_HOVERLAP:
-                        continue
-                    if not _is_table_note(nb):
-                        continue
-                    if best_gap is None or gap < best_gap:
-                        best_gap, note_idx = gap, k
+                note_idx = _capture_table_note(table, linear, consumed, members)
                 if note_idx is not None:
                     members.append(note_idx)
-
-                parts = [linear[m] for m in members]
-                table.text = "\n".join(p.text for p in parts if p.text)
-                table.bbox = _union_bbox([p.bbox for p in parts])
-                desc = [linear[m].text for m in members if m != table_idx and linear[m].text]
-                existing = [table.caption_text] if table.caption_text else []
-                table.caption_text = "\n".join(existing + desc)
-                table.reading_index = parts[0].reading_index
+                _stitch_table_members(table, linear, table_idx, members)
                 _cont_log(
-                    f"  [{i}] table stitch {members}: {[_snip(p.text) for p in parts]}"
+                    f"  [{i}] table stitch {members}: "
+                    f"{[_snip(linear[m].text) for m in members]}"
                 )
                 consumed.update(members)
                 out.append(table)
                 continue
+        elif b.role == "table":
+            # Standalone table with NO detachable "Table N" caption (or whose
+            # label→table link above failed): the regression case. Without a
+            # label anchor the old code never reached note capture, so the APA
+            # "Note." below the table was orphaned (repro scenario B: 3 body
+            # paragraphs wedged between the table and its note). Run the SAME
+            # spatial capture here so a role='table' block always claims its
+            # note, label or not. Guardrail: figures are untouched — only
+            # role='table' triggers this, and _is_table_note vets the candidate.
+            members = [i]
+            note_idx = _capture_table_note(b, linear, consumed, members)
+            if note_idx is not None:
+                members.append(note_idx)
+                _stitch_table_members(b, linear, i, members)
+                _cont_log(f"  [{i}] table(no-label) note stitch {members}")
+                consumed.update(members)
+            out.append(b)
+            continue
         out.append(b)
     return out
 
@@ -2008,6 +2210,17 @@ def _merge_continuations_linear(linear_blocks: list[FullBlock]) -> None:
             )
         )
         fires = lexical and geom
+        # Layout-type predecessor firewall — the deterministic state machine set
+        # during bucketing (see `_layout_predecessor_ok`). Trusts the flattened
+        # column-major order `[one-column] + [left-column] + [right-column]`: the
+        # logical predecessor is the block at i-1, so this only has to reject the
+        # mis-link where a 'right-column' head would chain to a 'one-column' wide
+        # block above it instead of to the last 'left-column' block (which is
+        # already at i-1 for the normal two-column bottom→top wrap).
+        if prev_para is not None and not _layout_predecessor_ok(
+            prev_para.layout_type, b.layout_type
+        ):
+            fires = False
         # Table-note shield: a "Note."/"Notes."/"*" table footnote is standalone —
         # never a continuation in EITHER direction. Stops the paragraph merger
         # from hijacking a table's Note into the body text below it (or onto a
@@ -2549,6 +2762,7 @@ def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     has_abstract = _document_has_abstract(document)
     pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
     _merge_figure_captions_pages(pages)
+    _merge_table_notes_pages(pages)
     _merge_algorithms_pages(pages)
     _merge_continuations_pages(pages)
     return pages
@@ -2961,6 +3175,7 @@ def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> lis
     blocks = _merge_algorithms_linear(blocks)
     blocks = _drop_decorative_icons_linear(blocks)
     _reorder_authors_after_title(blocks)
+    _assign_layout_types_linear(blocks)
     _merge_continuations_linear(blocks)
     _clip_vertical_overlaps_linear(blocks)
     return blocks
@@ -2995,9 +3210,11 @@ def extract_both(
     linear = _drop_decorative_icons_linear(linear)
     _reorder_authors_after_title(linear)
     _merge_figure_captions_pages(pages)
+    _merge_table_notes_pages(pages)
     _merge_algorithms_pages(pages)
     _drop_decorative_icons_pages(pages)
     _merge_continuations_pages(pages)
+    _assign_layout_types_linear(linear)
     _merge_continuations_linear(linear)
     _clip_vertical_overlaps_linear(linear)
     return pages, linear
