@@ -1089,17 +1089,12 @@ def _continuation_geometry_ok(
             prev_bbox, prev_bounds, next_bbox, next_bounds
         )
 
-    # Strict column-awareness (same page): a LEFT-column block never continues
-    # into a RIGHT-column block (or vice versa). At the single→double column
-    # transition (full-width abstract → two columns) the old left→right wrap was
-    # producing cross-column mis-merges. Column kind comes from the page's
-    # content bounds; a full-width block (abstract / title) is 'full' and is not
-    # blocked here, so it still flows into the first body paragraph.
-    if prev_bounds is not None:
-        bounds = next_bounds if next_bounds is not None else prev_bounds
-        if {_column_kind(prev_bbox, prev_bounds), _column_kind(next_bbox, bounds)} == {"left", "right"}:
-            return False
-
+    # Same-page column flow is classified below: an x-overlapping pair is the
+    # same column (downward flow); a non-overlapping pair is the two-column wrap,
+    # allowed only when it is a genuine bottom-left → top-right jump (handled at
+    # the end). No blanket left↔right block here — that killed every legitimate
+    # two-column wrap (the bug this fixes); the upward-jump test below is what
+    # distinguishes a real wrap from a high-left → mid-right mis-merge.
     overlap = min(prev_bbox.x1, next_bbox.x1) - max(prev_bbox.x0, next_bbox.x0)
     narrower = min(prev_bbox.x1 - prev_bbox.x0, next_bbox.x1 - next_bbox.x0)
     same_column = narrower > 0 and overlap / narrower >= 0.5
@@ -1125,11 +1120,17 @@ def _continuation_geometry_ok(
                 gap -= hi - lo
         return gap <= _MAX_CONT_GAP_LINES * line_h
 
-    # Different column on the same page: strict column-awareness forbids the
-    # merge. The only legitimate cross-column flow is the cross-PAGE wrap handled
-    # above; a same-page left→right "wrap" was the source of the mixed-column
-    # mis-merges at the single→double column transition.
-    return False
+    # Different column on the same page: allow ONLY the genuine two-column wrap —
+    # prev is the bottom of the LEFT column and next is the top of the RIGHT
+    # column, so next sits to the RIGHT of prev AND jumps UPWARD (next.y0 ≲
+    # prev.y0). That is the normal reading order of a two-column page. A downward
+    # cross-column pair (high-left → mid-right) or a right→left step is a
+    # scrambled mis-merge and stays rejected. The width-incompatibility firewall
+    # above already blocks the full-width-abstract → narrow-column case, so this
+    # only ever fires between two same-width columns.
+    next_is_right = next_bbox.x0 >= prev_bbox.x0 + 0.5 * narrower
+    wraps_upward = next_bbox.y0 <= prev_bbox.y0 + _GEOM_TOL
+    return next_is_right and wraps_upward
 
 
 # Caption-like opener heuristic: catches paragraphs Marker missed tagging as
