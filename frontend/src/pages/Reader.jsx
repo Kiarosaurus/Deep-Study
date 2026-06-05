@@ -42,6 +42,15 @@ function unionOfBoxes(boxes) {
   }), { ...boxes[0] })
 }
 
+// Stable override key for a linear-only block (a FullBlock with no pages.blocks
+// row — title/author/section_header/list — so it has no per-page reading_index
+// to key on). Extraction is deterministic, so a rounded page+bbox origin is a
+// stable identity across reloads. Namespaced `L:` so it never collides with the
+// per-page `page:reading_index` keys.
+function paintKey(page, bbox) {
+  return `L:${page}:${Math.round(bbox.x0)}:${Math.round(bbox.y0)}`
+}
+
 // True when two bboxes overlap heavily (≥60% of the smaller area). Used to
 // bridge the per-page and linear projections: both walk the SAME Marker blocks,
 // so a paragraph's bbox is near-identical across them, and overlap matching
@@ -318,53 +327,64 @@ export default function Reader() {
 
   // Linear projection with page-level role overrides bridged in, so tracking
   // mode reflects edits made in paginated mode (mazo demote / pincel promote).
-  // Each override (keyed by page+per-page reading_index) is resolved to its
-  // page-block bbox, then matched to the linear block on the same page by bbox
-  // overlap.
-  //
-  // Hammer-ignored (soft-deleted) blocks are then dropped ENTIRELY from this
-  // array — it is the single source for the whole reading/tracking flow
-  // (LinearReader render, buildLinearReadingSequence nav, paragraphList /
-  // explanation panel, chainPayloads, linearEditInfo). They remain in
-  // `editedPages`, so the paginated overlay (PdfViewer.jsx:366) can still draw
-  // them gray and restore them while the hammer is armed. Restoring therefore
-  // happens from paginated mode, not tracking — by design, since they must be
-  // invisible in the reading flow.
-  const linearBlocks = useMemo(() => {
+  // Overrides match linear blocks by BBOX. Two flavours:
+  //   - identity-carrying (pincel on a linear-only block: title/author/
+  //     section_header/list with NO pages.blocks row) store their own
+  //     { bbox, page } and match directly;
+  //   - legacy per-page (keyed page:reading_index) resolve their bbox via
+  //     pages.blocks.
+  // This bbox-first bridge is what lets the pincel re-type ANY block — even ones
+  // the backend never emitted into pages.blocks — into the reading flow.
+  const projectedLinear = useMemo(() => {
     const raw = analysis?.linear_blocks ?? []
     const po = edits.pageOverrides
-    const hasOverrides = raw.length && po && Object.keys(po).length > 0
+    if (!raw.length || !po || Object.keys(po).length === 0) return raw
 
-    let projected = raw
-    if (hasOverrides) {
-      const overridesByPage = {}  // page -> [{ bbox, role, continuation }]
-      for (const [key, val] of Object.entries(po)) {
-        if (!val) continue
-        const [pageStr, riStr] = key.split(':')
-        const pg = Number(pageStr)
+    const overridesByPage = {}  // page -> [{ bbox, role, continuation }]
+    for (const [key, val] of Object.entries(po)) {
+      if (!val) continue
+      let bbox, pg
+      if (val.bbox) {
+        bbox = val.bbox; pg = val.page              // identity-carrying (linear-only)
+      } else {
+        const [pageStr, riStr] = key.split(':')     // legacy per-page override
+        pg = Number(pageStr)
         const ri = Number(riStr)
         const p = analysis?.pages?.find(x => x.page === pg)
         const b = p?.blocks?.find(bl => bl.reading_index === ri)
         if (!b?.boxes?.length) continue
-        ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role, continuation: val.continuation })
+        bbox = unionOfBoxes(b.boxes)
       }
-      if (Object.keys(overridesByPage).length > 0) {
-        projected = raw.map(L => {
-          const cands = overridesByPage[L.page]
-          if (!cands || !L.bbox) return L
-          const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
-          if (!m) return L
-          let nb = L
-          if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
-          if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
-          return nb
-        })
-      }
+      if (!bbox || pg == null) continue
+      ;(overridesByPage[pg] ||= []).push({ bbox, role: val.role, continuation: val.continuation })
     }
+    if (Object.keys(overridesByPage).length === 0) return raw
 
-    // Strict exclusion of soft-deleted blocks from the reading sequence.
-    return projected.filter(b => b.role !== 'ignored')
+    return raw.map(L => {
+      const cands = overridesByPage[L.page]
+      if (!cands || !L.bbox) return L
+      const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
+      if (!m) return L
+      let nb = L
+      if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
+      if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
+      return nb
+    })
   }, [analysis, edits])
+
+  // Reading/tracking sequence: hammer-ignored blocks are dropped ENTIRELY so
+  // they vanish from the LinearReader render, nav, paragraphList, chainPayloads
+  // and linearEditInfo. They survive in `projectedLinear` / `editedPages`, so the
+  // pincel and the paginated hammer overlay can still see + restore them.
+  const linearBlocks = useMemo(
+    () => projectedLinear.filter(b => b.role !== 'ignored'),
+    [projectedLinear],
+  )
+
+  // The pincel (promote) sees EVERYTHING — every role (incl. title/author/
+  // section_header/list the backend never made explainable) AND hammer-ignored
+  // blocks — so it can re-type any of them into the reading flow.
+  const paintableBlocks = projectedLinear
 
   // Persist edits to the backend (debounced) whenever they change post-hydration.
   useEffect(() => {
@@ -403,9 +423,13 @@ export default function Reader() {
   // recorded for undo/redo. `patch` e.g. { role: 'ignored' } or
   // { continuation: false } (scissors cutting a natural join).
   const setOverride = useCallback((target, patch) => {
-    const key = `${target.page}:${target.reading_index}`
+    // Linear-only targets (pincel on title/author/section_header/list) carry a
+    // geometric key + their bbox, so the projection bridge can match them with
+    // no pages.blocks row. Everything else keys on the per-page reading_index.
+    const key = target.linearKey || `${target.page}:${target.reading_index}`
+    const identity = target.linearKey ? { bbox: target.bbox, page: target.page } : {}
     const prev = edits.pageOverrides[key]
-    const next = { ...(prev || {}), ...patch }
+    const next = { ...(prev || {}), ...identity, ...patch }
     commitEdit({
       apply: () => setEdits(e => ({ ...e, pageOverrides: { ...e.pageOverrides, [key]: next } })),
       revert: () => setEdits(e => {
@@ -451,6 +475,7 @@ export default function Reader() {
       // Lazo: toggle the object in the selection buffer. Only explainables are
       // selectable — an image, or a non-demoted block (demote a block first via
       // pincel to make it explainable). The buffer is committed on confirm.
+      if (target.reading_index == null) return  // linear-only block: no merge identity
       const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
       if (!explainable) return
       addToMergeBuffer({
@@ -466,6 +491,7 @@ export default function Reader() {
       // Tijeras: cut a merge. A manual lazo group is removed; otherwise a
       // natural continuation join is blocked (this block stops continuing the
       // previous one). Baked figure/caption/panel merges are not cut here.
+      if (target.reading_index == null) return  // linear-only block: nothing to cut
       const memberKey = `${target.kind}:${target.page}:${target.reading_index}`
       const g = (edits.mergeGroups || []).find(grp =>
         grp.members.some(m => `${m.kind}:${m.page}:${m.reading_index}` === memberKey))
@@ -535,18 +561,42 @@ export default function Reader() {
     return linearBlocks.map(L => {
       const p = pageIdx[L.page]
       if (!p || !L.bbox) return null
-      let target = null
       const b = p.blocks.find(x => bboxOverlapHigh(x.bbox, L.bbox))
+      const im = b ? null : p.images.find(x => bboxOverlapHigh(x.bbox, L.bbox))
+      let target
       if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role, continuation: b.continuation }
-      else {
-        const im = p.images.find(x => bboxOverlapHigh(x.bbox, L.bbox))
-        if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role }
-      }
-      if (!target) return null
-      const key = `${target.kind}:${target.page}:${target.reading_index}`
+      else if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role }
+      // Linear-only block (title/author/section_header/list): no pages.blocks
+      // row, so hand the pincel a geometric override target to convert it.
+      else target = { kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role }
+      const key = target.linearKey || `${target.kind}:${target.page}:${target.reading_index}`
       return { target, membership: mergeMembership[key], selected: selectedKeys.has(key) }
     })
   }, [linearBlocks, editedPages, mergeMembership, selectedKeys])
+
+  // Pincel (promote) affordance for blocks the paginated overlay can't reach:
+  // linear-only roles (title/author/section_header/list) absent from
+  // pages.blocks/images. Blocks WITH a pages identity already get their blue box
+  // from ParagraphOverlay over editedPages, so they're excluded here (no double
+  // layer). Sourced from paintableBlocks so hammer-ignored ones stay paintable.
+  const linearOnlyPaintTargets = useMemo(() => {
+    if (!paintableBlocks.length) return []
+    const pageBoxes = {}
+    for (const p of (editedPages || [])) {
+      pageBoxes[p.page] = [
+        ...(p.blocks || []).filter(b => b.boxes?.length).map(b => unionOfBoxes(b.boxes)),
+        ...(p.images || []).filter(im => im.bbox).map(im => im.bbox),
+      ]
+    }
+    const out = []
+    for (const L of paintableBlocks) {
+      if (!L.bbox) continue
+      const boxes = pageBoxes[L.page] || []
+      if (boxes.some(bb => bboxOverlapHigh(bb, L.bbox))) continue  // has a pages identity
+      out.push({ kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role })
+    }
+    return out
+  }, [paintableBlocks, editedPages])
 
   // Chain payloads — one shared object per continuation chain.
   const chainPayloads = useMemo(
@@ -1369,6 +1419,7 @@ export default function Reader() {
           mergeMembership={mergeMembership}
           onExplainGroup={explainGroup}
           linearEditInfo={linearEditInfo}
+          paintBlocks={linearOnlyPaintTargets}
           onSearchSelect={onSearchSelect}
           searchResetKey={searchResetKey}
         />

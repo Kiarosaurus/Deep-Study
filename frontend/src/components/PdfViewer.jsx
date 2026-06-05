@@ -115,11 +115,11 @@ function groupExplainTitle(t, membership, fallback) {
     : t('viewer.explainParagraph')
 }
 
-function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
+function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
 
-  if ((!blocks && !images?.length) || !scale) return null
+  if ((!blocks && !images?.length && !paintTargets?.length) || !scale) return null
 
   const allItems = explanation?.sentence_explanations ?? []
 
@@ -377,6 +377,27 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
               />
             )}
 
+            {/* Pincel (promote) affordance: a blue box over EVERY paginated block
+                — incl. hammer-ignored — so the user sees what can be re-typed.
+                Click opens the TypePicker. The generic edit catcher below is
+                suppressed for promote, so this is the sole promote surface. */}
+            {isLeader && unionBox && armedTool === 'promote' && (
+              <button
+                type="button"
+                className="absolute pointer-events-auto rounded-sm"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  background: 'rgba(59,130,246,0.2)',
+                  border: '1px solid rgba(59,130,246,0.7)',
+                  cursor: 'crosshair',
+                }}
+                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text }, { x: e.clientX, y: e.clientY })}
+              />
+            )}
+
             {/* Lazo: indigo wash on objects selected for an in-progress merge
                 ONLY. A committed group leaves no residual box — its single ✦ is
                 the indicator. */}
@@ -398,7 +419,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 region routes clicks to the edit handler instead of the explain
                 flow. Excluded for 'search' — that tool has its own text-selection
                 layer and the catcher must not block the caret hit-test. */}
-            {isLeader && armedTool && armedTool !== 'search' && unionBox && (
+            {isLeader && armedTool && armedTool !== 'search' && armedTool !== 'promote' && unionBox && (
               <button
                 type="button"
                 className="absolute pointer-events-auto rounded-sm transition-colors"
@@ -448,7 +469,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                   : onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
                 onMouseEnter={() => onHoveredChainChange?.(chainKey)}
                 onMouseLeave={() => onHoveredChainChange?.(null)}
-                title={groupExplainTitle(t, blockMembership, t('viewer.explainParagraph'))}
+                title={groupExplainTitle(t, blockMembership, ['figure', 'table', 'algorithm'].includes(block.role) ? t('viewer.explainBlock', { role: block.role }) : t('viewer.explainParagraph'))}
               >
                 ✦
               </button>
@@ -512,7 +533,7 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
                 }}
               />
             )}
-            {armedTool && armedTool !== 'search' && (
+            {armedTool && armedTool !== 'search' && armedTool !== 'promote' && (
               <button
                 type="button"
                 className="absolute pointer-events-auto rounded-sm transition-colors"
@@ -569,6 +590,28 @@ function ParagraphOverlay({ blocks, images = [], page, flatBase = 0, chainPayloa
           </div>
         )
       })}
+
+      {/* Pincel (promote) affordance for linear-only blocks (title/author/
+          section_header/list) — no pages.blocks row, so they get their own blue
+          interactive box here, sourced from `paintTargets`. Each click re-types
+          the block via a geometric override (see Reader.setOverride). */}
+      {armedTool === 'promote' && scale && (paintTargets ?? []).map((pt, i) => (
+        <button
+          key={`paint-${pt.page}-${i}`}
+          type="button"
+          className="absolute pointer-events-auto rounded-sm"
+          style={{
+            left:   pt.bbox.x0 * scale,
+            top:    pt.bbox.y0 * scale,
+            width:  (pt.bbox.x1 - pt.bbox.x0) * scale,
+            height: (pt.bbox.y1 - pt.bbox.y0) * scale,
+            background: 'rgba(59,130,246,0.2)',
+            border: '1px solid rgba(59,130,246,0.7)',
+            cursor: 'crosshair',
+          }}
+          onClick={e => onBlockEdit?.(pt, { x: e.clientX, y: e.clientY })}
+        />
+      ))}
     </div>
   )
 }
@@ -760,6 +803,7 @@ function PdfPage({
   observer,
   blocks,
   images = [],
+  paintTargets = [],
   flatBase,
   chainPayloads,
   chainIds,
@@ -797,6 +841,7 @@ function PdfPage({
       <ParagraphOverlay
         blocks={blocks}
         images={images}
+        paintTargets={paintTargets}
         page={pageNumber}
         flatBase={flatBase}
         chainPayloads={chainPayloads}
@@ -921,7 +966,7 @@ function EditToolbar() {
   )
 }
 
-const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, linearEditInfo, onSearchSelect, searchResetKey }, ref) {
+const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linearBlocks = [], activeParagraph, currentExplanation, explanation, onHome, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, linearEditInfo, paintBlocks = [], onSearchSelect, searchResetKey }, ref) {
   const { t } = useUiLang()
   const { settings, isOpen: settingsOpen } = useSettings()
   const visibility = settings.visibility
@@ -1571,6 +1616,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   const imagesMap = pages
     ? Object.fromEntries(pages.map(p => [p.page, p.images ?? []]))
     : {}
+  // Per-page pincel paint targets (linear-only blocks — title/author/etc. — that
+  // have no pages.blocks row). Only consumed while the promote tool is armed.
+  const paintMap = {}
+  for (const pt of (paintBlocks ?? [])) (paintMap[pt.page] ||= []).push(pt)
   // Chain payloads computed over the flat across-pages block list so a
   // continuation chain that crosses a page boundary still resolves. Indexed
   // by flat block ref (page-cumulative position in pages[*].blocks) — same
@@ -1802,6 +1851,7 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 observer={observerInstance}
                 blocks={blocksMap[i + 1]}
                 images={imagesMap[i + 1]}
+                paintTargets={paintMap[i + 1]}
                 flatBase={flatBaseByPage[i + 1] ?? 0}
                 chainPayloads={paginatedChainPayloads}
                 chainIds={paginatedChainIds}

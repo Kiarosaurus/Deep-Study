@@ -796,9 +796,16 @@ const BlockCrop = memo(function BlockCrop({
             <button
               type="button"
               className="absolute rounded-sm transition-colors"
-              style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight, cursor: 'crosshair', background: 'transparent', border: '1px solid transparent' }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
+              style={{
+                left: 0, top: 0, width: canvasWidth, height: displayHeight, cursor: 'crosshair',
+                // Pincel (promote): persistent blue affordance so the user sees
+                // every paintable block — incl. linear-only title/author/etc.
+                // Other tools keep the transparent hover-reveal catcher.
+                background: armedTool === 'promote' ? 'rgba(59,130,246,0.2)' : 'transparent',
+                border: armedTool === 'promote' ? '1px solid rgba(59,130,246,0.7)' : '1px solid transparent',
+              }}
+              onMouseEnter={e => { if (armedTool !== 'promote') { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' } }}
+              onMouseLeave={e => { if (armedTool !== 'promote') { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' } }}
               onClick={e => onBlockEdit?.(editTarget, { x: e.clientX, y: e.clientY })}
             />
           )}
