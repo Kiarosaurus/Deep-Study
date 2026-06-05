@@ -982,6 +982,14 @@ export default function Reader() {
         })),
       })
       setExplanation(alignedCached)
+      // Cache hits resolve synchronously — there is NO pending fetch, so clear
+      // any loading flag a SUPERSEDED in-flight request left set (its finally is
+      // skipped by the isCurrent() guard). Otherwise `loadingExplain` stays true
+      // under a real explanation and every no-concept sentence spins the loading
+      // skeleton forever instead of showing "no technical concepts" — the bug
+      // that only a page reload cleared.
+      setLoadingExplain(false)
+      setRetryInfo(null)
       if (initialIndex === 'last') {
         setCurrentIndex(Math.max(0, (alignedCached.sentence_explanations?.length || 1) - 1))
       }

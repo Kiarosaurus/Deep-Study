@@ -110,7 +110,12 @@ function GlobalMapView({ globalMap }) {
   )
 }
 
-function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) {
+// `pending` is true only while the explanation is still the skeleton (data not
+// yet resolved). A placeholder sentence keys its loading state on THAT, not on
+// the global loadingExplain flag — once a real response is in, a no-concept
+// sentence is definitively concept-free and must show the message immediately,
+// even if the loading flag desynced.
+function ConceptosPanel({ items, currentIndex, onIndexChange, pending }) {
   const { t } = useUiLang()
   const { settings } = useSettings()
   const total = items.length
@@ -149,7 +154,7 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, loadingExplain }) 
         </blockquote>
 
         {isPlaceholder ? (
-          loadingExplain ? (
+          pending ? (
             <div className="flex flex-col gap-2 animate-pulse">
               <div className="h-2.5 bg-slate-200 rounded w-1/3" />
               <div className="h-2.5 bg-slate-100 rounded w-full" />
@@ -279,6 +284,9 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
 
   const items   = explanation.sentence_explanations ?? []
   const context = explanation.paragraph_context ?? null
+  // Skeleton = the pre-fetch placeholder seed; once a real response replaces it,
+  // every remaining placeholder is a confirmed no-concept sentence.
+  const isSkeleton = explanation.__skeleton === true
 
   return (
     <div className="flex flex-col gap-4">
@@ -307,7 +315,7 @@ function ExplainView({ explanation, error, currentIndex, onIndexChange, explainM
       </div>
 
       {explainMode === 'conceptos'
-        ? <ConceptosPanel items={items} currentIndex={currentIndex} onIndexChange={onIndexChange} loadingExplain={loadingExplain} />
+        ? <ConceptosPanel items={items} currentIndex={currentIndex} onIndexChange={onIndexChange} pending={isSkeleton} />
         : <ContextoPanel context={context} loadingExplain={loadingExplain} />
       }
     </div>
