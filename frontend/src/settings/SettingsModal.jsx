@@ -19,6 +19,7 @@ const L = {
     visibility: 'Visibilidad de la interfaz', layout: 'Posición de los paneles',
     panelWidth: 'Ancho del panel (% de pantalla)',
     panelRight: 'Derecha', panelLeft: 'Izquierda', close: 'Cerrar', space: 'Espacio', unset: 'Vacío',
+    cat: { nav: 'Navegación Global', read: 'Modo Lectura y Scroll', explain: 'Panel de Explicación', tools: 'Herramientas e Interacción' },
     actions: {
       focusToggle: 'Cambiar foco (Canvas/Panel)', scrollUp: 'Scroll arriba', scrollDown: 'Scroll abajo',
       conceptPrev: 'Concepto anterior', conceptNext: 'Concepto siguiente', centerHighlight: 'Centrar resaltado',
@@ -54,6 +55,7 @@ const L = {
     visibility: 'Interface visibility', layout: 'Panel position',
     panelWidth: 'Panel width (% of screen)',
     panelRight: 'Right', panelLeft: 'Left', close: 'Close', space: 'Space', unset: 'Unset',
+    cat: { nav: 'Global Navigation', read: 'Reading & Scroll', explain: 'Explanation Panel', tools: 'Tools & Interaction' },
     actions: {
       focusToggle: 'Toggle focus (Canvas/Panel)', scrollUp: 'Scroll up', scrollDown: 'Scroll down',
       conceptPrev: 'Previous concept', conceptNext: 'Next concept', centerHighlight: 'Center highlight',
@@ -82,6 +84,23 @@ function useLabels() {
   const { lang } = useUiLang()
   return L[lang] || L.en
 }
+
+// Shortcut rows grouped into thematic sections — visual grouping only. Capture
+// and commit still key off the flat ACTIONS list, so this never touches state.
+// Anything in ACTIONS not listed here is appended to the last group, so a newly
+// added action can never silently vanish from this (the only) rebinding UI.
+const SHORTCUT_GROUP_DEFS = [
+  { key: 'nav',     items: ['focusToggle', 'toggleSidebar', 'globalTab', 'centerHighlight', 'index', 'home', 'settings'] },
+  { key: 'read',    items: ['trackingToggle', 'scrollUp', 'scrollDown', 'themeToggle'] },
+  { key: 'explain', items: ['explainTab', 'conceptPrev', 'conceptNext'] },
+  { key: 'tools',   items: ['undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge', 'searchConcept'] },
+]
+const GROUPED_IDS = new Set(SHORTCUT_GROUP_DEFS.flatMap(g => g.items))
+const SHORTCUT_GROUPS = SHORTCUT_GROUP_DEFS.map((g, i) =>
+  i === SHORTCUT_GROUP_DEFS.length - 1
+    ? { ...g, items: [...g.items, ...ACTIONS.filter(a => !GROUPED_IDS.has(a))] }
+    : g,
+)
 
 const clone = (o) => JSON.parse(JSON.stringify(o))
 
@@ -279,15 +298,22 @@ function SettingsPanel() {
                 <span className={`text-center transition-colors ${hand === 'left' ? 'text-indigo-600' : ''}`}>{labels.left}</span>
                 <span className={`text-center transition-colors ${hand === 'right' ? 'text-indigo-600' : ''}`}>{labels.right}</span>
               </div>
-              {ACTIONS.map(a => (
-                <div key={a} className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2 px-4 py-2 border-b border-slate-100 last:border-0">
-                  <span className="text-[13px] text-slate-600">{labels.actions[a]}</span>
-                  <div className="flex justify-center">
-                    <ShortcutInput value={draft.left[a]} disabled={hand !== 'left'} invalid={hand === 'left' && !draft.left[a]} labels={labels} onCapture={(k) => capture(a, k)} />
+              {SHORTCUT_GROUPS.map((group, gi) => (
+                <div key={group.key}>
+                  <div className={`px-4 py-1.5 bg-indigo-600/20 text-[11px] font-bold text-[#9ca3af] uppercase tracking-wider ${gi > 0 ? 'border-t border-[#2a2947]' : ''}`}>
+                    {labels.cat[group.key]}
                   </div>
-                  <div className="flex justify-center">
-                    <ShortcutInput value={draft.right[a]} disabled={hand !== 'right'} invalid={hand === 'right' && !draft.right[a]} labels={labels} onCapture={(k) => capture(a, k)} />
-                  </div>
+                  {group.items.map(a => (
+                    <div key={a} className="grid grid-cols-[1fr_5rem_5rem] items-center gap-2 px-4 py-2 border-b border-slate-100 last:border-0">
+                      <span className="text-[13px] text-slate-600">{labels.actions[a]}</span>
+                      <div className="flex justify-center">
+                        <ShortcutInput value={draft.left[a]} disabled={hand !== 'left'} invalid={hand === 'left' && !draft.left[a]} labels={labels} onCapture={(k) => capture(a, k)} />
+                      </div>
+                      <div className="flex justify-center">
+                        <ShortcutInput value={draft.right[a]} disabled={hand !== 'right'} invalid={hand === 'right' && !draft.right[a]} labels={labels} onCapture={(k) => capture(a, k)} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
@@ -317,7 +343,7 @@ function SettingsPanel() {
 
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <p className="text-[12px] font-semibold text-slate-500">{labels.layout}</p>
-              <Segmented value={settings.panelSide} onChange={setPanelSide} options={[{ value: 'right', label: labels.panelRight }, { value: 'left', label: labels.panelLeft }]} />
+              <Segmented value={settings.panelSide} onChange={setPanelSide} options={[{ value: 'left', label: labels.panelLeft }, { value: 'right', label: labels.panelRight }]} />
             </div>
 
             <div className="flex flex-col gap-2">
