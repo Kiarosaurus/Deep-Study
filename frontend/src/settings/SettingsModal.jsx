@@ -17,7 +17,7 @@ const L = {
     requiredBody: 'No es posible dejar estos campos vacíos:',
     hiddenTitle: 'Botón oculto', hiddenBody: 'Aún puedes usar estas acciones con el teclado:',
     visibility: 'Visibilidad de la interfaz', layout: 'Posición de los paneles',
-    panelWidth: 'Ancho del panel (% de pantalla)',
+    panelWidth: 'Ancho del panel (% de pantalla)', uiLang: 'Idioma de la interfaz',
     panelRight: 'Derecha', panelLeft: 'Izquierda', close: 'Cerrar', space: 'Espacio', unset: 'Vacío',
     cat: { nav: 'Navegación Global', read: 'Modo Lectura y Scroll', explain: 'Panel de Explicación', tools: 'Herramientas e Interacción' },
     actions: {
@@ -53,7 +53,7 @@ const L = {
     requiredBody: 'These fields cannot be left empty:',
     hiddenTitle: 'Button hidden', hiddenBody: 'You can still use these actions from the keyboard:',
     visibility: 'Interface visibility', layout: 'Panel position',
-    panelWidth: 'Panel width (% of screen)',
+    panelWidth: 'Panel width (% of screen)', uiLang: 'Interface language',
     panelRight: 'Right', panelLeft: 'Left', close: 'Close', space: 'Space', unset: 'Unset',
     cat: { nav: 'Global Navigation', read: 'Reading & Scroll', explain: 'Explanation Panel', tools: 'Tools & Interaction' },
     actions: {
@@ -223,6 +223,7 @@ export default function SettingsModal() {
 function SettingsPanel() {
   const { settings, setHandMode, setPanelSide, setPanelWidthPct, setVisibility, commitShortcuts, closeSettings } = useSettings()
   const labels = useLabels()
+  const { lang, setLang, langs } = useUiLang()
   const hand = settings.handMode
 
   // Draft of BOTH hands' maps; only the active hand is editable. Committed
@@ -331,6 +332,13 @@ function SettingsPanel() {
           {/* ── Display & Layout ───────────────────────────────────────── */}
           <section className="flex flex-col gap-4">
             <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">{labels.display}</h3>
+
+            {/* Interface language — drives UI chrome only (not the explanation
+                language, which is fixed per-document at upload). */}
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-[12px] font-semibold text-slate-500">{labels.uiLang}</p>
+              <Segmented value={lang} onChange={setLang} options={langs.map(l => ({ value: l.code, label: l.label }))} />
+            </div>
 
             <div>
               <p className="text-[12px] font-semibold text-slate-500 mb-1">{labels.visibility}</p>
