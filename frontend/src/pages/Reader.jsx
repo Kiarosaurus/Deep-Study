@@ -108,6 +108,15 @@ function editKeyOf(t) {
   return t.linearKey ? `block:${t.linearKey}` : `${t.kind}:${t.page}:${t.reading_index}`
 }
 
+// Override-STORAGE key for a target (distinct from the lazo editKeyOf): linear-
+// only / injected blocks key on their geometric linearKey, images on `img:`,
+// native blocks on `page:reading_index`. Where setOverride / cutObject persist.
+function overrideKeyOf(t) {
+  if (t.linearKey) return t.linearKey
+  if (t.kind === 'image') return `img:${t.page}:${t.reading_index}`
+  return `${t.page}:${t.reading_index}`
+}
+
 // Floating block-type picker for the pincel tool. Anchored at the click point,
 // clamped to the viewport. Two visual columns: explainable roles vs metadata
 // (`ignored` flagged red as the destructive choice). Backdrop closes it.
@@ -413,7 +422,7 @@ export default function Reader() {
         bbox = unionOfBoxes(b.boxes)
       }
       if (!bbox || pg == null) continue
-      ;(overridesByPage[pg] ||= []).push({ bbox, role: val.role, continuation: val.continuation })
+      ;(overridesByPage[pg] ||= []).push({ bbox, role: val.role, continuation: val.continuation, allowMerges: val.allowMerges })
     }
     if (Object.keys(overridesByPage).length === 0) return raw
 
@@ -425,6 +434,7 @@ export default function Reader() {
       let nb = L
       if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
       if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
+      if (m.allowMerges === false) nb = { ...nb, allowMerges: false }
       return nb
     })
   }, [analysis, edits])
@@ -507,7 +517,7 @@ export default function Reader() {
     const po = edits.pageOverrides
     const hasOverrides = po && Object.keys(po).length > 0
 
-    // 1. Role/continuation overrides over the native pages.blocks.
+    // 1. Role / continuation / allowMerges overrides over the native pages.blocks.
     const based = !hasOverrides ? pages : pages.map(p => {
       let blocksChanged = false
       const blocks = p.blocks.map(b => {
@@ -516,18 +526,25 @@ export default function Reader() {
         let nb = b
         if (o.role && o.role !== b.role) nb = { ...nb, role: o.role }
         if (o.continuation === false && b.continuation) nb = { ...nb, continuation: false }
+        // Scissors pin: allowMerges:false bars this block from the continuation
+        // linker (see buildContinuationPayloads) and from lazo eligibility.
+        if (o.allowMerges === false && b.allowMerges !== false) nb = { ...nb, allowMerges: false }
         if (nb !== b) blocksChanged = true
         return nb
       })
       // Images carry a role too (figure/table/algorithm). The pincel re-types
       // them via an `img:` override so figures/tables are first-class pincel
-      // targets. Keyed apart from blocks to avoid reading_index collisions.
+      // targets; the scissors pin lands here too. Keyed apart from blocks to
+      // avoid reading_index collisions.
       let imagesChanged = false
       const images = (p.images || []).map(im => {
         const o = po[`img:${p.page}:${im.reading_index}`]
-        if (!o || !o.role || o.role === im.role) return im
-        imagesChanged = true
-        return { ...im, role: o.role }
+        if (!o) return im
+        let nim = im
+        if (o.role && o.role !== im.role) nim = { ...nim, role: o.role }
+        if (o.allowMerges === false && im.allowMerges !== false) nim = { ...nim, allowMerges: false }
+        if (nim !== im) imagesChanged = true
+        return nim
       })
       if (!blocksChanged && !imagesChanged) return p
       return {
@@ -570,6 +587,7 @@ export default function Reader() {
         boxes: [L.bbox],
         role: L.role,
         continuation: false,
+        allowMerges: L.allowMerges,
         text: L.text ?? '',
         sentences: L.sentences ?? [],
         footnotes: L.footnotes ?? [],
@@ -589,11 +607,7 @@ export default function Reader() {
     // Linear-only targets (pincel on title/author/section_header/list) carry a
     // geometric key + their bbox, so the projection bridge can match them with
     // no pages.blocks row. Everything else keys on the per-page reading_index.
-    const key = target.linearKey
-      ? target.linearKey
-      : target.kind === 'image'
-        ? `img:${target.page}:${target.reading_index}`
-        : `${target.page}:${target.reading_index}`
+    const key = overrideKeyOf(target)
     // linearKey and image overrides both stash their bbox so the linear
     // projection can bridge the new role into tracking by geometry (`img:` keys
     // don't parse as page:reading_index, so projectedLinear matches them by bbox).
@@ -612,13 +626,38 @@ export default function Reader() {
     })
   }, [edits, commitEdit])
 
-  // Cut a manual lazo merge group (scissors), recorded for undo/redo.
-  const removeMergeGroup = useCallback((groupId) => {
-    const g = (edits.mergeGroups || []).find(x => x.id === groupId)
-    if (!g) return
+  // Scissors: isolate ONE object, atomically (one commit → one undo).
+  //   1. Pull it out of any lazo group — the rest stay merged when ≥2 remain,
+  //      else the group dissolves.
+  //   2. Pin it `allowMerges:false` (+ drop its own continuation) so the
+  //      AUTOMATIC continuation linker can never re-absorb it and it's barred
+  //      from new lazo merges. Returns EXACTLY the clicked object, standalone.
+  const cutObject = useCallback((target) => {
+    const key = overrideKeyOf(target)
+    const memberKey = editKeyOf(target)
+    const prevGroups = edits.mergeGroups || []
+    const g = prevGroups.find(grp => grp.members.some(m => editKeyOf(m) === memberKey))
+    let nextGroups = prevGroups
+    if (g) {
+      const remaining = g.members.filter(m => editKeyOf(m) !== memberKey)
+      nextGroups = prevGroups.filter(x => x.id !== g.id)
+      if (remaining.length >= 2) nextGroups = [...nextGroups, { ...g, members: remaining }]
+    }
+    const identity = (target.linearKey || target.kind === 'image') ? { bbox: target.bbox, page: target.page } : {}
+    const prevOv = edits.pageOverrides[key]
+    const patch = target.continuation ? { allowMerges: false, continuation: false } : { allowMerges: false }
+    const nextOv = { ...(prevOv || {}), ...identity, ...patch }
     commitEdit({
-      apply: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(x => x.id !== groupId) })),
-      revert: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(x => x.id !== groupId), g] })),
+      apply: () => setEdits(e => ({
+        ...e,
+        mergeGroups: nextGroups,
+        pageOverrides: { ...e.pageOverrides, [key]: nextOv },
+      })),
+      revert: () => setEdits(e => {
+        const po = { ...e.pageOverrides }
+        if (prevOv) po[key] = prevOv; else delete po[key]
+        return { ...e, mergeGroups: prevGroups, pageOverrides: po }
+      }),
     })
   }, [edits, commitEdit])
 
@@ -647,9 +686,10 @@ export default function Reader() {
     if (armedTool === 'merge') {
       // Lazo: toggle the object in the selection buffer. Only explainables are
       // selectable — an image, or a non-ignored block (including injected
-      // linear-only ones, keyed geometrically). The buffer commits on confirm.
+      // linear-only ones, keyed geometrically). A scissors-pinned object
+      // (allowMerges:false) refuses lazo until un-pinned. Commits on confirm.
       const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
-      if (!explainable) return
+      if (!explainable || target.allowMerges === false) return
       addToMergeBuffer({
         key: editKeyOf(target),
         kind: target.kind,
@@ -662,20 +702,19 @@ export default function Reader() {
       return
     }
     if (armedTool === 'split') {
-      // Tijeras: cut a merge. A manual lazo group is removed; otherwise a
-      // natural continuation join is blocked (this block stops continuing the
-      // previous one). Baked figure/caption/panel merges are not cut here.
-      const memberKey = editKeyOf(target)
-      const g = (edits.mergeGroups || []).find(grp =>
-        grp.members.some(m => editKeyOf(m) === memberKey))
-      if (g) { removeMergeGroup(g.id); disarm(); return }
-      if (target.kind === 'block' && target.continuation) {
-        setOverride(target, { continuation: false })
-        disarm()  // effective cut → auto-disarm
+      // Tijeras (toggle): a pinned object un-pins (re-enables automatic + manual
+      // merges); any other object is cut out of its merge and pinned standalone.
+      // Baked figure/caption/panel merges are backend-level, not cut here.
+      if (target.kind !== 'block' && target.kind !== 'image') return
+      if (target.allowMerges === false) {
+        setOverride(target, { allowMerges: null, continuation: null })  // un-pin
+      } else {
+        cutObject(target)
       }
+      disarm()  // effective use → auto-disarm
       return
     }
-  }, [armedTool, setOverride, addToMergeBuffer, edits, removeMergeGroup, disarm])
+  }, [armedTool, setOverride, addToMergeBuffer, cutObject, disarm])
 
   // Keys currently selected for an in-progress lazo merge (persistent tint).
   const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
@@ -729,9 +768,9 @@ export default function Reader() {
         // matching its own geometric (linearKey) target, not this synthetic row
         // (which has no reading_index), so tracking-mode edits still resolve.
         blocks: (p.blocks || []).filter(b => b.boxes?.length && !b.linearInjected)
-          .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role, continuation: b.continuation })),
+          .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role, continuation: b.continuation, allowMerges: b.allowMerges })),
         images: (p.images || []).filter(im => im.bbox)
-          .map(im => ({ bbox: im.bbox, reading_index: im.reading_index, role: im.role || 'figure' })),
+          .map(im => ({ bbox: im.bbox, reading_index: im.reading_index, role: im.role || 'figure', allowMerges: im.allowMerges })),
       }
     }
     return linearBlocks.map(L => {
@@ -740,11 +779,11 @@ export default function Reader() {
       const b = p.blocks.find(x => bboxOverlapHigh(x.bbox, L.bbox))
       const im = b ? null : p.images.find(x => bboxOverlapHigh(x.bbox, L.bbox))
       let target
-      if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role, continuation: b.continuation }
-      else if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role }
+      if (b) target = { kind: 'block', page: L.page, reading_index: b.reading_index, role: b.role, continuation: b.continuation, allowMerges: b.allowMerges }
+      else if (im) target = { kind: 'image', page: L.page, reading_index: im.reading_index, role: im.role, allowMerges: im.allowMerges }
       // Linear-only block (title/author/section_header/list): no pages.blocks
       // row, so hand the pincel a geometric override target to convert it.
-      else target = { kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role }
+      else target = { kind: 'block', linearKey: paintKey(L.page, L.bbox), page: L.page, bbox: L.bbox, role: L.role, allowMerges: L.allowMerges }
       const key = editKeyOf(target)
       return { target, membership: mergeMembership[key], selected: selectedKeys.has(key) }
     })

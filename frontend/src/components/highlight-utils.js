@@ -324,6 +324,16 @@ export function buildContinuationPayloads(blocks) {
     // they never chain, and crucially never split a real cross-page chain that
     // brackets them in the flat list.
     if (b?.role !== 'paragraph' || b.linearInjected) continue
+    // Scissors pin (allowMerges === false): emit this paragraph ALONE — close any
+    // open chain, open a solo chain, and close it again so the NEXT block can't
+    // continue INTO it either. This is what makes a cut return exactly the
+    // clicked object, with neighbours re-chaining around the gap.
+    if (b.allowMerges === false) {
+      flush()
+      chainIdxs = [i]
+      flush()
+      continue
+    }
     if (b.continuation && chainIdxs.length > 0) {
       chainIdxs.push(i)
     } else {
