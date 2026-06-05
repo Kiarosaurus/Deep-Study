@@ -394,7 +394,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   border: '1px solid rgba(59,130,246,0.7)',
                   cursor: 'crosshair',
                 }}
-                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text }, { x: e.clientX, y: e.clientY })}
+                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text, linearKey: block.linearKey, bbox: unionBox }, { x: e.clientX, y: e.clientY })}
               />
             )}
 
@@ -434,7 +434,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'transparent' }}
-                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text }, { x: e.clientX, y: e.clientY })}
+                onClick={e => onBlockEdit?.({ kind: 'block', page, reading_index: block.reading_index, role: block.role, continuation: block.continuation, text: payload.text, linearKey: block.linearKey, bbox: unionBox }, { x: e.clientX, y: e.clientY })}
               />
             )}
 

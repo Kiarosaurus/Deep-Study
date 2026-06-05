@@ -319,7 +319,11 @@ export function buildContinuationPayloads(blocks) {
 
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i]
-    if (b?.role !== 'paragraph') continue
+    // Injected linear-only paragraphs (paginated projection only) are appended
+    // out of reading order, so let them stay TRANSPARENT like non-paragraphs —
+    // they never chain, and crucially never split a real cross-page chain that
+    // brackets them in the flat list.
+    if (b?.role !== 'paragraph' || b.linearInjected) continue
     if (b.continuation && chainIdxs.length > 0) {
       chainIdxs.push(i)
     } else {

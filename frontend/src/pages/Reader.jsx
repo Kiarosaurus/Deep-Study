@@ -65,6 +65,15 @@ function bboxOverlapHigh(a, b) {
   return inter / Math.max(1e-6, Math.min(areaA, areaB)) >= 0.6
 }
 
+// A block earns its ✦ (in BOTH modes) only when its role makes it explainable.
+// Mirrors LinearReader's `isInteractive` so a linear-only block injected into the
+// paginated projection shows the SAME affordance it already shows in tracking —
+// never one without the other. A pincel-promoted title/author reaches this once
+// it's a sentence-bearing paragraph.
+function isExplainableParagraph(b) {
+  return b.role === 'paragraph' && (b.sentences?.length ?? 0) > 0
+}
+
 // Floating block-type picker for the pincel tool. Anchored at the click point,
 // clamped to the viewport. Backdrop closes it without choosing.
 function TypePicker({ x, y, onPick, onClose, t }) {
@@ -398,13 +407,19 @@ export default function Reader() {
     return () => clearTimeout(id)
   }, [edits, decoded])
 
-  // Apply page-level role overrides onto the extracted pages projection.
+  // Apply page-level role overrides onto the extracted pages projection, THEN
+  // inject promoted linear-only paragraphs (title/author/section_header the
+  // pincel re-typed to 'paragraph') that have no pages.blocks row — so the
+  // paginated overlay draws their ✦ through the SAME block path as a native
+  // paragraph. Without this they're explainable only in tracking mode.
   const editedPages = useMemo(() => {
     const pages = analysis?.pages
     if (!pages) return pages
     const po = edits.pageOverrides
-    if (!po || Object.keys(po).length === 0) return pages
-    return pages.map(p => {
+    const hasOverrides = po && Object.keys(po).length > 0
+
+    // 1. Role/continuation overrides over the native pages.blocks.
+    const based = !hasOverrides ? pages : pages.map(p => {
       let changed = false
       const blocks = p.blocks.map(b => {
         const o = po[`${p.page}:${b.reading_index}`]
@@ -417,7 +432,48 @@ export default function Reader() {
       })
       return changed ? { ...p, blocks } : p
     })
-  }, [analysis, edits])
+
+    // 2. Inject linear-only paragraphs that carry no pages identity. The bbox-
+    //    overlap test is the SAME predicate linearOnlyPaintTargets uses, so a
+    //    block is EITHER a native-overlay block OR an injected one — never both,
+    //    so its ✦ (and its blue pincel box) is drawn exactly once.
+    const nativeBoxesByPage = {}
+    for (const p of based) {
+      nativeBoxesByPage[p.page] = [
+        ...(p.blocks || []).filter(b => b.boxes?.length).map(b => unionOfBoxes(b.boxes)),
+        ...(p.images || []).filter(im => im.bbox).map(im => im.bbox),
+      ]
+    }
+    const injectByPage = {}
+    for (const L of linearBlocks) {
+      if (!L.bbox || !isExplainableParagraph(L)) continue
+      const boxes = nativeBoxesByPage[L.page]
+      if (!boxes || boxes.some(bb => bboxOverlapHigh(bb, L.bbox))) continue  // has a pages identity
+      ;(injectByPage[L.page] ||= []).push({
+        // Synthetic pages.blocks row. `boxes:[bbox]` feeds the overlay's union →
+        // bottom-right ✦ anchor (reads bbox.x1 / bbox.y1 = x_max / y_max). The
+        // tags keep it safe downstream: `linearInjected` makes the continuation
+        // builder treat it as transparent (it never chains) and keeps
+        // linearEditInfo on the original's geometric key; `linearKey` IS that
+        // key, so editing the injected block re-routes to the same override.
+        reading_index: undefined,
+        linearInjected: true,
+        linearKey: paintKey(L.page, L.bbox),
+        bbox: L.bbox,
+        boxes: [L.bbox],
+        role: L.role,
+        continuation: false,
+        text: L.text ?? '',
+        sentences: L.sentences ?? [],
+        footnotes: L.footnotes ?? [],
+      })
+    }
+    if (Object.keys(injectByPage).length === 0) return based
+    return based.map(p => {
+      const extra = injectByPage[p.page]
+      return extra ? { ...p, blocks: [...p.blocks, ...extra] } : p
+    })
+  }, [analysis, edits, linearBlocks])
 
   // Merge a patch into one block's override (role and/or continuation),
   // recorded for undo/redo. `patch` e.g. { role: 'ignored' } or
@@ -552,7 +608,10 @@ export default function Reader() {
     const pageIdx = {}
     for (const p of (editedPages || [])) {
       pageIdx[p.page] = {
-        blocks: (p.blocks || []).filter(b => b.boxes?.length)
+        // Skip injected linear-only blocks: their linear original must keep
+        // matching its own geometric (linearKey) target, not this synthetic row
+        // (which has no reading_index), so tracking-mode edits still resolve.
+        blocks: (p.blocks || []).filter(b => b.boxes?.length && !b.linearInjected)
           .map(b => ({ bbox: unionOfBoxes(b.boxes), reading_index: b.reading_index, role: b.role, continuation: b.continuation })),
         images: (p.images || []).filter(im => im.bbox)
           .map(im => ({ bbox: im.bbox, reading_index: im.reading_index, role: im.role || 'figure' })),
