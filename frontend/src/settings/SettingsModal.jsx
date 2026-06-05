@@ -21,15 +21,15 @@ const L = {
     panelRight: 'Derecha', panelLeft: 'Izquierda', close: 'Cerrar', space: 'Espacio', unset: 'Vacío',
     cat: { nav: 'Navegación Global', read: 'Modo Lectura y Scroll', explain: 'Panel de Explicación', tools: 'Herramientas e Interacción' },
     actions: {
-      focusToggle: 'Cambiar foco (Canvas/Panel)', scrollUp: 'Scroll arriba', scrollDown: 'Scroll abajo',
       conceptPrev: 'Concepto anterior', conceptNext: 'Concepto siguiente', centerHighlight: 'Centrar resaltado',
-      explainTab: 'Explicación', globalTab: 'Mapa Global', toggleSidebar: 'Ocultar/mostrar panel',
       trackingToggle: 'Activar/salir seguimiento', themeToggle: 'Cambiar modo de visualización',
       index: 'Abrir índice', home: 'Ir a inicio', settings: 'Abrir configuración',
       undo: 'Deshacer último cambio', redo: 'Rehacer último cambio',
       demoteBlock: 'Mazo: párrafo → no-párrafo', promoteBlock: 'Pincel: no-párrafo → párrafo',
       mergeBlocks: 'Lazo: fusión manual', splitMerge: 'Tijeras: cortar fusión',
       searchConcept: 'Lupa: extraer concepto de selección',
+      explainTab: 'Explicación', globalTab: 'Mapa Global', toggleSidebar: 'Ocultar/mostrar panel',
+      focusToggle: 'Cambiar foco (Canvas/Panel)', scrollUp: 'Scroll arriba', scrollDown: 'Scroll abajo',
     },
     vis: {
       tracking: 'Botón de tracking', viewType: 'Navegación de vista (parada / contador)',
@@ -90,9 +90,9 @@ function useLabels() {
 // Anything in ACTIONS not listed here is appended to the last group, so a newly
 // added action can never silently vanish from this (the only) rebinding UI.
 const SHORTCUT_GROUP_DEFS = [
-  { key: 'nav',     items: ['focusToggle', 'toggleSidebar', 'globalTab', 'centerHighlight', 'index', 'home', 'settings'] },
-  { key: 'read',    items: ['trackingToggle', 'scrollUp', 'scrollDown', 'themeToggle'] },
-  { key: 'explain', items: ['explainTab', 'conceptPrev', 'conceptNext'] },
+  { key: 'nav',     items: ['focusToggle', 'globalTab', 'centerHighlight', 'home', 'settings', 'index', 'toggleSidebar'] },
+  { key: 'read',    items: ['trackingToggle', 'themeToggle', 'scrollUp', 'scrollDown'] },
+  { key: 'explain', items: ['conceptPrev', 'conceptNext', 'explainTab'] },
   { key: 'tools',   items: ['undo', 'redo', 'demoteBlock', 'promoteBlock', 'mergeBlocks', 'splitMerge', 'searchConcept'] },
 ]
 const GROUPED_IDS = new Set(SHORTCUT_GROUP_DEFS.flatMap(g => g.items))

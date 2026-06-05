@@ -54,7 +54,7 @@ export const DEFAULT_SHORTCUTS = {
     focusToggle: 'o', scrollUp: 'i', scrollDown: 'k',
     conceptPrev: 'j', conceptNext: 'l', centerHighlight: ' ',
     explainTab: 'u', globalTab: 'p', toggleSidebar: '4',
-    trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
+    trackingToggle: '5', themeToggle: '6', index: '3', home: '1', settings: '2',
     // Edit toolbar — right-hand cluster keys.
     undo: 'h', redo: 'n', demoteBlock: 'm', promoteBlock: 'y', mergeBlocks: ';', splitMerge: 'b', searchConcept: 'g',
   },
@@ -62,7 +62,7 @@ export const DEFAULT_SHORTCUTS = {
     focusToggle: 'q', scrollUp: 'w', scrollDown: 's',
     conceptPrev: 'a', conceptNext: 'd', centerHighlight: ' ',
     explainTab: 'e', globalTab: 'r', toggleSidebar: '4',
-    trackingToggle: '3', themeToggle: '5', index: '6', home: '1', settings: '2',
+    trackingToggle: '5', themeToggle: '6', index: '3', home: '1', settings: '2',
     // Edit toolbar — left-hand cluster keys (F/G/Z/X/C/V).
     undo: 'f', redo: 'g', demoteBlock: 'z', promoteBlock: 'x', mergeBlocks: 'c', splitMerge: 'v', searchConcept: 'b',
   },
