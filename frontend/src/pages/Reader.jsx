@@ -320,34 +320,50 @@ export default function Reader() {
   // mode reflects edits made in paginated mode (mazo demote / pincel promote).
   // Each override (keyed by page+per-page reading_index) is resolved to its
   // page-block bbox, then matched to the linear block on the same page by bbox
-  // overlap. A demoted ('ignored') block drops out of the reading sequence and
-  // loses its ✦ automatically (role is no longer 'paragraph').
+  // overlap.
+  //
+  // Hammer-ignored (soft-deleted) blocks are then dropped ENTIRELY from this
+  // array — it is the single source for the whole reading/tracking flow
+  // (LinearReader render, buildLinearReadingSequence nav, paragraphList /
+  // explanation panel, chainPayloads, linearEditInfo). They remain in
+  // `editedPages`, so the paginated overlay (PdfViewer.jsx:366) can still draw
+  // them gray and restore them while the hammer is armed. Restoring therefore
+  // happens from paginated mode, not tracking — by design, since they must be
+  // invisible in the reading flow.
   const linearBlocks = useMemo(() => {
     const raw = analysis?.linear_blocks ?? []
     const po = edits.pageOverrides
-    if (!raw.length || !po || Object.keys(po).length === 0) return raw
-    const overridesByPage = {}  // page -> [{ bbox, role, continuation }]
-    for (const [key, val] of Object.entries(po)) {
-      if (!val) continue
-      const [pageStr, riStr] = key.split(':')
-      const pg = Number(pageStr)
-      const ri = Number(riStr)
-      const p = analysis?.pages?.find(x => x.page === pg)
-      const b = p?.blocks?.find(bl => bl.reading_index === ri)
-      if (!b?.boxes?.length) continue
-      ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role, continuation: val.continuation })
+    const hasOverrides = raw.length && po && Object.keys(po).length > 0
+
+    let projected = raw
+    if (hasOverrides) {
+      const overridesByPage = {}  // page -> [{ bbox, role, continuation }]
+      for (const [key, val] of Object.entries(po)) {
+        if (!val) continue
+        const [pageStr, riStr] = key.split(':')
+        const pg = Number(pageStr)
+        const ri = Number(riStr)
+        const p = analysis?.pages?.find(x => x.page === pg)
+        const b = p?.blocks?.find(bl => bl.reading_index === ri)
+        if (!b?.boxes?.length) continue
+        ;(overridesByPage[pg] ||= []).push({ bbox: unionOfBoxes(b.boxes), role: val.role, continuation: val.continuation })
+      }
+      if (Object.keys(overridesByPage).length > 0) {
+        projected = raw.map(L => {
+          const cands = overridesByPage[L.page]
+          if (!cands || !L.bbox) return L
+          const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
+          if (!m) return L
+          let nb = L
+          if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
+          if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
+          return nb
+        })
+      }
     }
-    if (Object.keys(overridesByPage).length === 0) return raw
-    return raw.map(L => {
-      const cands = overridesByPage[L.page]
-      if (!cands || !L.bbox) return L
-      const m = cands.find(c => bboxOverlapHigh(c.bbox, L.bbox))
-      if (!m) return L
-      let nb = L
-      if (m.role && m.role !== L.role) nb = { ...nb, role: m.role }
-      if (m.continuation === false && L.continuation) nb = { ...nb, continuation: false }
-      return nb
-    })
+
+    // Strict exclusion of soft-deleted blocks from the reading sequence.
+    return projected.filter(b => b.role !== 'ignored')
   }, [analysis, edits])
 
   // Persist edits to the backend (debounced) whenever they change post-hydration.
