@@ -641,11 +641,14 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
 
 // ── Search/lupa selection layer ──────────────────────────────────────────────
 // Char-level text selection over the pdfjs text layer, constrained to ONE
-// paragraph. Two clicks set the start/end carets (resolved via the native
-// caret-from-point API over the transparent glyph spans); endpoint knobs drag
-// to adjust. The second click and every drag are clamped to the bbox of the
-// paragraph locked on the first click, so a selection can never cross blocks.
-// Reports { text, paragraphSentences } upward; the parent owns Accept/Cancel.
+// paragraph. Mouse/pen press-drag sets the carets live; touch uses two taps
+// (start, then end) since a finger drag is reserved for scrolling. Either way
+// circle knobs (44px touch targets) on each end drag to expand/compress, and
+// carets resolve via the native caret-from-point API over the transparent
+// glyph spans. On arm it also adopts a pre-existing single-paragraph browser
+// selection. Every caret is clamped to the bbox of the paragraph locked on
+// press, so a selection can never cross blocks. Reports
+// { text, paragraphSentences } upward; the parent owns Accept/Cancel.
 function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
   const ref = useRef(null)
   const paraRef = useRef(null)                 // { box, sentences } locked on click 1
@@ -713,23 +716,49 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
     }
   }
 
-  const onClick = (e) => {
+  // Order two carets into document order (start precedes end).
+  const orderCarets = (a, b) => {
+    if (!a || !b) return [a, b]
+    const cmp = a.node.compareDocumentPosition(b.node)
+    const aFirst = (cmp & Node.DOCUMENT_POSITION_FOLLOWING)
+      || (a.node === b.node && a.offset <= b.offset)
+    return aFirst ? [a, b] : [b, a]
+  }
+
+  // Place the start caret (locking the paragraph) from a client point.
+  const placeStart = (clientX, clientY, lr) => {
+    const para = paragraphAt(clientX - lr.left, clientY - lr.top)
+    if (!para) return false
+    const c = caretAt(clientX, clientY)
+    if (!c) return false
+    paraRef.current = para
+    setStartC(c)
+    setEndC(null)
+    return true
+  }
+
+  // Touch can't disambiguate a drag (scroll vs select), so touch uses TWO TAPS
+  // (tap start, tap end, tap again to restart) + draggable knobs to refine.
+  // Mouse/pen press-drag live and a press without a drag leaves the first caret.
+  const onPointerDown = (e) => {
+    if (e.button != null && e.button > 0) return
     const lr = ref.current?.getBoundingClientRect(); if (!lr) return
-    if (!startC) {
-      const para = paragraphAt(e.clientX - lr.left, e.clientY - lr.top)
-      if (!para) return
-      paraRef.current = para
-      const c = caretAt(e.clientX, e.clientY)
-      if (c) setStartC(c)
-    } else if (!endC) {
-      const { cx, cy } = clampClient(e.clientX, e.clientY)
-      const c = caretAt(cx, cy)
-      if (c) setEndC(c)
-    } else {
-      const para = paragraphAt(e.clientX - lr.left, e.clientY - lr.top)
-      setEndC(null)
-      paraRef.current = para
-      setStartC(para ? caretAt(e.clientX, e.clientY) : null)
+
+    if (e.pointerType === 'touch') {
+      if (startC && !endC) {
+        const { cx, cy } = clampClient(e.clientX, e.clientY)
+        const c = caretAt(cx, cy)
+        if (c) setEndC(c)        // tap 2 → close the selection
+      } else {
+        placeStart(e.clientX, e.clientY, lr)  // tap 1 (or restart after a full pair)
+      }
+      return
+    }
+
+    // Mouse / pen: live drag-select.
+    if (placeStart(e.clientX, e.clientY, lr)) {
+      e.preventDefault()         // suppress native drag-select under the overlay
+      setDragging('new')
     }
   }
 
@@ -749,14 +778,41 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
     } catch { return null }
   }
 
+  // On arm, adopt an existing browser text selection as the initial carets —
+  // but only if it is crawlable (both endpoints are real text nodes over the
+  // glyph layer) and confined to a SINGLE paragraph of this page. Otherwise
+  // leave it untouched so the user selects manually.
+  useEffect(() => {
+    const selObj = window.getSelection?.()
+    if (!selObj || selObj.rangeCount === 0 || selObj.isCollapsed) return
+    const range = selObj.getRangeAt(0)
+    const sNode = range.startContainer
+    const eNode = range.endContainer
+    if (sNode.nodeType !== Node.TEXT_NODE || eNode.nodeType !== Node.TEXT_NODE) return
+    const lr = ref.current?.getBoundingClientRect(); if (!lr) return
+    const rcs = range.getClientRects(); if (!rcs.length) return
+    const first = rcs[0]
+    const last = rcs[rcs.length - 1]
+    const startPara = paragraphAt(first.left + 1 - lr.left, first.top + first.height / 2 - lr.top)
+    const endPara = paragraphAt(last.right - 1 - lr.left, last.top + last.height / 2 - lr.top)
+    if (!startPara || !endPara) return                       // outside paragraphs / other page
+    const b1 = startPara.box, b2 = endPara.box
+    if (b1.x0 !== b2.x0 || b1.y0 !== b2.y0 || b1.x1 !== b2.x1 || b1.y1 !== b2.y1) return  // >1 paragraph
+    paraRef.current = startPara
+    setStartC({ node: sNode, offset: range.startOffset })
+    setEndC({ node: eNode, offset: range.endOffset })
+    try { selObj.removeAllRanges() } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Measure the selection after carets change and report it up. DOM reads
   // (getClientRects) belong here, post-render — never during render.
   useEffect(() => {
     const el = ref.current
     if (!el) return
     const lr = el.getBoundingClientRect()
-    // Click 1 placed, click 2 pending → render a blinking caret at the start
-    // endpoint so the user sees where the first click landed (no text yet).
+    // Caret placed, second end pending → render the marker (stem + knob) at the
+    // start so the user sees where the press landed (no selection text yet).
     if (startC && !endC) {
       try {
         const cr = document.createRange()
@@ -792,46 +848,78 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
       const { cx, cy } = clampClient(ev.clientX, ev.clientY)
       const c = caretAt(cx, cy)
       if (!c) return
-      if (dragging === 'start') setStartC(c); else setEndC(c)
+      // 'new' (fresh drag-select) and a lone start caret both grow by moving the
+      // END; 'start'/'end' on a real selection move their own caret.
+      if (dragging === 'start' && endC) setStartC(c)
+      else setEndC(c)
     }
     const onUp = () => setDragging(null)
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp, { once: true })
+    // Mobile gestures (scroll takeover, system gesture, incoming call) fire
+    // pointercancel instead of pointerup — end the drag so it never wedges.
+    window.addEventListener('pointercancel', onUp, { once: true })
     return () => {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
     }
+    // endC is read as captured when the drag starts — re-binding on every endC
+    // change would tear down the in-progress pointer listeners mid-drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragging])
 
   const rects = view.rects
   const firstRect = rects[0]
   const lastRect = rects[rects.length - 1]
-  const knob = (rect, side) => rect && (
+  // edge = which side of the rect to anchor on ('left'|'right'); dragSide = the
+  // caret ('start'|'end') this handle actually moves. A 44px transparent pad
+  // (touch-target minimum) carries the 14px visual circle at its centre, and
+  // its touch-action:none commits the gesture to dragging (no page scroll).
+  const HIT = 44
+  const knob = (rect, edge, dragSide) => rect && (
     <div
-      onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(side) }}
-      className="absolute z-30 rounded-full"
+      onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(dragSide) }}
+      className="absolute z-30 flex items-center justify-center"
       style={{
-        left: (side === 'start' ? rect.left : rect.left + rect.width) - 6,
-        top: rect.top - 6,
-        width: 12, height: 12,
-        background: 'rgb(79,70,229)', border: '2px solid white',
-        boxShadow: '0 1px 4px rgba(0,0,0,0.3)', cursor: 'ew-resize', pointerEvents: 'auto',
+        left: (edge === 'left' ? rect.left : rect.left + rect.width) - HIT / 2,
+        top: rect.top + rect.height / 2 - HIT / 2,
+        width: HIT, height: HIT,
+        cursor: 'ew-resize', pointerEvents: 'auto', touchAction: 'none',
       }}
-    />
+    >
+      <div className="rounded-full" style={{
+        width: 14, height: 14,
+        background: 'rgb(79,70,229)', border: '2px solid white',
+        boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+      }} />
+    </div>
   )
 
+  // First caret placed, second pending: a thin stem + the same circle knob the
+  // finished selection uses, so the marker reads as a draggable handle.
+  const caretRect = view.caret && { left: view.caret.left, top: view.caret.top, width: 0, height: view.caret.height }
+
+  // Map each visual knob to the caret it actually controls: rects are in
+  // document order, so the first knob drives whichever of startC/endC comes
+  // first. This keeps the left handle moving the left caret without ever
+  // reordering state.
+  const firstSide = (startC && endC && orderCarets(startC, endC)[0] === endC) ? 'end' : 'start'
+  const lastSide = firstSide === 'start' ? 'end' : 'start'
+
   return (
-    <div ref={ref} className="absolute inset-0 z-20" style={{ cursor: 'text' }} onClick={onClick}>
+    <div ref={ref} className="absolute inset-0 z-20" style={{ cursor: 'text', touchAction: dragging ? 'none' : 'auto' }} onPointerDown={onPointerDown}>
       {rects.map((r, i) => (
         <div key={i} className="absolute pointer-events-none rounded-sm"
           style={{ left: r.left, top: r.top, width: r.width, height: r.height, background: 'rgba(99,102,241,0.30)' }} />
       ))}
-      {view.caret && (
-        <div className="absolute pointer-events-none animate-pulse rounded-sm"
-          style={{ left: view.caret.left, top: view.caret.top, width: 2, height: view.caret.height, background: 'rgb(79,70,229)' }} />
+      {caretRect && (
+        <div className="absolute pointer-events-none rounded-sm"
+          style={{ left: caretRect.left, top: caretRect.top, width: 2, height: caretRect.height, background: 'rgb(79,70,229)' }} />
       )}
-      {knob(firstRect, 'start')}
-      {knob(lastRect, 'end')}
+      {caretRect && knob(caretRect, 'left', 'start')}
+      {knob(firstRect, 'left', firstSide)}
+      {knob(lastRect, 'right', lastSide)}
     </div>
   )
 }
@@ -998,7 +1086,11 @@ function EditToolbar() {
             </button>
           )}
           {v.searchConcept && (
-            <button type="button" onClick={() => armTool('search')} title={t('viewer.toolSearch')} aria-label={t('viewer.toolSearch')}
+            // Arm on pointerdown with preventDefault so any existing text
+            // selection survives the press (mouse AND touch) — the layer then
+            // auto-fills both carets from it. preventDefault also stops the tap
+            // from collapsing the native selection before the layer mounts.
+            <button type="button" onPointerDown={e => { e.preventDefault(); armTool('search') }} title={t('viewer.toolSearch')} aria-label={t('viewer.toolSearch')}
               className={`${baseBtn} ${armedTool === 'search' ? activeBtn : idleBtn}`}>
               {svg(<><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>)}
             </button>
