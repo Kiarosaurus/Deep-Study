@@ -206,7 +206,9 @@ export default function LinearReader({
         if (b?.role === 'equation' && b.continuation) {
           // Bridged display equation: a chain member, so render it IN PLACE
           // between the paragraphs above and below it (don't defer like a float).
-          emit(i)
+          // isChainTail:false → it never carries its own ✦ (the chain's ✦ lives
+          // on the tail paragraph); it still highlights as part of the chain.
+          emit(i, { isChainTail: false })
         } else if (b?.role === 'callout' && chainHeadResultIdx >= 0 && nextParaIsContinuation(i)) {
           // A callout that interrupted a merged paragraph → hoist it above the
           // chain head (out of band; doesn't touch lastRenderedIdx).
@@ -516,8 +518,13 @@ const BlockCrop = memo(function BlockCrop({
 
   const isRendered    = visible && !!srcCanvas
   const isFigure      = block.role === 'figure' || block.role === 'table' || block.role === 'algorithm'
+  // Equations count as interactive when they carry a sentence (the recognized
+  // LaTeX): a display equation bridged into a paragraph is part of that
+  // paragraph's merged sentence, so it must light up WITH the paragraph when
+  // that sentence is active. Its own ✦ is suppressed (isChainTail=false from
+  // renderList) — the chain's ✦ stays on the tail paragraph.
   const isInteractive = isRendered && (
-    (block.role === 'paragraph' && (block.sentences?.length ?? 0) > 0)
+    ((block.role === 'paragraph' || block.role === 'equation') && (block.sentences?.length ?? 0) > 0)
     || isFigure
   )
   // Cross-page chain merged text/sentences (cache-key + Gemini payload). For
