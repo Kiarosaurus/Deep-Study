@@ -327,8 +327,10 @@ export default function Reader() {
   const explainRequestId  = useRef(0)
   const explanationRef    = useRef(null)
   const currentIndexRef   = useRef(0)
+  const activeParagraphRef = useRef(null)
   useEffect(() => { explanationRef.current  = explanation  }, [explanation])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
+  useEffect(() => { activeParagraphRef.current = activeParagraph }, [activeParagraph])
 
   // Mirror focus + panel state into refs so the once-bound global W/S scroll
   // listener and the Z handler read fresh values without rebinding.
@@ -1228,15 +1230,158 @@ export default function Reader() {
       const concepts = Array.isArray(data?.concepts) ? data.concepts : []
       if (concepts.length) {
         extracted = true
-        setIsSidebarOpen(true)
-        setTab('explain')
-        const item = { sentence_indices: [], quote: sel.text, concepts, forced: true }
-        setExplanation(prev => {
-          const base = (prev && Array.isArray(prev.sentence_explanations))
-            ? prev
-            : { sentence_explanations: [], paragraph_context: { section_role: '', narrative: '' } }
-          return { ...base, sentence_explanations: [...base.sentence_explanations, item] }
-        })
+
+        // Read the latest explanation from the ref (NOT inside a setState
+        // updater — updaters run deferred, so reads there would be stale).
+        const base = (explanationRef.current && Array.isArray(explanationRef.current.sentence_explanations))
+          ? explanationRef.current
+          : { sentence_explanations: [], paragraph_context: { section_role: '', narrative: '' } }
+        const items = base.sentence_explanations
+
+        // Locate which sentence card(s) the highlighted fragment covers by
+        // matching it against the real (non-forced) sentence quotes joined in
+        // reading order. A fragment spanning >1 sentence forces those cards to
+        // merge into one (union of indices + concatenated quote) so the concept
+        // lands on the matching sentence — the search tool can't cross
+        // paragraphs, so this sentence-level merge is the in-paragraph analogue.
+        const norm = s => (s || '').replace(/\s+/g, ' ').trim()
+        const sentRefs = items
+          .map((it, idx) => ({ it, idx }))
+          .filter(x => !x.it.forced && typeof x.it.quote === 'string' && x.it.quote.trim())
+        const target = norm(sel.text)
+
+        const coveredRefs = []
+        if (sentRefs.length && target) {
+          const pieces = sentRefs.map(x => norm(x.it.quote))
+          const pos = pieces.join(' ').indexOf(target)
+          if (pos >= 0) {
+            const end = pos + target.length
+            let cursor = 0
+            pieces.forEach((p, k) => {
+              const segStart = cursor
+              const segEnd = cursor + p.length
+              if (pos < segEnd && end > segStart) coveredRefs.push(sentRefs[k])
+              cursor = segEnd + 1   // +1 for the joining space
+            })
+          }
+        }
+
+        // Append the new concepts, skipping terms already present on the card.
+        const withNewConcepts = (existing) => {
+          const seen = new Set((existing || []).map(c => (c.term || '').toLowerCase()))
+          return [...(existing || []), ...concepts.filter(c => !seen.has((c.term || '').toLowerCase()))]
+        }
+
+        // Order a card's concepts by where each term first appears in its quote,
+        // so the carousel reads sequentially (terms not found go last, stable).
+        const orderByAppearance = (list, quoteText) => {
+          const hay = norm(quoteText).toLowerCase()
+          return list
+            .map((c, i) => {
+              const at = hay.indexOf(norm(c.term).toLowerCase())
+              return { c, i, key: at < 0 ? Number.MAX_SAFE_INTEGER : at }
+            })
+            .sort((a, b) => a.key - b.key || a.i - b.i)
+            .map(x => x.c)
+        }
+
+        let newItems
+        let newIndex
+        if (coveredRefs.length === 0) {
+          // No match (e.g. selection outside the explained paragraph): fall back
+          // to a standalone trailing card so the concept is never lost.
+          const item = { sentence_indices: [], quote: sel.text, concepts, forced: true }
+          newItems = [...items, item]
+          newIndex = items.length
+        } else if (coveredRefs.length === 1) {
+          const tIdx = coveredRefs[0].idx
+          const tgt = items[tIdx]
+          const updated = { ...tgt, concepts: orderByAppearance(withNewConcepts(tgt.concepts), tgt.quote), is_placeholder: false }
+          newItems = items.map((it, idx) => (idx === tIdx ? updated : it))
+          newIndex = tIdx
+        } else {
+          // Fragment spans multiple sentences → merge those cards into one.
+          const idxSet = new Set(coveredRefs.map(r => r.idx))
+          const firstPos = Math.min(...coveredRefs.map(r => r.idx))
+          const union = [...new Set(coveredRefs.flatMap(r =>
+            Array.isArray(r.it.sentence_indices) ? r.it.sentence_indices : []))]
+            .sort((a, b) => a - b)
+          // Dedup the covered cards' existing concepts before adding the new ones.
+          const seenE = new Set()
+          const dedupExisting = coveredRefs.flatMap(r => r.it.concepts || []).filter(c => {
+            const k = (c.term || '').toLowerCase()
+            return seenE.has(k) ? false : (seenE.add(k), true)
+          })
+          const mergedQuote = coveredRefs.map(r => r.it.quote).join(' ')
+          const merged = {
+            sentence_indices: union,
+            quote: mergedQuote,
+            concepts: orderByAppearance(withNewConcepts(dedupExisting), mergedQuote),
+            is_placeholder: false,
+          }
+          newItems = []
+          items.forEach((it, idx) => {
+            if (idx === firstPos) newItems.push(merged)
+            else if (!idxSet.has(idx)) newItems.push(it)
+          })
+          newIndex = newItems.indexOf(merged)
+        }
+
+        const nextExplanation = { ...base, sentence_explanations: newItems }
+
+        // Snapshot everything the operation touches so undo/redo can replay it
+        // as one { apply, revert } step on the shared edit history.
+        const para = activeParagraph
+        const cacheOpts = para?.text
+          ? { role: para.role, page: para.page, bbox: para.bbox, language: analysis.language || 'es' }
+          : null
+        const cacheKey = cacheOpts ? explainCacheKey(decoded, para.text, cacheOpts) : null
+        const prevExplanation = explanationRef.current
+        const prevIndex = currentIndexRef.current
+        const prevUi = { ...uiStateRef.current }
+        const prevMem = cacheKey ? explanationsCache.current.get(cacheKey) : undefined
+        const prevLocal = cacheKey ? (() => { try { return localStorage.getItem(cacheKey) } catch { return null } })() : null
+
+        // Cache writes are unconditional (so the concept persists wherever the
+        // user is); the in-view explanation only changes while the SAME
+        // paragraph is active, so replaying after navigating never clobbers an
+        // unrelated paragraph's carousel.
+        const sameParaActive = () => !para?.text || activeParagraphRef.current?.text === para.text
+
+        const applySearch = () => {
+          if (cacheKey) {
+            explanationsCache.current.set(cacheKey, nextExplanation)
+            try { localStorage.setItem(cacheKey, JSON.stringify(nextExplanation)) } catch { /* full/unavailable */ }
+          }
+          if (sameParaActive()) {
+            setIsSidebarOpen(true)
+            setTab('explain')
+            setExplanation(nextExplanation)
+            setExplainMode('conceptos')
+            setCurrentIndex(newIndex)
+            uiStateRef.current = { tab: 'explain', explainMode: 'conceptos' }
+          }
+        }
+
+        const revertSearch = () => {
+          if (cacheKey) {
+            if (prevMem === undefined) explanationsCache.current.delete(cacheKey)
+            else explanationsCache.current.set(cacheKey, prevMem)
+            try {
+              if (prevLocal == null) localStorage.removeItem(cacheKey)
+              else localStorage.setItem(cacheKey, prevLocal)
+            } catch { /* ignore */ }
+          }
+          if (sameParaActive()) {
+            setExplanation(prevExplanation)
+            setCurrentIndex(prevIndex)
+            setTab(prevUi.tab)
+            setExplainMode(prevUi.explainMode)
+            uiStateRef.current = { ...prevUi }
+          }
+        }
+
+        commitEdit({ apply: applySearch, revert: revertSearch, label: 'search-concept' })
       }
     } catch { /* surfaced as no-op; the selection is cleared regardless */ }
     finally {
@@ -1246,7 +1391,7 @@ export default function Reader() {
       // armed so the user can retry without re-selecting it.
       if (extracted) disarm()
     }
-  }, [searchSel, analysis, searchBusy, clearSearchSelection, disarm])
+  }, [searchSel, analysis, searchBusy, activeParagraph, decoded, commitEdit, clearSearchSelection, disarm])
 
   // Keyboard navigation: m = global, , = explain-contexto, . = explain-conceptos, arrows to navigate explanations
   useEffect(() => {

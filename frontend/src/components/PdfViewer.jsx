@@ -753,13 +753,29 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
   // (getClientRects) belong here, post-render — never during render.
   useEffect(() => {
     const el = ref.current
+    if (!el) return
+    const lr = el.getBoundingClientRect()
+    // Click 1 placed, click 2 pending → render a blinking caret at the start
+    // endpoint so the user sees where the first click landed (no text yet).
+    if (startC && !endC) {
+      try {
+        const cr = document.createRange()
+        cr.setStart(startC.node, startC.offset)
+        cr.collapse(true)
+        const rc = cr.getBoundingClientRect()
+        setView({ rects: [], caret: { left: rc.left - lr.left, top: rc.top - lr.top, height: rc.height || 16 } })
+      } catch {
+        setView({ rects: [] })
+      }
+      onSearchSelect?.(null)
+      return
+    }
     const range = orderedRange()
-    if (!el || !range) {
+    if (!range) {
       setView({ rects: [] })
       onSearchSelect?.(null)
       return
     }
-    const lr = el.getBoundingClientRect()
     const rects = Array.from(range.getClientRects()).map(rc => ({
       left: rc.left - lr.left, top: rc.top - lr.top, width: rc.width, height: rc.height,
     }))
@@ -810,6 +826,10 @@ function SearchSelectionLayer({ blocks, scale, onSearchSelect }) {
         <div key={i} className="absolute pointer-events-none rounded-sm"
           style={{ left: r.left, top: r.top, width: r.width, height: r.height, background: 'rgba(99,102,241,0.30)' }} />
       ))}
+      {view.caret && (
+        <div className="absolute pointer-events-none animate-pulse rounded-sm"
+          style={{ left: view.caret.left, top: view.caret.top, width: 2, height: view.caret.height, background: 'rgb(79,70,229)' }} />
+      )}
       {knob(firstRect, 'start')}
       {knob(lastRect, 'end')}
     </div>
