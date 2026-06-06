@@ -328,6 +328,11 @@ export default function Reader() {
   const explanationRef    = useRef(null)
   const currentIndexRef   = useRef(0)
   const activeParagraphRef = useRef(null)
+  // Read inside onBlockEdit (defined before its sources) without stale closures:
+  // key → all mergeable refs of the continuation chain it belongs to, and the
+  // live lazo buffer. Synced by effects below once those memos exist.
+  const chainRefsByKeyRef = useRef(new Map())
+  const mergeBufferRef = useRef([])
   useEffect(() => { explanationRef.current  = explanation  }, [explanation])
   useEffect(() => { currentIndexRef.current = currentIndex }, [currentIndex])
   useEffect(() => { activeParagraphRef.current = activeParagraph }, [activeParagraph])
@@ -692,7 +697,7 @@ export default function Reader() {
       // (allowMerges:false) refuses lazo until un-pinned. Commits on confirm.
       const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
       if (!explainable || target.allowMerges === false) return
-      addToMergeBuffer({
+      const selfRef = {
         key: editKeyOf(target),
         kind: target.kind,
         page: target.page,
@@ -700,7 +705,19 @@ export default function Reader() {
         linearKey: target.linearKey,
         bbox: target.bbox,
         role: target.role,
-      })
+      }
+      // A "natural merge" paragraph is several continuation-chained blocks. Lasso
+      // the WHOLE chain as one unit so the highlight AND the resulting merge
+      // cover the entire logical paragraph, not just the clicked piece.
+      const chain = chainRefsByKeyRef.current.get(selfRef.key)
+      const refs = chain && chain.length > 1 ? chain : [selfRef]
+      const present = new Set(mergeBufferRef.current.map(m => m.key))
+      const allIn = refs.every(r => present.has(r.key))
+      for (const r of refs) {
+        const inBuf = present.has(r.key)
+        // allIn → toggle the whole chain OFF; else → add only the missing ones.
+        if (allIn ? inBuf : !inBuf) addToMergeBuffer(r)
+      }
       return
     }
     if (armedTool === 'split') {
@@ -720,6 +737,7 @@ export default function Reader() {
 
   // Keys currently selected for an in-progress lazo merge (persistent tint).
   const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
+  useEffect(() => { mergeBufferRef.current = mergeBuffer }, [mergeBuffer])
 
   // Resolve committed merge groups to a per-object lookup: key → { groupId,
   // isRep, isLast, memberCount, resultRole }. Paginated (tracking off) shows a
@@ -828,6 +846,35 @@ export default function Reader() {
     () => buildContinuationPayloads(linearBlocks),
     [linearBlocks],
   )
+
+  // key → every mergeable ref of the continuation chain it belongs to, so the
+  // lazo can grab a whole "natural merge" (multi-block chain) as one unit.
+  // Members of one chain share the same merged `sentences` array reference
+  // (buildContinuationPayloads), which is the grouping key. Only chains with
+  // >1 mergeable member are listed; everything else falls back to self.
+  const chainRefsByKey = useMemo(() => {
+    const groups = new Map()
+    for (let i = 0; i < linearBlocks.length; i++) {
+      const pay = chainPayloads[i]
+      const t = linearEditInfo[i]?.target
+      if (!pay || !t || t.allowMerges === false) continue
+      if (!(t.kind === 'image' || (t.kind === 'block' && t.role !== 'ignored'))) continue
+      const ref = {
+        key: editKeyOf(t), kind: t.kind, page: t.page,
+        reading_index: t.reading_index, linearKey: t.linearKey,
+        bbox: t.bbox, role: t.role,
+      }
+      const arr = groups.get(pay.sentences)
+      if (arr) arr.push(ref); else groups.set(pay.sentences, [ref])
+    }
+    const out = new Map()
+    for (const refs of groups.values()) {
+      if (refs.length < 2) continue
+      for (const r of refs) out.set(r.key, refs)
+    }
+    return out
+  }, [linearBlocks, chainPayloads, linearEditInfo])
+  useEffect(() => { chainRefsByKeyRef.current = chainRefsByKey }, [chainRefsByKey])
 
   // Navigable list — paragraphs (one entry per continuation chain) + figures/
   // tables, in reading order. Figures carry the opts handleExplain needs.
