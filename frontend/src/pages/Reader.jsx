@@ -722,13 +722,16 @@ export default function Reader() {
   const selectedKeys = useMemo(() => new Set(mergeBuffer.map(m => m.key)), [mergeBuffer])
 
   // Resolve committed merge groups to a per-object lookup: key → { groupId,
-  // isRep }. The representative (first member) carries the group's ✦ button.
+  // isRep, isLast, memberCount, resultRole }. Paginated (tracking off) shows a
+  // ✦ on EVERY member; tracking mode shows it on the LAST member only. isRep is
+  // kept for any caller that still needs the first member.
   const mergeMembership = useMemo(() => {
     const map = {}
     for (const g of (edits.mergeGroups || [])) {
       const resultRole = g.resultRole || (g.explainAs === 'figure' ? 'figure' : 'paragraph')
+      const n = g.members.length
       g.members.forEach((m, i) => {
-        map[editKeyOf(m)] = { groupId: g.id, isRep: i === 0, resultRole }
+        map[editKeyOf(m)] = { groupId: g.id, isRep: i === 0, isLast: i === n - 1, memberCount: n, resultRole }
       })
     }
     return map

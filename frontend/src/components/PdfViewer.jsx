@@ -123,6 +123,9 @@ const _METADATA_ROLES = new Set(['ignored', 'footnote', 'title', 'author', 'sect
 function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
+  // Committed merge currently hovered (by groupId) → every member's boxbar
+  // lights up together, across blocks AND images on this page.
+  const [hoveredGroup, setHoveredGroup] = useState(null)
 
   if ((!blocks && !images?.length && !paintTargets?.length) || !scale) return null
 
@@ -423,6 +426,28 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
               />
             )}
 
+            {/* Committed merge boxbar: outlines every member of a group so the
+                grouping is visible, and lights up the whole group on hover. Only
+                in normal mode (no tool armed); the lazo wash above owns the
+                in-progress state. */}
+            {isLeader && unionBox && blockMembership && !armedTool && (
+              <div
+                className="absolute pointer-events-auto rounded-sm transition-colors duration-150"
+                style={{
+                  left:   unionBox.x0 * scale,
+                  top:    unionBox.y0 * scale,
+                  width:  (unionBox.x1 - unionBox.x0) * scale,
+                  height: (unionBox.y1 - unionBox.y0) * scale,
+                  background: hoveredGroup === blockMembership.groupId ? 'rgba(99,102,241,0.14)' : 'transparent',
+                  border: hoveredGroup === blockMembership.groupId
+                    ? '1.5px solid rgba(99,102,241,0.7)'
+                    : '1.5px dashed rgba(99,102,241,0.35)',
+                }}
+                onMouseEnter={() => setHoveredGroup(blockMembership.groupId)}
+                onMouseLeave={() => setHoveredGroup(null)}
+              />
+            )}
+
             {/* Edit click-catcher: while a CLICK tool is armed, the whole block
                 region routes clicks to the edit handler instead of the explain
                 flow. Excluded for 'search' — that tool has its own text-selection
@@ -447,11 +472,10 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
             )}
 
             {/* ✦ viñeta button — one per same-column group, on the leader. Hidden
-                while a tool is armed (clicks go to editing), on demoted blocks,
-                and on non-representative members of a merge group (the group's
-                ✦ lives on its representative). A representative explains the
-                whole merge group via onExplainGroup. */}
-            {isLeader && !armedTool && !_METADATA_ROLES.has(block.role) && (!blockMembership || blockMembership.isRep) && (
+                while a tool is armed (clicks go to editing) and on metadata
+                blocks. In a merge group EVERY member (tracking off) carries a ✦;
+                any of them explains the whole group via onExplainGroup. */}
+            {isLeader && !armedTool && !_METADATA_ROLES.has(block.role) && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -475,8 +499,8 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 onClick={() => blockMembership
                   ? onExplainGroup?.(blockMembership.groupId)
                   : onExplain(payload.text, mergedSentences, ownFlatRef, { footnotes: payload.footnotes ?? [] })}
-                onMouseEnter={() => onHoveredChainChange?.(chainKey)}
-                onMouseLeave={() => onHoveredChainChange?.(null)}
+                onMouseEnter={() => { onHoveredChainChange?.(chainKey); if (blockMembership) setHoveredGroup(blockMembership.groupId) }}
+                onMouseLeave={() => { onHoveredChainChange?.(null); if (blockMembership) setHoveredGroup(null) }}
                 title={groupExplainTitle(t, blockMembership, ['figure', 'table', 'algorithm'].includes(block.role) ? t('viewer.explainBlock', { role: block.role }) : t('viewer.explainParagraph'))}
               >
                 ✦
@@ -518,7 +542,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   : (isHovered ? '1px solid rgba(99,102,241,0.22)' : '1px solid transparent'),
               }}
             />
-            {/* Lazo selection (indigo) wash ONLY — no residual box after merge. */}
+            {/* Lazo selection (indigo) wash for an in-progress merge. */}
             {mergeSelectedKeys?.has(imgKey) && (
               <div
                 className="absolute pointer-events-none rounded-sm"
@@ -527,6 +551,22 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   background: 'rgba(99,102,241,0.16)',
                   border: '1px dashed rgba(99,102,241,0.6)',
                 }}
+              />
+            )}
+            {/* Committed merge boxbar (image member): outlines the group and
+                lights up with the rest of the group on hover. Normal mode only. */}
+            {imgMembership && !armedTool && (
+              <div
+                className="absolute pointer-events-auto rounded-sm transition-colors duration-150"
+                style={{
+                  left, top, width, height,
+                  background: hoveredGroup === imgMembership.groupId ? 'rgba(99,102,241,0.14)' : 'transparent',
+                  border: hoveredGroup === imgMembership.groupId
+                    ? '1.5px solid rgba(99,102,241,0.7)'
+                    : '1.5px dashed rgba(99,102,241,0.35)',
+                }}
+                onMouseEnter={() => setHoveredGroup(imgMembership.groupId)}
+                onMouseLeave={() => setHoveredGroup(null)}
               />
             )}
             {cap && (
@@ -569,7 +609,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 onClick={e => onBlockEdit?.({ kind: 'image', page, reading_index: img.reading_index, role: img.role || 'figure', bbox: img.bbox, caption_text: img.caption_text || '' }, { x: e.clientX, y: e.clientY })}
               />
             )}
-            {!armedTool && !_METADATA_ROLES.has(img.role || 'figure') && (!imgMembership || imgMembership.isRep) && (
+            {!armedTool && !_METADATA_ROLES.has(img.role || 'figure') && (
               <button
                 className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
                 style={{
@@ -603,8 +643,8 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                         caption_text: img.caption_text || '',
                       },
                     )}
-                onMouseEnter={() => setHoveredImgIdx(i)}
-                onMouseLeave={() => setHoveredImgIdx(null)}
+                onMouseEnter={() => { setHoveredImgIdx(i); if (imgMembership) setHoveredGroup(imgMembership.groupId) }}
+                onMouseLeave={() => { setHoveredImgIdx(null); if (imgMembership) setHoveredGroup(null) }}
                 title={groupExplainTitle(t, imgMembership, t('viewer.explainBlock', { role: img.role }))}
               >
                 ✦

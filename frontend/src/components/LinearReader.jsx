@@ -65,6 +65,9 @@ export default function LinearReader({
 
   const [visibleSet, setVisibleSet] = useState(() => new Set())
   const [hoveredChain, setHoveredChain] = useState(null)
+  // Committed merge currently hovered (by groupId) so every member crop's
+  // boxbar lights up together, even though members are separate BlockCrops.
+  const [hoveredGroupId, setHoveredGroupId] = useState(null)
   const [observerInstance, setObserverInstance] = useState(null)
 
   const rootDivRef = useRef(null)
@@ -274,6 +277,8 @@ export default function LinearReader({
               onExplainGroup={onExplainGroup}
               isChainTail={isChainTail}
               editInfo={editInfo?.[origIdx] ?? null}
+              hoveredGroupId={hoveredGroupId}
+              onGroupHover={setHoveredGroupId}
             />
           )
         })}
@@ -387,6 +392,8 @@ const BlockCrop = memo(function BlockCrop({
   onExplainGroup,
   isChainTail = true,
   editInfo,
+  hoveredGroupId = null,
+  onGroupHover,
 }) {
   const { t } = useUiLang()
   const wrapperRef = useRef(null)
@@ -395,6 +402,7 @@ const BlockCrop = memo(function BlockCrop({
   const editTarget = editInfo?.target ?? null
   const membership = editInfo?.membership
   const selected   = !!editInfo?.selected
+  const groupHovered = !!membership && hoveredGroupId === membership.groupId
 
   const bbox = block.bbox
   // Equations: Marker sometimes emits a tight y-bbox that clips ascenders /
@@ -717,8 +725,10 @@ const BlockCrop = memo(function BlockCrop({
             />
           )}
 
-          {anchor && !armedTool && (membership ? membership.isRep : isChainTail) && (
+          {anchor && !armedTool && (membership ? membership.isLast : isChainTail) && (
             <button
+              onMouseEnter={() => { if (membership) onGroupHover?.(membership.groupId) }}
+              onMouseLeave={() => { if (membership) onGroupHover?.(null) }}
               className="absolute pointer-events-auto w-[18px] h-[18px] rounded-full flex items-center justify-center transition-all duration-150"
               style={{
                 left: anchor.left,
@@ -810,6 +820,24 @@ const BlockCrop = memo(function BlockCrop({
             />
           )}
         </div>
+      )}
+
+      {/* Committed merge boxbar: outlines this member crop and lights up with
+          the rest of the group on hover. Normal mode only (the lazo wash above
+          owns the in-progress state). */}
+      {isRendered && membership && !armedTool && (
+        <div
+          className="absolute pointer-events-auto rounded-sm transition-colors duration-150"
+          style={{
+            left: 0, top: 0, width: canvasWidth, height: displayHeight,
+            background: groupHovered ? 'rgba(99,102,241,0.14)' : 'transparent',
+            border: groupHovered
+              ? '1.5px solid rgba(99,102,241,0.7)'
+              : '1.5px dashed rgba(99,102,241,0.35)',
+          }}
+          onMouseEnter={() => onGroupHover?.(membership.groupId)}
+          onMouseLeave={() => onGroupHover?.(null)}
+        />
       )}
 
       {/* Symbol-marked footnotes — always shown beneath the paragraph. The
