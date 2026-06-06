@@ -836,7 +836,11 @@ export default function Reader() {
     // chain. O(n) vs O(n²) nested scan.
     const chainMembers = new Map()
     for (let i = 0; i < linearBlocks.length; i++) {
-      if (linearBlocks[i].role !== 'paragraph') continue
+      const role = linearBlocks[i].role
+      // Paragraphs, plus a display equation bridged INTO a chain (it has a
+      // shared payload), count as members so linearIdxs covers the equation
+      // slot for centering / highlighting.
+      if (role !== 'paragraph' && !(role === 'equation' && chainPayloads[i])) continue
       const pay = chainPayloads[i]
       if (!pay) continue
       const list = chainMembers.get(pay.text)

@@ -319,6 +319,15 @@ export function buildContinuationPayloads(blocks) {
 
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i]
+    // A DISPLAY equation the backend bridged into the sentence flow
+    // (continuation===true, set by `_bridge_display_math_*`) joins the OPEN
+    // chain as its own member — distinct, navigable slot — instead of being
+    // transparent like a standalone equation. It only ever EXTENDS a chain
+    // (above paragraph → equation → below paragraph); it never opens one.
+    if (b?.role === 'equation' && b.continuation && !b.linearInjected && chainIdxs.length > 0) {
+      chainIdxs.push(i)
+      continue
+    }
     // Injected linear-only paragraphs (paginated projection only) are appended
     // out of reading order, so let them stay TRANSPARENT like non-paragraphs —
     // they never chain, and crucially never split a real cross-page chain that

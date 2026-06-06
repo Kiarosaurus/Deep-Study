@@ -203,7 +203,11 @@ export default function LinearReader({
     for (let i = 0; i < linearBlocks.length; i++) {
       const b = linearBlocks[i]
       if (b?.role !== 'paragraph') {
-        if (b?.role === 'callout' && chainHeadResultIdx >= 0 && nextParaIsContinuation(i)) {
+        if (b?.role === 'equation' && b.continuation) {
+          // Bridged display equation: a chain member, so render it IN PLACE
+          // between the paragraphs above and below it (don't defer like a float).
+          emit(i)
+        } else if (b?.role === 'callout' && chainHeadResultIdx >= 0 && nextParaIsContinuation(i)) {
           // A callout that interrupted a merged paragraph → hoist it above the
           // chain head (out of band; doesn't touch lastRenderedIdx).
           const headEntry = result[chainHeadResultIdx]

@@ -1550,6 +1550,88 @@ def _merge_continuations_pages(pages: list[PageBlocks]) -> None:
     _cont_log("=== pages post-pass end ===")
 
 
+# ── Display-math continuation bridge ─────────────────────────────────────────
+# A recognized DISPLAY equation that interrupts a sentence should read as part
+# of that sentence's flow: paragraph-above → equation → paragraph-below, as three
+# DISTINCT, navigable slots chained together (not one glued block — sentence
+# segmentation stays intact). We realize this with the existing `continuation`
+# flag, set on the equation and the paragraph below it.
+_MATH_BRIDGE_HOVERLAP_MIN = 0.3
+_MATH_BRIDGE_GAP_FACTOR = 2.5
+
+
+def _math_adjacent(a: BBox, b: BBox) -> bool:
+    """Loose vertical adjacency for the math bridge: the two boxes share a column
+    and sit within a few line-heights. Equations are tall and Marker leaves
+    whitespace around them, so the gap ceiling is generous and overlap counts."""
+    if _hoverlap(a, b) < _MATH_BRIDGE_HOVERLAP_MIN:
+        return False
+    gap = b.y0 - a.y1
+    h = max(1.0, min(a.y1 - a.y0, b.y1 - b.y0))
+    return gap <= h * _MATH_BRIDGE_GAP_FACTOR
+
+
+def _math_unterminated(text: str) -> bool:
+    """Math-scoped continuation trigger. Same as `_ends_unterminated` (no
+    sentence-final '.!?…' → unterminated, which already covers a trailing ':',
+    ',' or NO punctuation), but kept as its own name so the rule stays explicitly
+    scoped to the display-math bridge and never widens prose chaining."""
+    return _ends_unterminated(text)
+
+
+def _bridge_display_math_linear(blocks: list[FullBlock]) -> None:
+    """Chain a display equation into the prose around it (linear projection).
+
+    Fires only when the paragraph ABOVE reads as unterminated and is column-
+    adjacent to the equation; then the equation — and the column-adjacent
+    paragraph BELOW — are flagged `continuation=True`, forming the slot chain
+    above → equation → below. No-op for every non-equation block, so prose
+    chaining set by `_merge_continuations_linear` is untouched."""
+    n = len(blocks)
+    for i, b in enumerate(blocks):
+        if b.role != "equation" or not b.text or not b.bbox:
+            continue
+        prev = blocks[i - 1] if i > 0 else None
+        if not (
+            prev and prev.role == "paragraph" and prev.page == b.page
+            and prev.bbox and _math_unterminated(prev.text)
+            and _math_adjacent(prev.bbox, b.bbox)
+        ):
+            continue
+        b.continuation = True
+        nxt = blocks[i + 1] if i + 1 < n else None
+        if (
+            nxt and nxt.role == "paragraph" and nxt.page == b.page
+            and nxt.bbox and _math_adjacent(b.bbox, nxt.bbox)
+        ):
+            nxt.continuation = True
+
+
+def _bridge_display_math_pages(pages: list[PageBlocks]) -> None:
+    """Per-page mirror of `_bridge_display_math_linear` (intra-page only)."""
+    for p in pages:
+        blocks = p.blocks
+        n = len(blocks)
+        for i, b in enumerate(blocks):
+            if b.role != "equation" or not b.text or not b.boxes:
+                continue
+            eq_bbox = _union_bbox(b.boxes)
+            prev = blocks[i - 1] if i > 0 else None
+            if not (
+                prev and prev.role == "paragraph" and prev.boxes
+                and _math_unterminated(prev.text)
+                and _math_adjacent(_union_bbox(prev.boxes), eq_bbox)
+            ):
+                continue
+            b.continuation = True
+            nxt = blocks[i + 1] if i + 1 < n else None
+            if (
+                nxt and nxt.role == "paragraph" and nxt.boxes
+                and _math_adjacent(eq_bbox, _union_bbox(nxt.boxes))
+            ):
+                nxt.continuation = True
+
+
 def _is_caption_block_linear(b: FullBlock) -> bool:
     """A FullBlock that visually belongs to an adjacent figure/table: either
     Marker tagged it Caption, or it's a paragraph that opens with a caption-
@@ -1713,7 +1795,36 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
 # the header and greedily absorbing visually contiguous blocks.
 _ALGORITHM_HEADER_RE = re.compile(r"^\s*Algorithm\s+\d+\b", re.IGNORECASE)
 _ALGORITHM_GAP_FACTOR = 1.8        # max y-gap as multiple of header line height
+# Display equations inside an algorithm body sit with more surrounding
+# whitespace than ordinary pseudocode lines, so they get a roomier gap ceiling —
+# otherwise a spaced equation step would cut the absorption short.
+_ALGORITHM_EQUATION_GAP_FACTOR = 3.0
 _ALGORITHM_HOVERLAP_MIN = 0.55     # min horizontal overlap fraction
+# A bare "Algorithm N" label (no descriptive title on the same line). Marker
+# often splits the label from its title, so the title is the next block.
+_ALGORITHM_LABEL_ONLY_RE = re.compile(r"^\s*Algorithm\s+\d+\s*[:.\-—]?\s*$", re.IGNORECASE)
+_ALGORITHM_TITLE_MAX_WORDS = 14
+
+
+def _algorithm_caption(header_text: str, next_text: str | None = None, next_role: str | None = None) -> str:
+    """Caption for a merged algorithm: the header's first line, and — when the
+    header is a bare 'Algorithm N' label — the short title block that follows it,
+    folded in (the algorithm-with-its-title merge)."""
+    header_line = (header_text or "").splitlines()[0].strip()
+    if (
+        next_text
+        and next_role in ("paragraph", "caption", "code")
+        and _ALGORITHM_LABEL_ONLY_RE.match(header_line)
+    ):
+        title = next_text.splitlines()[0].strip()
+        if (
+            title
+            and len(title.split()) <= _ALGORITHM_TITLE_MAX_WORDS
+            and not _ALGORITHM_HEADER_RE.match(title)
+        ):
+            sep = "" if header_line[-1:] in ":.-—" else ":"
+            return f"{header_line}{sep} {title}".strip()
+    return header_line
 
 
 def _hoverlap(a: BBox, b: BBox) -> float:
@@ -1760,7 +1871,8 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                 if _ALGORITHM_HEADER_RE.match((nb.text or "").lstrip()):
                     break
                 gap = nb.bbox.y0 - union.y1
-                if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                gap_factor = _ALGORITHM_EQUATION_GAP_FACTOR if nb.role == "equation" else _ALGORITHM_GAP_FACTOR
+                if gap > header_h * gap_factor:
                     break
                 if _hoverlap(union, nb.bbox) < _ALGORITHM_HOVERLAP_MIN:
                     break
@@ -1774,7 +1886,10 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                 consumed.append(j)
                 j += 1
             if len(consumed) >= 2:
-                header_line = (header.text or "").splitlines()[0].strip()
+                nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+                header_line = _algorithm_caption(
+                    header.text, nxt.text if nxt else None, nxt.role if nxt else None,
+                )
                 out.append(FullBlock(
                     role="algorithm",
                     text="\n".join(p for p in parts_text if p),
@@ -2013,7 +2128,10 @@ def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
                     continue
                 union = BBox(**hbb.model_dump())
                 header_h = max(1.0, hbb.y1 - hbb.y0)
-                header_line = (b.text or "").splitlines()[0].strip()
+                nxt = pg.blocks[i + 1] if i + 1 < len(pg.blocks) else None
+                header_line = _algorithm_caption(
+                    b.text, nxt.text if nxt else None, nxt.role if nxt else None,
+                )
                 consumed = 1
                 j = i + 1
                 while j < len(pg.blocks):
@@ -2026,7 +2144,8 @@ def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
                     if nbb is None:
                         break
                     gap = nbb.y0 - union.y1
-                    if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                    gap_factor = _ALGORITHM_EQUATION_GAP_FACTOR if nb.role == "equation" else _ALGORITHM_GAP_FACTOR
+                    if gap > header_h * gap_factor:
                         break
                     if _hoverlap(union, nbb) < _ALGORITHM_HOVERLAP_MIN:
                         break
@@ -2331,6 +2450,52 @@ def _block_type_name(block) -> str:
 
 
 _WS_RE = re.compile(r"\s+")
+_MATH_TAG_RE = re.compile(r"<[^>]+>")
+
+# Inline-math re-OCR results (Tier 2), keyed by id(document) → {id(line): text}.
+# Populated in `_run_marker` on the native-text (disable_ocr) path and consulted
+# by `_line_text`. Module-global to avoid threading a param through every
+# extraction function; entries are popped by the public entry points once the
+# document is fully walked, so id() reuse can never cross requests.
+_INLINE_MATH: dict[int, dict[int, str]] = {}
+
+
+def _line_text(ln, document) -> str:
+    """Line text that PREFERS recognized inline math over the raw glyph text.
+
+    `Line.raw_text()` concatenates each Span's `.text` and ignores `.html`. But
+    Marker stores recognized inline/display math in the math Span's `.html` as
+    `<math …>LaTeX</math>` (the OCR builder's `math_mode`, the inline-math
+    re-OCR pass, or an LLM processor) — so on the native-text (`disable_ocr`)
+    path `raw_text` emits the broken symbol-font glyphs and the recognized LaTeX
+    is thrown away. Here we walk the Spans and, for MATH spans only, take the
+    tag-stripped LaTeX from `.html` (mirroring `_latex_from_equation_block`),
+    falling back to the span text. Non-math spans keep `raw_text`'s behaviour
+    exactly, so this is a no-op everywhere except where math was recognized.
+    Lines that expose no Spans fall back to `raw_text`.
+
+    When inline-math re-OCR (Tier 2) recognized this line, its math-aware text
+    wins outright — tag-stripped to keep prose + LaTeX inline.
+    """
+    override = _INLINE_MATH.get(id(document))
+    if override is not None:
+        recognized = override.get(id(ln))
+        if recognized:
+            return _MATH_TAG_RE.sub("", recognized)
+
+    from marker.schema import BlockTypes
+
+    spans = ln.contained_blocks(document, (BlockTypes.Span,))
+    if not spans:
+        return ln.raw_text(document)
+    parts: list[str] = []
+    for sp in spans:
+        if getattr(sp, "math", False):
+            html = getattr(sp, "html", None)
+            parts.append(_MATH_TAG_RE.sub("", html) if html else (sp.text or ""))
+        else:
+            parts.append(sp.text or "")
+    return "".join(parts)
 
 
 def _collect_lines(block, document, cache: dict | None = None) -> list[LineBlock]:
@@ -2351,7 +2516,7 @@ def _collect_lines(block, document, cache: dict | None = None) -> list[LineBlock
     for ln in block.contained_blocks(document, (BlockTypes.Line,)):
         if ln.removed:
             continue
-        text = _WS_RE.sub(" ", ln.raw_text(document).replace("\n", " ")).strip()
+        text = _WS_RE.sub(" ", _line_text(ln, document).replace("\n", " ")).strip()
         if not text:
             continue
         out.append(LineBlock(text=text, bbox=_polygon_to_bbox(ln.polygon)))
@@ -2488,6 +2653,69 @@ def _latex_from_equation_block(block) -> str:
     return re.sub(r"<[^>]+>", "", html).strip()
 
 
+def _recognize_inline_math(document, recognition_model) -> dict[int, str]:
+    """Tier-2 inline-math recovery for the native-text (disable_ocr) path.
+
+    On that path the OCR builder — which carries Surya's `math_mode` — is
+    skipped, so inline math comes from the PDF's broken symbol-font glyphs.
+    EquationProcessor already re-OCRs DISPLAY `Equation` blocks; mirror it for
+    INLINE math: re-OCR the per-line crops of `TextInlineMath` blocks (the
+    layout-detected inline-math regions) with the SAME, already-loaded
+    recognition model in the math-aware `ocr_with_boxes` task. Cost scales with
+    inline-math lines only — not the whole document — so load time barely moves.
+
+    Returns {id(line): recognized_text} (text may carry `<math>`/format tags;
+    `_line_text` strips them). Best-effort: any failure yields {} so extraction
+    falls back to the native text unchanged.
+    """
+    from marker.schema import BlockTypes
+
+    page_images = []
+    page_line_boxes: list[list[list[float]]] = []
+    page_line_ids: list[list[int]] = []
+    for page in document.pages:
+        img = page.get_image(highres=True)
+        page_size = (page.polygon.width, page.polygon.height)
+        image_size = img.size
+        boxes: list[list[float]] = []
+        ids: list[int] = []
+        for block in page.contained_blocks(document, (BlockTypes.TextInlineMath,)):
+            if block.removed:
+                continue
+            for ln in block.contained_blocks(document, (BlockTypes.Line,)):
+                if ln.removed:
+                    continue
+                boxes.append(ln.polygon.rescale(page_size, image_size).bbox)
+                ids.append(id(ln))
+        page_images.append(img)
+        page_line_boxes.append(boxes)
+        page_line_ids.append(ids)
+
+    if not any(page_line_boxes):
+        return {}
+
+    recognition_model.disable_tqdm = True
+    predictions = recognition_model(
+        images=page_images,
+        bboxes=page_line_boxes,
+        task_names=["ocr_with_boxes"] * len(page_images),
+        sort_lines=False,
+        max_tokens=2048,
+        max_sliding_window=2148,
+    )
+
+    out: dict[int, str] = {}
+    for page_pred, ids in zip(predictions, page_line_ids):
+        text_lines = getattr(page_pred, "text_lines", None) or []
+        if len(text_lines) != len(ids):
+            continue  # alignment broke for this page → leave it on native text
+        for line_pred, lid in zip(text_lines, ids):
+            txt = (line_pred.text or "").strip()
+            if txt:
+                out[lid] = txt
+    return out
+
+
 def _iter_layout_blocks(page):
     """Yield page top-level layout blocks in reading order, unwrapping groups."""
     if not page.structure:
@@ -2513,7 +2741,17 @@ def _run_marker(pdf_bytes: bytes, *, disable_ocr: bool = False):
         tmp_path = tmp.name
     try:
         converter = _get_converter(disable_ocr=disable_ocr)
-        return converter.build_document(tmp_path)
+        document = converter.build_document(tmp_path)
+        # Inline-math re-OCR only on the native-text path (the OCR path already
+        # carries math_mode in its spans). Best-effort — never block extraction.
+        if disable_ocr:
+            try:
+                rec = converter.artifact_dict.get("recognition_model")
+                if rec is not None:
+                    _INLINE_MATH[id(document)] = _recognize_inline_math(document, rec)
+            except Exception as e:  # noqa: BLE001 — re-OCR is optional
+                _extract_log(f"inline-math re-OCR skipped: {type(e).__name__}: {e}")
+        return document
     finally:
         try:
             os.unlink(tmp_path)
@@ -2761,13 +2999,17 @@ def _extract_pages_from_document(document, line_cache: dict | None = None, callo
 def extract_pages(pdf_bytes: bytes) -> list[PageBlocks]:
     """Parse a PDF with Marker and return per-page blocks ready for the frontend."""
     document = _run_marker(pdf_bytes)
-    has_abstract = _document_has_abstract(document)
-    pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
-    _merge_figure_captions_pages(pages)
-    _merge_table_notes_pages(pages)
-    _merge_algorithms_pages(pages)
-    _merge_continuations_pages(pages)
-    return pages
+    try:
+        has_abstract = _document_has_abstract(document)
+        pages = _extract_pages_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
+        _merge_figure_captions_pages(pages)
+        _merge_table_notes_pages(pages)
+        _merge_algorithms_pages(pages)
+        _merge_continuations_pages(pages)
+        _bridge_display_math_pages(pages)
+        return pages
+    finally:
+        _INLINE_MATH.pop(id(document), None)
 
 
 # ── Linear (global reading-order) extraction ─────────────────────────────────
@@ -3082,8 +3324,12 @@ def _extract_linear_from_document(document, line_cache: dict | None = None, call
                 )):
                     role = "author"
 
+            # Equations get sentences too (the recognized LaTeX as one slot) so a
+            # display equation bridged into a continuation chain is a distinct,
+            # navigable carousel slot. Pages already build them unconditionally.
             sentences = (
-                _build_sentences(text, inner_lines) if role == "paragraph" else []
+                _build_sentences(text, inner_lines)
+                if role in ("paragraph", "equation") else []
             )
 
             is_continuation = (
@@ -3170,17 +3416,21 @@ def _clip_vertical_overlaps_linear(blocks: list[FullBlock]) -> None:
 def extract_linear_blocks(pdf_bytes: bytes, *, disable_ocr: bool = False) -> list[FullBlock]:
     """Parse a PDF with Marker and return all blocks in global reading order."""
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
-    has_abstract = _document_has_abstract(document)
-    blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
-    blocks = _merge_tables_linear(blocks)
-    blocks = _merge_figure_captions_linear(blocks)
-    blocks = _merge_algorithms_linear(blocks)
-    blocks = _drop_decorative_icons_linear(blocks)
-    _reorder_authors_after_title(blocks)
-    _assign_layout_types_linear(blocks)
-    _merge_continuations_linear(blocks)
-    _clip_vertical_overlaps_linear(blocks)
-    return blocks
+    try:
+        has_abstract = _document_has_abstract(document)
+        blocks = _extract_linear_from_document(document, None, _detect_callout_regions(pdf_bytes), has_abstract, _detect_footnote_separators(pdf_bytes))
+        blocks = _merge_tables_linear(blocks)
+        blocks = _merge_figure_captions_linear(blocks)
+        blocks = _merge_algorithms_linear(blocks)
+        blocks = _drop_decorative_icons_linear(blocks)
+        _reorder_authors_after_title(blocks)
+        _assign_layout_types_linear(blocks)
+        _merge_continuations_linear(blocks)
+        _bridge_display_math_linear(blocks)
+        _clip_vertical_overlaps_linear(blocks)
+        return blocks
+    finally:
+        _INLINE_MATH.pop(id(document), None)
 
 
 # Visual Marker types never collected as metadata TEXT (figures/tables/groups).
@@ -3280,29 +3530,34 @@ def extract_both(
     the PDF is text-native (e.g. via `has_native_text_layer`).
     """
     document = _run_marker(pdf_bytes, disable_ocr=disable_ocr)
-    line_cache: dict[int, list[LineBlock]] = {}
-    callout_regions = _detect_callout_regions(pdf_bytes)
-    footnote_seps = _detect_footnote_separators(pdf_bytes)
-    has_abstract = _document_has_abstract(document, line_cache)
-    pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
-    linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
-    linear = _merge_tables_linear(linear)
-    linear = _merge_figure_captions_linear(linear)
-    linear = _merge_algorithms_linear(linear)
-    linear = _merge_tables_linear(linear)
-    linear = _drop_decorative_icons_linear(linear)
-    _reorder_authors_after_title(linear)
-    _merge_figure_captions_pages(pages)
-    _merge_table_notes_pages(pages)
-    _merge_algorithms_pages(pages)
-    _drop_decorative_icons_pages(pages)
-    _merge_continuations_pages(pages)
-    _assign_layout_types_linear(linear)
-    _merge_continuations_linear(linear)
-    _clip_vertical_overlaps_linear(linear)
-    # Preserve every OCR text block the passes above dropped, so the universal
-    # pincel can reach it. Runs last: needs the FINAL emitted geometry to subtract.
-    metadata = _collect_metadata_blocks(document, pages, linear, line_cache)
-    for p in pages:
-        p.metadata_blocks = metadata.get(p.page, [])
-    return pages, linear
+    try:
+        line_cache: dict[int, list[LineBlock]] = {}
+        callout_regions = _detect_callout_regions(pdf_bytes)
+        footnote_seps = _detect_footnote_separators(pdf_bytes)
+        has_abstract = _document_has_abstract(document, line_cache)
+        pages  = _extract_pages_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
+        linear = _extract_linear_from_document(document, line_cache, callout_regions, has_abstract, footnote_seps)
+        linear = _merge_tables_linear(linear)
+        linear = _merge_figure_captions_linear(linear)
+        linear = _merge_algorithms_linear(linear)
+        linear = _merge_tables_linear(linear)
+        linear = _drop_decorative_icons_linear(linear)
+        _reorder_authors_after_title(linear)
+        _merge_figure_captions_pages(pages)
+        _merge_table_notes_pages(pages)
+        _merge_algorithms_pages(pages)
+        _drop_decorative_icons_pages(pages)
+        _merge_continuations_pages(pages)
+        _bridge_display_math_pages(pages)
+        _assign_layout_types_linear(linear)
+        _merge_continuations_linear(linear)
+        _bridge_display_math_linear(linear)
+        _clip_vertical_overlaps_linear(linear)
+        # Preserve every OCR text block the passes above dropped, so the universal
+        # pincel can reach it. Runs last: needs the FINAL emitted geometry to subtract.
+        metadata = _collect_metadata_blocks(document, pages, linear, line_cache)
+        for p in pages:
+            p.metadata_blocks = metadata.get(p.page, [])
+        return pages, linear
+    finally:
+        _INLINE_MATH.pop(id(document), None)
