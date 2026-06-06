@@ -1,6 +1,7 @@
 import { forwardRef } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
 import { useSettings } from '../settings/SettingsContext'
+import MathText, { wrapBareLatex } from './MathText'
 
 function SkeletonGlobal() {
   return (
@@ -148,9 +149,9 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, pending }) {
         <blockquote className={`border-l-[3px] pl-3 py-0.5 ${
           isPlaceholder ? 'border-slate-300' : 'border-indigo-400'
         }`}>
-          <p className="text-sm italic text-slate-700 leading-snug">
-            {current.quote}
-          </p>
+          <div className="text-sm italic text-slate-700 leading-snug">
+            <MathText>{wrapBareLatex(current.quote ?? '')}</MathText>
+          </div>
         </blockquote>
 
         {isPlaceholder ? (
@@ -171,11 +172,11 @@ function ConceptosPanel({ items, currentIndex, onIndexChange, pending }) {
             {concepts.map((c, idx) => (
               <div key={idx} className="flex flex-col gap-1.5">
                 <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
-                  {c.term}
+                  <MathText>{c.term ?? ''}</MathText>
                 </p>
-                <p className="text-[13px] text-slate-600 leading-relaxed">
-                  {c.explanation}
-                </p>
+                <div className="text-[13px] text-slate-600 leading-relaxed">
+                  <MathText>{c.explanation ?? ''}</MathText>
+                </div>
               </div>
             ))}
           </div>
@@ -247,18 +248,18 @@ function ContextoPanel({ context, loadingExplain }) {
         <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
           {t('sidebar.roleInSection')}
         </p>
-        <p className="text-sm text-slate-700 leading-snug">
-          {context.section_role}
-        </p>
+        <div className="text-sm text-slate-700 leading-snug">
+          <MathText>{context.section_role ?? ''}</MathText>
+        </div>
       </section>
 
       <section className="flex flex-col gap-1.5">
         <p className="text-[11px] font-bold uppercase tracking-wide text-indigo-600">
           {t('sidebar.narrative')}
         </p>
-        <p className="text-[13px] text-slate-600 leading-relaxed">
-          {context.narrative}
-        </p>
+        <div className="text-[13px] text-slate-600 leading-relaxed">
+          <MathText>{context.narrative ?? ''}</MathText>
+        </div>
       </section>
     </div>
   )

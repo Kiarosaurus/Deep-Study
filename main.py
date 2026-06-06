@@ -187,9 +187,22 @@ def _explain_lang_rule(language: str) -> str:
     )
 
 
+# Math output directive appended to every explain/concept prompt so the frontend
+# (KaTeX) can render formulas. Verbatim `quote` fields stay delimiter-free.
+_MATH_RULE = (
+    "\n\nMATH FORMATTING (strict): Write EVERY mathematical expression, symbol, "
+    "variable or formula as valid LaTeX inside delimiters — $...$ for inline math, "
+    "$$...$$ for a standalone (display) equation. E.g. the variable $x_i$, the ratio "
+    "$\\frac{a}{b}$, the display equation $$E = mc^2$$. Never emit raw Unicode math "
+    "glyphs (use $\\alpha$, $\\sum$, $\\leq$, $\\rightarrow$ — not α, ∑, ≤, →) and "
+    "never leave a LaTeX command outside math delimiters. EXCEPTION: the verbatim "
+    "'quote' field stays exactly as in the source — do NOT add delimiters to it."
+)
+
+
 def _build_explain_config(base_prompt: str, language: str) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
-        system_instruction=base_prompt + _explain_lang_rule(language),
+        system_instruction=base_prompt + _explain_lang_rule(language) + _MATH_RULE,
         response_mime_type="application/json",
         response_schema=ExplainResponse,
         max_output_tokens=10240,
@@ -698,7 +711,7 @@ Devuelve EXCLUSIVAMENTE el JSON con la forma { "concepts": [ { "term", \
 
 def _build_extract_config(language: str) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(
-        system_instruction=EXTRACT_CONCEPT_PROMPT + _explain_lang_rule(language),
+        system_instruction=EXTRACT_CONCEPT_PROMPT + _explain_lang_rule(language) + _MATH_RULE,
         response_mime_type="application/json",
         response_schema=ExtractedConcepts,
         max_output_tokens=4096,
