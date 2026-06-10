@@ -1795,10 +1795,12 @@ def _merge_figure_captions_linear(blocks: list[FullBlock]) -> list[FullBlock]:
 # the header and greedily absorbing visually contiguous blocks.
 _ALGORITHM_HEADER_RE = re.compile(r"^\s*Algorithm\s+\d+\b", re.IGNORECASE)
 _ALGORITHM_GAP_FACTOR = 1.8        # max y-gap as multiple of header line height
-# Display equations inside an algorithm body sit with more surrounding
-# whitespace than ordinary pseudocode lines, so they get a roomier gap ceiling —
-# otherwise a spaced equation step would cut the absorption short.
-_ALGORITHM_EQUATION_GAP_FACTOR = 3.0
+# Roomier gap ceiling for the algorithm's descriptive title row, which Marker
+# splits onto the line below a bare "Algorithm N" label with extra whitespace.
+# (Marked display-equation steps no longer use a gap ceiling at all — they are
+# absorbed on the column-overlap check alone, so every math block stays inside
+# the algorithm instead of leaking into a following paragraph.)
+_ALGORITHM_TITLE_GAP_FACTOR = 3.0
 _ALGORITHM_HOVERLAP_MIN = 0.55     # min horizontal overlap fraction
 # A bare "Algorithm N" label (no descriptive title on the same line). Marker
 # often splits the label from its title, so the title is the next block.
@@ -1870,12 +1872,32 @@ def _merge_algorithms_linear(blocks: list[FullBlock]) -> list[FullBlock]:
                     break
                 if _ALGORITHM_HEADER_RE.match((nb.text or "").lstrip()):
                     break
+                # The descriptive title Marker split onto the row below a bare
+                # "Algorithm N" label is ALWAYS part of the box: keep it in the
+                # union so it lands in the raster the AI reads. Overlap waived
+                # (titles are often centered); a generous gap ceiling still bounds it.
+                is_title_row = (
+                    j == i + 1
+                    and bool(_ALGORITHM_LABEL_ONLY_RE.match((header.text or "").splitlines()[0].strip()))
+                    and nb.role in ("paragraph", "caption", "code")
+                    and bool(nb.text) and len(nb.text.split()) <= _ALGORITHM_TITLE_MAX_WORDS
+                )
                 gap = nb.bbox.y0 - union.y1
-                gap_factor = _ALGORITHM_EQUATION_GAP_FACTOR if nb.role == "equation" else _ALGORITHM_GAP_FACTOR
-                if gap > header_h * gap_factor:
-                    break
-                if _hoverlap(union, nb.bbox) < _ALGORITHM_HOVERLAP_MIN:
-                    break
+                if nb.role == "equation":
+                    # Marked display equations are algorithm STEPS — keep every one
+                    # regardless of the whitespace Marker leaves around math (column
+                    # check only). This pulls ALL math into the algorithm and, by
+                    # consuming it here, stops it bridging into a later paragraph.
+                    if _hoverlap(union, nb.bbox) < _ALGORITHM_HOVERLAP_MIN:
+                        break
+                elif is_title_row:
+                    if gap > header_h * _ALGORITHM_TITLE_GAP_FACTOR:
+                        break
+                else:
+                    if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                        break
+                    if _hoverlap(union, nb.bbox) < _ALGORITHM_HOVERLAP_MIN:
+                        break
                 union = BBox(
                     x0=min(union.x0, nb.bbox.x0),
                     y0=min(union.y0, nb.bbox.y0),
@@ -2143,12 +2165,27 @@ def _merge_algorithms_pages(pages: list[PageBlocks]) -> None:
                     nbb = pbbox(nb)
                     if nbb is None:
                         break
+                    # Mirror of the linear pass: keep the split title row in the
+                    # union (raster the AI reads) and absorb every marked display
+                    # equation gap-agnostically so no math step leaks out.
+                    is_title_row = (
+                        j == i + 1
+                        and bool(_ALGORITHM_LABEL_ONLY_RE.match((b.text or "").splitlines()[0].strip()))
+                        and nb.role in ("paragraph", "caption", "code")
+                        and bool(nb.text) and len(nb.text.split()) <= _ALGORITHM_TITLE_MAX_WORDS
+                    )
                     gap = nbb.y0 - union.y1
-                    gap_factor = _ALGORITHM_EQUATION_GAP_FACTOR if nb.role == "equation" else _ALGORITHM_GAP_FACTOR
-                    if gap > header_h * gap_factor:
-                        break
-                    if _hoverlap(union, nbb) < _ALGORITHM_HOVERLAP_MIN:
-                        break
+                    if nb.role == "equation":
+                        if _hoverlap(union, nbb) < _ALGORITHM_HOVERLAP_MIN:
+                            break
+                    elif is_title_row:
+                        if gap > header_h * _ALGORITHM_TITLE_GAP_FACTOR:
+                            break
+                    else:
+                        if gap > header_h * _ALGORITHM_GAP_FACTOR:
+                            break
+                        if _hoverlap(union, nbb) < _ALGORITHM_HOVERLAP_MIN:
+                            break
                     union = BBox(
                         x0=min(union.x0, nbb.x0),
                         y0=min(union.y0, nbb.y0),
