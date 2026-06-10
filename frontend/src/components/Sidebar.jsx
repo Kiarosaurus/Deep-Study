@@ -1,4 +1,4 @@
-import { forwardRef } from 'react'
+import { forwardRef, useCallback, useEffect, useRef } from 'react'
 import { useUiLang } from '../i18n/LanguageContext'
 import { useSettings } from '../settings/SettingsContext'
 import MathText, { wrapBareLatex } from './MathText'
@@ -334,6 +334,22 @@ const Sidebar = forwardRef(function Sidebar({
 }, ref) {
   const { t } = useUiLang()
 
+  // The scroll container is exposed to the parent via `ref`; keep an internal
+  // handle too (merged below) so we can reset its scroll ourselves.
+  const scrollRef = useRef(null)
+  const setScrollRef = useCallback((node) => {
+    scrollRef.current = node
+    if (typeof ref === 'function') ref(node)
+    else if (ref) ref.current = node
+  }, [ref])
+
+  // Moving between concepts/sentences (currentIndex) jumps the panel back to the
+  // top, so each new concept card reads from its start instead of inheriting the
+  // previous card's scroll offset.
+  useEffect(() => {
+    if (tab === 'explain' && scrollRef.current) scrollRef.current.scrollTop = 0
+  }, [currentIndex, tab, explainMode])
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex border-b border-slate-200 shrink-0">
@@ -362,7 +378,7 @@ const Sidebar = forwardRef(function Sidebar({
         ))}
       </div>
 
-      <div ref={ref} className="p-5 overflow-y-auto flex-1">
+      <div ref={setScrollRef} className="p-5 overflow-y-auto flex-1">
         {tab === 'global' && (
           loadingGlobal ? <SkeletonGlobal /> :
           errorGlobal
