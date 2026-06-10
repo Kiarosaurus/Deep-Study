@@ -120,12 +120,13 @@ function groupExplainTitle(t, membership, fallback) {
 // so re-typing a block to one of these (e.g. footnote) drops its ✦.
 const _METADATA_ROLES = new Set(['ignored', 'footnote', 'title', 'author', 'section_header'])
 
-function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup }) {
+function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, hoveredGroup = null, onHoveredGroupChange }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
   // Committed merge currently hovered (by groupId) → every member's boxbar
-  // lights up together, across blocks AND images on this page.
-  const [hoveredGroup, setHoveredGroup] = useState(null)
+  // lights up together. State is OWNED by PdfViewer (lifted) so a cross-page
+  // group lights both page overlays at once, not just the hovered page.
+  const setHoveredGroup = onHoveredGroupChange ?? (() => {})
 
   if ((!blocks && !images?.length && !paintTargets?.length) || !scale) return null
 
@@ -990,6 +991,8 @@ function PdfPage({
   mergeSelectedKeys,
   mergeMembership,
   onExplainGroup,
+  hoveredGroup,
+  onHoveredGroupChange,
   onSearchSelect,
   searchResetKey,
 }) {
@@ -1029,6 +1032,8 @@ function PdfPage({
         mergeSelectedKeys={mergeSelectedKeys}
         mergeMembership={mergeMembership}
         onExplainGroup={onExplainGroup}
+        hoveredGroup={hoveredGroup}
+        onHoveredGroupChange={onHoveredGroupChange}
       />
       {armedTool === 'search' && scale && (
         <SearchSelectionLayer
@@ -1151,6 +1156,10 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
   const settingsOpenRef = useRef(false)
   useEffect(() => { settingsOpenRef.current = settingsOpen }, [settingsOpen])
   const [hoveredChain, setHoveredChain]       = useState(null)
+  // Committed merge-group currently hovered (by groupId). Lifted here — not held
+  // per page overlay — so a cross-page lazo group lights up BOTH page boxbars
+  // simultaneously when either member (or its ✦) is hovered.
+  const [hoveredGroup, setHoveredGroup]       = useState(null)
   const [containerWidth, setContainerWidth]   = useState(null)
   const [userZoom, setUserZoom]               = useState(1.0)
   const [tracking, setTracking]               = useState(false)
@@ -2042,6 +2051,8 @@ const PdfViewer = forwardRef(function PdfViewer({ file, onExplain, pages, linear
                 mergeSelectedKeys={mergeSelectedKeys}
                 mergeMembership={mergeMembership}
                 onExplainGroup={onExplainGroup}
+                hoveredGroup={hoveredGroup}
+                onHoveredGroupChange={setHoveredGroup}
                 onSearchSelect={onSearchSelect}
                 searchResetKey={searchResetKey}
               />

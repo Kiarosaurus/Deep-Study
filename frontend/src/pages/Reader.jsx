@@ -761,12 +761,12 @@ export default function Reader() {
   // Commit the buffered selection as ONE consolidated block, applying the same
   // hierarchy rule as the automatic merge state machine: `resultRole` is the
   // dominant visual type among the members (figure/table/algorithm), else
-  // paragraph. Members must share a page (the per-page overlay renders the
-  // group's ✦ on one page). Immutable update via setEdits.
+  // paragraph. Members MAY span pages (e.g. end of page 1 + start of page 2):
+  // each page renders its own boxbar (never one giant cross-page box) and the
+  // members are explained as a single unit. Immutable update via setEdits.
   const confirmMerge = useCallback(() => {
     if (mergeBuffer.length < 2) return
     const page = mergeBuffer[0].page
-    if (mergeBuffer.some(m => m.page !== page)) return
     const bufMembers = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, linearKey: m.linearKey, bbox: m.bbox, role: m.role }))
 
     // If any selected object already belongs to a committed group, EXTEND that
@@ -785,7 +785,7 @@ export default function Reader() {
     for (const m of bufMembers) {
       const k = editKeyOf(m); if (!seen.has(k)) { seen.add(k); members.push(m) }
     }
-    if (members.length < 2 || members.some(m => m.page !== page)) return
+    if (members.length < 2) return
 
     const resultRole = resolveMergedRole(
       members.map(m => m.role || (m.kind === 'image' ? 'figure' : 'paragraph')),
