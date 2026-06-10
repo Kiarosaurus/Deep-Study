@@ -3,6 +3,8 @@ import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig,
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 import { useUiLang } from '../i18n/LanguageContext'
+import SearchSelectionLayer from './SearchSelectionLayer'
+import CropTextLayer from './CropTextLayer'
 
 const BBOX_INFLATE_PT       = 2
 const EQUATION_Y_INFLATE_PT = 4
@@ -56,6 +58,8 @@ export default function LinearReader({
   onBlockEdit,
   onExplainGroup,
   editInfo,
+  onSearchSelect,
+  searchResetKey,
 }) {
   // If the parent already owns a doc, use it. Otherwise fall back to loading
   // from pdfFile ourselves (LinearReaderTest standalone case).
@@ -285,6 +289,9 @@ export default function LinearReader({
               editInfo={editInfo?.[origIdx] ?? null}
               hoveredGroupId={hoveredGroupId}
               onGroupHover={setHoveredGroupId}
+              pdfDoc={effectiveDoc}
+              onSearchSelect={onSearchSelect}
+              searchResetKey={searchResetKey}
             />
           )
         })}
@@ -400,6 +407,9 @@ const BlockCrop = memo(function BlockCrop({
   editInfo,
   hoveredGroupId = null,
   onGroupHover,
+  pdfDoc,
+  onSearchSelect,
+  searchResetKey,
 }) {
   const { t } = useUiLang()
   const wrapperRef = useRef(null)
@@ -801,7 +811,7 @@ const BlockCrop = memo(function BlockCrop({
           indicator) — plus a click-catcher while a tool is armed. Rendered
           independently of isInteractive so demoted / caption / equation blocks
           are still targetable by the tools. */}
-      {isRendered && (selected || (armedTool && editTarget)) && (
+      {isRendered && (selected || (armedTool && armedTool !== 'search' && editTarget)) && (
         <div className="absolute" style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight }}>
           {selected && (
             <div
@@ -813,7 +823,7 @@ const BlockCrop = memo(function BlockCrop({
               }}
             />
           )}
-          {armedTool && editTarget && (
+          {armedTool && armedTool !== 'search' && editTarget && (
             <button
               type="button"
               className="absolute rounded-sm transition-colors"
@@ -830,6 +840,32 @@ const BlockCrop = memo(function BlockCrop({
               onClick={e => onBlockEdit?.(editTarget, { x: e.clientX, y: e.clientY })}
             />
           )}
+        </div>
+      )}
+
+      {/* Search/lupa: a crop-aligned glyph layer + the shared char-level
+          SearchSelectionLayer give tracking mode the same fragment selection
+          paginated mode has. Text blocks only — figures / ignored carry no
+          selectable prose. The synthetic single-block (crop-local box + this
+          block's sentences) keeps the selection inside this crop and feeds the
+          paragraph context up to confirmSearch. */}
+      {armedTool === 'search' && isRendered && pdfDoc && !isFigure && block.role !== 'ignored' && (
+        <div className="absolute" style={{ left: 0, top: 0, width: canvasWidth, height: displayHeight }}>
+          <CropTextLayer
+            pdfDoc={pdfDoc}
+            pageNum={block.page}
+            originX={bbox.x0}
+            originY={inflatedY0}
+            scale={bboxScale}
+            width={canvasWidth}
+            height={displayHeight}
+          />
+          <SearchSelectionLayer
+            key={searchResetKey}
+            blocks={[{ boxes: [{ x0: 0, y0: 0, x1: bbW, y1: bbH }], sentences: block.sentences || [], role: block.role }]}
+            scale={bboxScale}
+            onSearchSelect={onSearchSelect}
+          />
         </div>
       )}
 
