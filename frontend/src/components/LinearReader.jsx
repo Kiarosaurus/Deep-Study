@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled, phraseBoxes } from './highlight-utils'
 import { PDF_RENDER_SCALE, usePageCache } from './use-page-cache'
 import { usePdfDocument } from './use-pdf-document'
 import { useUiLang } from '../i18n/LanguageContext'
@@ -594,16 +594,30 @@ const BlockCrop = memo(function BlockCrop({
     )
 
   const allItems = explanation?.sentence_explanations ?? []
-  const currentIndices = (isActive && currentExplanation)
-    ? localizeIndices(resolveAndMap(currentExplanation))
-    : []
+  // Yellow ACCUMULATES over every sentence read so far (carousel slots 0..curPos)
+  // and stays — stepping forward never reverts a read sentence to grey. Slots
+  // ahead of the cursor stay grey until reached.
+  const curPos = (isActive && currentExplanation) ? allItems.indexOf(currentExplanation) : -1
+  const readItems  = curPos >= 0 ? allItems.slice(0, curPos + 1)
+    : (isActive && currentExplanation ? [currentExplanation] : [])
+  const aheadItems = curPos >= 0 ? allItems.slice(curPos + 1) : []
+  const currentIndices = [...new Set(readItems.flatMap(it => localizeIndices(resolveAndMap(it))))]
   const currentSet = new Set(currentIndices)
   const otherIndices = isActive
-    ? [...new Set(
-        allItems
-          .filter(it => it !== currentExplanation)
-          .flatMap(it => localizeIndices(resolveAndMap(it)))
-      )].filter(idx => !currentSet.has(idx))
+    ? [...new Set(aheadItems.flatMap(it => localizeIndices(resolveAndMap(it))))]
+        .filter(idx => !currentSet.has(idx))
+    : []
+
+  // Purple underline for the phrases of the CURRENT sentence's concepts — the
+  // terms shown in the panel right now. Solid (no blend) so it never mixes with
+  // the yellow sentence highlight.
+  const conceptTerms = (isActive && currentExplanation && !currentExplanation.is_placeholder)
+    ? (currentExplanation.concepts || []).map(c => c.term).filter(Boolean)
+    : []
+  const conceptUnderlines = (curPos >= 0 && conceptTerms.length)
+    ? localizeIndices(resolveAndMap(currentExplanation)).flatMap(li =>
+        conceptTerms.flatMap(term =>
+          phraseBoxes(block.sentences[li], term).map(toLocalRect)))
     : []
 
   const boxesFromIndices = (indices) =>
@@ -736,6 +750,21 @@ const BlockCrop = memo(function BlockCrop({
               key={`hl-${j}`}
               className="absolute rounded-sm bg-yellow-300/40 transition-all duration-300 ease-out"
               style={{ ...box, mixBlendMode: 'multiply' }}
+            />
+          ))}
+
+          {/* Purple underline — phrases of the current sentence's concepts. */}
+          {conceptUnderlines.map((r, j) => (
+            <div
+              key={`cu-${j}`}
+              className="absolute rounded-full"
+              style={{
+                left:   r.left,
+                top:    r.top + r.height - 2,
+                width:  r.width,
+                height: 2.5,
+                background: 'rgb(147,51,234)',
+              }}
             />
           ))}
 

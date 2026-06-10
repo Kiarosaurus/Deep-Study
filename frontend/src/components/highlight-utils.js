@@ -355,6 +355,48 @@ export function buildContinuationPayloads(blocks) {
 }
 
 
+// Sub-box(es) for a phrase INSIDE a sentence, reusing the same uniform-char-
+// width model the extractor used to clip sentence boxes (`_sentence_boxes`):
+// the sentence text is spread across its line boxes in proportion to each box's
+// width, then the term's char span is mapped to x-ranges within the overlapped
+// boxes. Exact for a single-line sentence; a close approximation across wrapped
+// lines. Returns page-coordinate boxes ({x0,y0,x1,y1}); empty when `term` is not
+// a literal substring of the sentence (e.g. the AI paraphrased it) — callers
+// just draw nothing then. Used to purple-underline the concepts being explained.
+export function phraseBoxes(sentence, term) {
+  const text = sentence?.text || ''
+  const boxes = sentence?.boxes || []
+  const needle = (term || '').trim()
+  if (!text || !boxes.length || !needle) return []
+  const at = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (at < 0) return []
+  const ts = at
+  const te = at + needle.length
+  const L = text.length || 1
+  const totalW = boxes.reduce((acc, b) => acc + Math.max(0, b.x1 - b.x0), 0)
+  if (totalW <= 0) return []
+  const out = []
+  let cumW = 0
+  for (const b of boxes) {
+    const w = Math.max(0, b.x1 - b.x0)
+    const cs = (cumW / totalW) * L          // approx first char on this line box
+    const ce = ((cumW + w) / totalW) * L    // approx char just past this line box
+    cumW += w
+    const os = Math.max(ts, cs)
+    const oe = Math.min(te, ce)
+    if (oe <= os) continue
+    const span = (ce - cs) || 1
+    out.push({
+      x0: b.x0 + ((os - cs) / span) * w,
+      y0: b.y0,
+      x1: b.x0 + ((oe - cs) / span) * w,
+      y1: b.y1,
+    })
+  }
+  return out
+}
+
+
 // At a chain boundary (where one block's sentences end and the next block's
 // begin in the merged array) a real sentence may have been split mid-clause
 // because per-block sentence segmentation ran independently. A boundary `b`

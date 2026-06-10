@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import LinearReader from './LinearReader'
 import PaginatedCanvas from './PaginatedCanvas'
 import SearchSelectionLayer from './SearchSelectionLayer'
-import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled } from './highlight-utils'
+import { resolveSentenceIndices, buildContinuationPayloads, mergedIndicesToOrig, logSentence, flagSentenceEnabled, phraseBoxes } from './highlight-utils'
 import { usePdfDocument } from './use-pdf-document'
 import { usePageCache } from './use-page-cache'
 import { useUiLang } from '../i18n/LanguageContext'
@@ -265,17 +265,20 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
             mergedToOrig,
           )
 
-        const currentIndices = (isActive && currentExplanation && ownLen)
-          ? localizeIndices(resolveAndMap(currentExplanation))
-          : []
+        // Yellow ACCUMULATES over every sentence read so far (carousel slots
+        // 0..curPos) and stays — stepping forward never reverts a read sentence
+        // to grey. Slots ahead of the cursor stay grey until reached. curPos is
+        // the active item's position; identity-matched in the shared items array.
+        const curPos = (isActive && currentExplanation && ownLen)
+          ? allItems.indexOf(currentExplanation) : -1
+        const readItems  = curPos >= 0 ? allItems.slice(0, curPos + 1)
+          : (isActive && currentExplanation && ownLen ? [currentExplanation] : [])
+        const aheadItems = curPos >= 0 ? allItems.slice(curPos + 1) : []
+        const currentIndices = [...new Set(readItems.flatMap(it => localizeIndices(resolveAndMap(it))))]
         const currentSet = new Set(currentIndices)
-
-        const otherIndices = (isActive && allItems.length && ownLen)
-          ? [...new Set(
-              allItems
-                .filter(it => it !== currentExplanation)
-                .flatMap(it => localizeIndices(resolveAndMap(it)))
-            )].filter(idx => !currentSet.has(idx))
+        const otherIndices = (isActive && ownLen)
+          ? [...new Set(aheadItems.flatMap(it => localizeIndices(resolveAndMap(it))))]
+              .filter(idx => !currentSet.has(idx))
           : []
 
         const boxesFromIndices = (indices) => indices.flatMap(idx =>
@@ -289,6 +292,22 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
 
         const otherBoxes     = boxesFromIndices(otherIndices)
         const highlightBoxes = boxesFromIndices(currentIndices)
+
+        // Purple underline for the phrases of the CURRENT sentence's concepts —
+        // exactly the terms shown in the panel right now. Drawn solid (no blend)
+        // so the purple never mixes with the yellow sentence highlight.
+        const conceptTerms = (isActive && currentExplanation && !currentExplanation.is_placeholder)
+          ? (currentExplanation.concepts || []).map(c => c.term).filter(Boolean)
+          : []
+        const conceptUnderlines = (curPos >= 0 && conceptTerms.length)
+          ? localizeIndices(resolveAndMap(currentExplanation)).flatMap(li =>
+              conceptTerms.flatMap(term =>
+                phraseBoxes(block.sentences[li], term).map(pb => ({
+                  left:  pb.x0 * scale,
+                  top:   pb.y1 * scale - 2,
+                  width: (pb.x1 - pb.x0) * scale,
+                }))))
+          : []
 
         if (isActive && currentExplanation && flagSentenceEnabled()) {
           logSentence('PdfViewer.highlight', {
@@ -357,6 +376,21 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   width:  box.width,
                   height: box.height,
                   mixBlendMode: 'multiply',
+                }}
+              />
+            ))}
+
+            {/* Subrayado morado — frases de los conceptos de la oración actual */}
+            {conceptUnderlines.map((u, j) => (
+              <div
+                key={`cu-${i}-${j}`}
+                className="absolute pointer-events-none rounded-full"
+                style={{
+                  left:   u.left,
+                  top:    u.top,
+                  width:  u.width,
+                  height: 2.5,
+                  background: 'rgb(147,51,234)',
                 }}
               />
             ))}
