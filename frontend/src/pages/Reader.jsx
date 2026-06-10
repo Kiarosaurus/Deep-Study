@@ -637,8 +637,8 @@ export default function Reader() {
   //   1. Pull it out of any lazo group — the rest stay merged when ≥2 remain,
   //      else the group dissolves.
   //   2. Pin it `allowMerges:false` (+ drop its own continuation) so the
-  //      AUTOMATIC continuation linker can never re-absorb it and it's barred
-  //      from new lazo merges. Returns EXACTLY the clicked object, standalone.
+  //      AUTOMATIC continuation linker can never re-absorb it. A manual lazo can
+  //      still re-group it. Returns EXACTLY the clicked object, standalone.
   const cutObject = useCallback((target) => {
     const key = overrideKeyOf(target)
     const memberKey = editKeyOf(target)
@@ -694,9 +694,12 @@ export default function Reader() {
       // Lazo: toggle the object in the selection buffer. Only explainables are
       // selectable — an image, or a non-ignored block (including injected
       // linear-only ones, keyed geometrically). A scissors-pinned object
-      // (allowMerges:false) refuses lazo until un-pinned. Commits on confirm.
+      // (allowMerges:false) opts OUT of the AUTOMATIC continuation linker only;
+      // the lazo can still re-group it manually — it grabs just itself, since the
+      // cut dropped it from its old chain (chainRefsByKey excludes pins), and the
+      // resulting merge group overrides the pin. Commits on confirm.
       const explainable = target.kind === 'image' || (target.kind === 'block' && target.role !== 'ignored')
-      if (!explainable || target.allowMerges === false) return
+      if (!explainable) return
       const selfRef = {
         key: editKeyOf(target),
         kind: target.kind,
