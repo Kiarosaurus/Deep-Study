@@ -767,18 +767,45 @@ export default function Reader() {
     if (mergeBuffer.length < 2) return
     const page = mergeBuffer[0].page
     if (mergeBuffer.some(m => m.page !== page)) return
-    const members = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, linearKey: m.linearKey, bbox: m.bbox, role: m.role }))
+    const bufMembers = mergeBuffer.map(m => ({ kind: m.kind, page: m.page, reading_index: m.reading_index, linearKey: m.linearKey, bbox: m.bbox, role: m.role }))
+
+    // If any selected object already belongs to a committed group, EXTEND that
+    // group (union its members with the buffer) rather than spawning a second,
+    // overlapping group — else the shared element lives in two groups and
+    // mergeMembership (last-writer-wins) corrupts. Several overlapped groups
+    // collapse into one. Existing members keep their order; new ones append.
+    const prevGroups = edits.mergeGroups || []
+    const bufKeys = new Set(bufMembers.map(editKeyOf))
+    const overlapping = prevGroups.filter(g => g.members.some(m => bufKeys.has(editKeyOf(m))))
+    const seen = new Set()
+    const members = []
+    for (const g of overlapping) for (const m of g.members) {
+      const k = editKeyOf(m); if (!seen.has(k)) { seen.add(k); members.push(m) }
+    }
+    for (const m of bufMembers) {
+      const k = editKeyOf(m); if (!seen.has(k)) { seen.add(k); members.push(m) }
+    }
+    if (members.length < 2 || members.some(m => m.page !== page)) return
+
     const resultRole = resolveMergedRole(
       members.map(m => m.role || (m.kind === 'image' ? 'figure' : 'paragraph')),
     )
-    const id = `mg-${page}-${members.map(m => editKeyOf(m).replace(/[^\w]/g, '')).join('-')}`
+    // Reuse the first overlapped group's id so its identity stays stable across
+    // the extend; a fresh group derives a deterministic id from its members.
+    const id = overlapping[0]?.id
+      || `mg-${page}-${members.map(m => editKeyOf(m).replace(/[^\w]/g, '')).join('-')}`
+    const removed = new Set(overlapping.map(g => g.id))
+    const nextGroups = [
+      ...prevGroups.filter(g => !removed.has(g.id) && g.id !== id),
+      { id, members, resultRole },
+    ]
     commitEdit({
-      apply: () => setEdits(e => ({ ...e, mergeGroups: [...(e.mergeGroups || []).filter(g => g.id !== id), { id, members, resultRole }] })),
-      revert: () => setEdits(e => ({ ...e, mergeGroups: (e.mergeGroups || []).filter(g => g.id !== id) })),
+      apply: () => setEdits(e => ({ ...e, mergeGroups: nextGroups })),
+      revert: () => setEdits(e => ({ ...e, mergeGroups: prevGroups })),
     })
     clearMergeBuffer()
     disarm()  // effective merge → auto-disarm
-  }, [mergeBuffer, commitEdit, clearMergeBuffer, disarm])
+  }, [mergeBuffer, edits, commitEdit, clearMergeBuffer, disarm])
 
   // Reverse bridge for tracking-mode editing: per linear block, the page-
   // projection identity it maps to (by bbox overlap) plus its lazo state.
