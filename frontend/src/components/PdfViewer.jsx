@@ -120,6 +120,18 @@ function groupExplainTitle(t, membership, fallback) {
 // so re-typing a block to one of these (e.g. footnote) drops its ✦.
 const _METADATA_ROLES = new Set(['ignored', 'footnote', 'title', 'author', 'section_header'])
 
+// Lazo/edit click-catchers stack by z-index, smallest element on top: a small
+// block nested inside a bigger one would otherwise be unreachable because the
+// larger element's catcher covers it. Inverse-area mapping in PDF points,
+// clamped to a bounded band (ties among tiny elements fall back to DOM order).
+// Only armed-mode surfaces use it — the ✦ (z=30) is hidden while a tool is
+// armed, so the catcher band may exceed it without masking the explain button.
+function overlapZIndex(box) {
+  if (!box) return 1
+  const area = Math.max(1, (box.x1 - box.x0) * (box.y1 - box.y0))
+  return Math.min(9999, Math.max(1, Math.round(1e6 / area)))
+}
+
 function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBase = 0, chainPayloads, chainIds, scale, onExplain, activeParagraph, currentExplanation, explanation, hoveredChain, onHoveredChainChange, armedTool = null, onBlockEdit, mergeSelectedKeys, mergeMembership, onExplainGroup, hoveredGroup = null, onHoveredGroupChange }) {
   const { t } = useUiLang()
   const [hoveredImgIdx, setHoveredImgIdx] = useState(null)
@@ -191,6 +203,9 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
         if (paragraphBoxes.length === 0) return null
         const isLeader = groupLeader[i] === i
         const unionBox = groupUnion.get(groupLeader[i])
+        // Smaller elements get a higher catcher z so the lazo can reach a block
+        // nested inside a larger one.
+        const overlapZ = overlapZIndex(unionBox)
         // Lazo identity for this block + its committed merge-group membership.
         // Linear-only injected blocks have no reading_index; key them on their
         // geometric linearKey (kept in sync with Reader.editKeyOf) so the lazo
@@ -402,6 +417,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   top:    unionBox.y0 * scale,
                   width:  (unionBox.x1 - unionBox.x0) * scale,
                   height: (unionBox.y1 - unionBox.y0) * scale,
+                  zIndex: overlapZ,
                   background: 'rgba(59,130,246,0.2)',
                   border: '1px solid rgba(59,130,246,0.7)',
                   cursor: 'crosshair',
@@ -462,6 +478,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                   top:    unionBox.y0 * scale,
                   width:  (unionBox.x1 - unionBox.x0) * scale,
                   height: (unionBox.y1 - unionBox.y0) * scale,
+                  zIndex: overlapZ,
                   cursor: 'crosshair',
                   background: 'transparent',
                   border: '1px solid transparent',
@@ -514,6 +531,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
       {(images ?? []).map((img, i) => {
         const b = img.bbox
         if (!b) return null
+        const overlapZ = overlapZIndex(b)
         const isHovered  = hoveredImgIdx === i
         const left       = b.x0 * scale
         const top        = b.y0 * scale
@@ -588,6 +606,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 className="absolute pointer-events-auto rounded-sm transition-colors"
                 style={{
                   left, top, width, height,
+                  zIndex: overlapZ,
                   cursor: 'crosshair', background: 'transparent', border: '1px solid transparent',
                 }}
                 onMouseEnter={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.12)'; e.currentTarget.style.borderColor = 'rgba(99,102,241,0.5)' }}
@@ -603,6 +622,7 @@ function ParagraphOverlay({ blocks, images = [], paintTargets = [], page, flatBa
                 className="absolute pointer-events-auto rounded-sm"
                 style={{
                   left, top, width, height,
+                  zIndex: overlapZ,
                   background: 'rgba(59,130,246,0.2)',
                   border: '1px solid rgba(59,130,246,0.7)',
                   cursor: 'crosshair',
